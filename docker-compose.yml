@@ -1,0 +1,121 @@
+# AgentPod 标准部署编排（集群模式）
+#
+# 默认配置面向本地开发（NODE_ENV=development, LLM_MODE=faux, AUTH_MODE=dev）。
+# 生产部署时通过 .env 或环境变量覆盖，例如：
+#   NODE_ENV=production AUTH_MODE=password LLM_MODE=direct docker compose up -d
+#
+# 启动全部服务：
+#   docker compose up -d
+#
+# 查看日志：
+#   docker compose logs -f agent
+#   docker compose logs -f worker
+#   docker compose logs -f manager
+
+services:
+  # ── Agent 主服务 ──────────────────────────────────────────────────
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agentpod-agent
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8787}:${PORT:-8787}"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=${PORT:-8787}
+      - LLM_MODE=${LLM_MODE:-faux}
+      - AUTH_MODE=${AUTH_MODE:-dev}
+      - DEV_CONSOLE=1
+      # 集群模式：通过 manager 调度 worker
+      - SANDBOX_MODE=manager
+      - SANDBOX_MANAGER_URL=http://manager:3000
+      - SANDBOX_MANAGER_CODE=${SANDBOX_MANAGER_CODE:-dev-api-code}
+    volumes:
+      - workspace-data:/data/ap-workspace
+      - agent-data:/home/agent/.agentpod
+    depends_on:
+      manager:
+        condition: service_started
+
+  # ── Sandbox Worker ────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: sandbox-worker/Dockerfile
+    container_name: agentpod-worker
+    restart: unless-stopped
+    privileged: true
+    ports:
+      - "${WORKER_PORT:-8080}:8080"
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=8080
+      - SANDBOX_SLOTS=${SANDBOX_SLOTS:-2}
+      - SANDBOX_TOKEN=${SANDBOX_TOKEN:-dev-shared-token}
+      - ALLOW_ANONYMOUS=${ALLOW_ANONYMOUS:-0}
+      - SANDBOX_WORK_ROOT=/var/tmp/ap-sandbox
+      - BROWSER_ENABLED=${BROWSER_ENABLED:-1}
+      - PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+      # 向 manager 注册并周期心跳
+      - SANDBOX_MANAGER_URL=http://manager:3000
+      - SANDBOX_MANAGER_CODE=${SANDBOX_MANAGER_CODE:-dev-api-code}
+      - SANDBOX_TICKET_SECRET=${SANDBOX_TICKET_SECRET:-dev-ticket-secret}
+      # worker 在集群内的可达地址（manager 调度后 agent 直连此地址）
+      - SANDBOX_ADVERTISE_BASE=http://worker:8080
+      # Docker Desktop 的内嵌 DNS 在 slot 的 netns 里不可达，需指定真实 DNS
+      - SANDBOX_DNS_SERVERS=${SANDBOX_DNS_SERVERS:-8.8.8.8,1.1.1.1}
+    volumes:
+      - worker-data:/var/tmp/ap-sandbox
+    depends_on:
+      manager:
+        condition: service_started
+
+  # ── Sandbox Manager（集群管理台）──────────────────────────────────
+  manager:
+    build:
+      context: ./sandbox-manager
+      dockerfile: Dockerfile
+    container_name: agentpod-manager
+    restart: unless-stopped
+    ports:
+      - "${MANAGER_PORT:-3000}:3000"
+    env_file:
+      - path: ./sandbox-manager/.env
+        required: false
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=3000
+      - REDIS_URL=redis://redis:6379
+      # 票据密钥（manager 签发、worker 校验，必须一致）
+      - SANDBOX_TICKET_SECRET=${SANDBOX_TICKET_SECRET:-dev-ticket-secret}
+      # API 鉴权码（worker 和 agent 用它访问 manager 的调度接口）
+      - API_SECURITY_CODES=${SANDBOX_MANAGER_CODE:-dev-api-code}
+      # 沙盒出站策略：open=自由访问，allowlist=白名单拦截
+      - SANDBOX_EGRESS_MODE=${SANDBOX_EGRESS_MODE:-open}
+      # 管理台登录账号
+      - CONSOLE_USERS=${CONSOLE_USERS:-admin:changeme}
+    depends_on:
+      redis:
+        condition: service_started
+
+  # ── Redis（Manager 状态存储）─────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: agentpod-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+
+volumes:
+  workspace-data:
+  agent-data:
+  worker-data:
+  redis-data:

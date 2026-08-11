@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="light dark" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<title>AgentPod</title>
+<!--
+  首屏主题在解析 JS 之前就定下来。
+  放在 body 之前是刻意的：等 Vue 挂载再切换的话，深色模式用户每次刷新都会被
+  一帧白底闪一下（FOUC），而那一帧恰好是全屏的。
+-->
+<script>
+  (function () {
+    try {
+      var saved = localStorage.getItem('ap.theme')
+      var dark = saved ? saved === 'dark'
+        : window.matchMedia('(prefers-color-scheme: dark)').matches
+      document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+    } catch (e) {
+      document.documentElement.dataset.theme = 'light'
+    }
+  })()
+</script>
+</head>
+<body>
+<div id="app"></div>
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>

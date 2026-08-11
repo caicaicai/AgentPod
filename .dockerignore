@@ -1,0 +1,11 @@
+.git
+.env
+.env.dev
+.env.local
+**/node_modules
+web/dist
+*.log
+test/
+sandbox-worker/test/
+sandbox-manager/
+docs/

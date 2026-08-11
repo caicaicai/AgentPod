@@ -1,0 +1,15 @@
+node_modules/
+web/node_modules/
+web/dist/
+dist/
+test/
+docs/
+modules/
+workers/
+.env
+.env.local
+web/.env.local
+*.md
+.git/
+.gitignore
+docker-compose.yml

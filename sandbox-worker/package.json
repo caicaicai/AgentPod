@@ -1,0 +1,13 @@
+{
+  "name": "ap-sandbox-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "云端 Agent 的执行沙盒 worker：固定副本、租约独占、跑完即抹",
+  "engines": { "node": ">=20.11" },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "ALLOW_ANONYMOUS=1 SANDBOX_WORK_ROOT=./.work node src/index.js",
+    "test": "node --test --test-concurrency=1"
+  }
+}

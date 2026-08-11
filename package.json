@@ -1,0 +1,29 @@
+{
+  "name": "ap-cloud-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "云端 Agent 服务：pi 引擎 + 服务端多租户无状态执行（B/S）",
+  "type": "module",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --env-file=.env.dev --watch src/index.js",
+    "dev:sandbox": "node --env-file=.env.sandbox --watch src/index.js",
+    "web:install": "npm --prefix web ci",
+    "web:build": "npm --prefix web run build",
+    "web:dev": "npm --prefix web run dev",
+    "test": "node --test",
+    "check:isolation": "node scripts/check-isolation-rules.js",
+    "check": "npm run check:isolation && npm test"
+  },
+  "dependencies": {
+    "@mariozechner/pi-ai": "^0.73.0",
+    "@mariozechner/pi-coding-agent": "^0.73.0"
+  },
+  "optionalDependencies": {
+    "mysql2": "^3.11.0"
+  }
+}

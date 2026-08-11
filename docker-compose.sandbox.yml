@@ -1,0 +1,85 @@
+# 仅启动沙盒基础设施（manager + worker + redis）
+#
+# 适用于本地开发：agent 在宿主机以 `node src/index.js` 直接运行，
+# 沙盒集群由容器提供。
+#
+# 启动：
+#   docker compose -f docker-compose.sandbox.yml up -d
+#
+# 查看日志：
+#   docker compose -f docker-compose.sandbox.yml logs -f
+#
+# Agent 侧需要配置以下环境变量连接沙盒集群：
+#   SANDBOX_MODE=manager
+#   SANDBOX_MANAGER_URL=http://localhost:3000
+#   SANDBOX_MANAGER_CODE=dev-api-code
+
+services:
+  # ── Sandbox Worker ────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: sandbox-worker/Dockerfile
+    container_name: agentpod-worker
+    restart: unless-stopped
+    privileged: true
+    ports:
+      - "${WORKER_PORT:-8080}:8080"
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=8080
+      - SANDBOX_SLOTS=${SANDBOX_SLOTS:-2}
+      - SANDBOX_TOKEN=${SANDBOX_TOKEN:-dev-shared-token}
+      - ALLOW_ANONYMOUS=${ALLOW_ANONYMOUS:-0}
+      - SANDBOX_WORK_ROOT=/var/tmp/ap-sandbox
+      - BROWSER_ENABLED=${BROWSER_ENABLED:-1}
+      - PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+      - SANDBOX_MANAGER_URL=http://manager:3000
+      - SANDBOX_MANAGER_CODE=${SANDBOX_MANAGER_CODE:-dev-api-code}
+      - SANDBOX_TICKET_SECRET=${SANDBOX_TICKET_SECRET:-dev-ticket-secret}
+      - SANDBOX_ADVERTISE_BASE=http://localhost:8080
+      - SANDBOX_DNS_SERVERS=${SANDBOX_DNS_SERVERS:-8.8.8.8,1.1.1.1}
+    volumes:
+      - worker-data:/var/tmp/ap-sandbox
+    depends_on:
+      manager:
+        condition: service_started
+
+  # ── Sandbox Manager（集群管理台）──────────────────────────────────
+  manager:
+    build:
+      context: ./sandbox-manager
+      dockerfile: Dockerfile
+    container_name: agentpod-manager
+    restart: unless-stopped
+    ports:
+      - "${MANAGER_PORT:-3000}:3000"
+    env_file:
+      - path: ./sandbox-manager/.env
+        required: false
+    environment:
+      - NODE_ENV=${NODE_ENV:-development}
+      - PORT=3000
+      - REDIS_URL=redis://redis:6379
+      - SANDBOX_TICKET_SECRET=${SANDBOX_TICKET_SECRET:-dev-ticket-secret}
+      - API_SECURITY_CODES=${SANDBOX_MANAGER_CODE:-dev-api-code}
+      - SANDBOX_EGRESS_MODE=${SANDBOX_EGRESS_MODE:-open}
+      - CONSOLE_USERS=${CONSOLE_USERS:-admin:changeme}
+    depends_on:
+      redis:
+        condition: service_started
+
+  # ── Redis（Manager 状态存储）─────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: agentpod-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+
+volumes:
+  worker-data:
+  redis-data:

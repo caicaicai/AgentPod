@@ -1,0 +1,144 @@
+/* 设计变量 + 全局基线。有意不引 Tailwind：这个管理台一共四个页面，
+   为它多担一条构建链和一份依赖，不如几百行手写 CSS 直接。 */
+
+:root {
+  color-scheme: light dark;
+
+  --bg: #f6f7f9;
+  --bg-elevated: #ffffff;
+  --bg-sunken: #eef0f4;
+  --border: #dfe3e9;
+  --border-strong: #c6ccd6;
+
+  --text: #1b1f27;
+  --text-muted: #646c7a;
+  --text-faint: #8b93a1;
+
+  --accent: #2f6df6;
+  --accent-soft: #e8f0ff;
+
+  --ok: #17864a;
+  --ok-soft: #e3f5eb;
+  --warn: #a8690a;
+  --warn-soft: #fdf1dc;
+  --error: #c0362c;
+  --error-soft: #fdeae8;
+  --neutral-soft: #eceff3;
+
+  --radius: 8px;
+  --radius-sm: 5px;
+  --shadow: 0 1px 2px rgba(20, 26, 38, 0.06), 0 4px 12px rgba(20, 26, 38, 0.05);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171c;
+    --bg-elevated: #1c2027;
+    --bg-sunken: #23282f;
+    --border: #2e343d;
+    --border-strong: #414954;
+
+    --text: #e6e9ee;
+    --text-muted: #9aa3b1;
+    --text-faint: #6f7885;
+
+    --accent: #6f9dff;
+    --accent-soft: #1e2a44;
+
+    --ok: #52c98a;
+    --ok-soft: #16301f;
+    --warn: #e0a54a;
+    --warn-soft: #33260f;
+    --error: #f0796d;
+    --error-soft: #3a1b18;
+    --neutral-soft: #262b33;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 12px rgba(0, 0, 0, 0.25);
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-elevated);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 5px 12px;
+  transition: background 0.12s, border-color 0.12s;
+}
+button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+button.primary:hover:not(:disabled) { filter: brightness(1.08); color: #fff; }
+button.danger { color: var(--error); border-color: var(--error); }
+button.danger:hover:not(:disabled) { background: var(--error-soft); color: var(--error); }
+
+input, select, textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+}
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid var(--accent-soft);
+  border-color: var(--accent);
+}
+
+code, .mono { font-family: var(--mono); font-size: 0.92em; }
+
+.card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.muted { color: var(--text-muted); }
+.faint { color: var(--text-faint); }
+
+.section-title {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+table { border-collapse: collapse; width: 100%; }
+th {
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+tbody tr:last-child td { border-bottom: none; }

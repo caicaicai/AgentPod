@@ -1,0 +1,9 @@
+node_modules/
+dist/
+dist.zip
+.env
+.env.local
+*.local
+
+# 部署令牌在里面，绝对不能提交（平台文档也是这么要求的）
+.speedloop.json

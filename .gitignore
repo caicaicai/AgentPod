@@ -1,0 +1,13 @@
+node_modules/
+.env
+.env.sandbox
+.env.local
+.env.dev1
+**/.env.dev
+*.log
+dist/
+coverage/
+.vite/
+data/
+
+.cursorrules

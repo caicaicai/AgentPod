@@ -1,0 +1,26 @@
+{
+  "name": "sandbox-manager-console",
+  "version": "0.1.0",
+  "private": true,
+  "description": "沙盒集群管理台：集群总览、节点摘除、调度试算、配置自检",
+  "type": "module",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "dev": "vite",
+    "dev:live": "vite --mode live",
+    "build": "vite build",
+    "preview": "vite preview",
+    "deploy": "speed deploy frontend"
+  },
+  "dependencies": {
+    "marked": "^18.0.7",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.0.7"
+  }
+}

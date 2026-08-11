@@ -1,0 +1,26 @@
+# sandbox-manager 单独部署编排（也可使用仓库根的 docker-compose.yml 统一启动）
+services:
+  manager:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_started
+    environment:
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis:6379
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+
+volumes:
+  redis-data:
