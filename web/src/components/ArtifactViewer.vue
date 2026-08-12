@@ -6,6 +6,7 @@ import { copyToClipboard } from '../lib/debug-bundle.js'
 import {
   PREVIEW_SANDBOX, buildPreviewDoc, downloadText, needsFrame, supportsInspect,
 } from '../lib/artifact-view.js'
+import { detectLanguage, tokenize } from '../lib/highlight.js'
 import {
   askAboutElement, clearPick, deleteArtifact, openArtifact, setPick, setPicking, state,
 } from '../stores/app.js'
@@ -113,6 +114,18 @@ const kb = (bytes) => (bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${by
  * （`components/` 下四五个文件），平铺出来一列全是同一个前缀，
  * 真正要认的文件名反而被挤到看不见。
  */
+/**
+ * 当前文件的高亮片段。
+ *
+ * 产出的是**片段数组**而不是 HTML 字符串，模板里用插值渲染成 span ——
+ * 全程没有一处 v-html。源码是模型生成的，那条"父页面只经手字符串"的规矩
+ * 在这儿同样成立（见 lib/highlight.js 开头）。
+ */
+const highlighted = computed(() => {
+  if (!current.value) return []
+  return tokenize(current.value.content, detectLanguage(current.value.path, meta.value?.language))
+})
+
 const fileGroups = computed(() => {
   const groups = new Map()
   for (const file of files.value) {
@@ -331,7 +344,11 @@ watch(() => [meta.value?.id, detail.value?.version, tab.value].join(':'), clearP
             </button>
           </template>
         </nav>
-        <pre class="source">{{ current ? current.content : '' }}</pre>
+        <pre class="source"><code><span
+          v-for="(token, index) in highlighted"
+          :key="index"
+          :class="token.t && `tk-${token.t}`"
+        >{{ token.text }}</span></code></pre>
       </div>
     </template>
   </div>
@@ -704,6 +721,37 @@ watch(() => [meta.value?.id, detail.value?.version, tab.value].join(':'), clearP
   .filerow.nested {
     padding-left: 8px;
   }
+}
+
+/*
+  配色跟着主题走：作品的源码页和界面其余部分在同一块屏幕上，
+  硬塞一套编辑器主题（深色底）会让它在浅色界面里像贴了张膏药。
+*/
+.tk-com {
+  color: color-mix(in srgb, var(--muted-foreground) 85%, transparent);
+  font-style: italic;
+}
+.tk-str {
+  color: var(--hl-str);
+}
+.tk-num {
+  color: var(--hl-num);
+}
+.tk-word {
+  color: var(--hl-key);
+  font-weight: 500;
+}
+.tk-fn {
+  color: var(--hl-fn);
+}
+.tk-tag {
+  color: var(--hl-key);
+}
+.tk-attr {
+  color: var(--hl-fn);
+}
+.tk-punc {
+  color: var(--muted-foreground);
 }
 
 .source {

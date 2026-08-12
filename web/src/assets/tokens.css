@@ -51,10 +51,20 @@
   */
   --head-h: 54px;
 
+  /* 源码高亮。浅色一套、深色一套，与界面同一套底色，不外挂编辑器主题 */
+  --hl-key: #7c3aed;
+  --hl-str: #0f766e;
+  --hl-num: #b45309;
+  --hl-fn: #1d4ed8;
+
   color-scheme: light;
 }
 
 :root[data-theme="dark"] {
+  --hl-key: #c4b5fd;
+  --hl-str: #6ee7b7;
+  --hl-num: #fcd34d;
+  --hl-fn: #93c5fd;
   --background: #0b0b0d;
   --foreground: #f4f4f5;
   --secondary: #1d1d21;
