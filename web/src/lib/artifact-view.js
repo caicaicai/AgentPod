@@ -61,6 +61,60 @@ export function needsFrame(kind) {
 }
 
 /**
+ * 作品库的筛选。
+ *
+ * 抽成纯函数而不是写在组件的 computed 里：它决定"我的东西找不找得到"，
+ * 是这个页面唯一真正有逻辑的地方，值得被测试直接盯住。
+ *
+ * 搜索同时匹配**标题和文件名** —— 记不住标题但记得"那个 Chart.vue"是很常见的，
+ * 只搜标题会让人以为作品被删了。
+ */
+export function filterArtifacts(list = [], { q = '', kind = '' } = {}) {
+  const keyword = String(q).trim().toLowerCase()
+  return list.filter((item) => {
+    if (kind && item.kind !== kind) return false
+    if (!keyword) return true
+    if (String(item.title || '').toLowerCase().includes(keyword)) return true
+    const current = (item.versions || []).find((version) => version.n === item.version)
+    return (current?.files || []).some((file) => file.path.toLowerCase().includes(keyword))
+  })
+}
+
+/**
+ * 创建指引。
+ *
+ * ── 为什么这一页必须存在 ────────────────────────────────────────────────
+ *
+ * 作品是**模型产出的**，没有"新建"按钮。用户打开一个空列表时，本能是找那个按钮，
+ * 找不到就得出结论"这功能还没做好"。所以空状态不能只写一句"还没有作品"——
+ * 它得把"怎么来的"讲清楚，并且给几句能**直接点**的话术。
+ *
+ * 每条都写成用户会真的说出口的样子，而不是功能名的罗列。
+ */
+export const ARTIFACT_STARTERS = [
+  {
+    kind: 'web',
+    title: '做一个能用的小工具',
+    prompt: '帮我做一个网页版的贷款计算器：输入本金、年利率、期数，实时算出月供和总利息，样式简洁一点。',
+  },
+  {
+    kind: 'vue',
+    title: '写一个 Vue 组件',
+    prompt: '用 Vue 3 写一个可复用的数据表格组件：支持排序、分页和空状态，拆成 App.vue + components/ 下的子组件。',
+  },
+  {
+    kind: 'markdown',
+    title: '整理一份文档',
+    prompt: '把我们刚才聊的内容整理成一份方案文档，要有背景、目标、方案对比表格和落地步骤。',
+  },
+  {
+    kind: 'mermaid',
+    title: '画一张流程图',
+    prompt: '把用户下单到发货的流程画成一张流程图，包含支付失败和缺货两个分支。',
+  },
+]
+
+/**
  * 文档内的 CSP。
  *
  * `'unsafe-inline'` / `'unsafe-eval'` 是必须给的：作品本来就是一份内联脚本的

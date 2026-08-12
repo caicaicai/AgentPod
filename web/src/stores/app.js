@@ -86,8 +86,22 @@ export const state = reactive({
   cronNoteWarn: false,
 
   // ── 作品 ──
+  /**
+   * 主视图。`chat` = 对话，`artifacts` = 作品库。
+   *
+   * 作品库是**独立入口**而不是又一个抽屉：抽屉是"边聊边看这一轮的产出"，
+   * 而"上周做的那个报表在哪"是另一件事 —— 它跟当前聊到哪儿没有关系，
+   * 挤在对话右边那条缝里也翻不动。
+   */
+  view: 'chat',
   /** 当前会话的作品清单（不含正文） */
   artifacts: [],
+  /** 作品库里的全部作品（跨会话）。与上面那份分开存，因为口径不同 */
+  libraryArtifacts: [],
+  librarySearch: '',
+  /** 类型筛选，空串 = 全部 */
+  libraryKind: '',
+  libraryLoading: false,
   /** 服务端下发的预览约束，前端拿它拼 iframe 的 CSP，不在这边硬编 */
   artifactPreview: { allowedOrigins: [] },
   /** 面板里打开的那一份：{ meta, version, content, fileName } */
@@ -264,6 +278,8 @@ export async function refreshSessions() {
 
 export async function openSession(key) {
   if (state.live) return // 正在跑的时候切会话会把流式结果丢在半路
+  // 在作品库里点会话列表 = "我要去看那条对话"，得先回到对话视图
+  state.view = 'chat'
   saveDraft() // 先把当前这条的草稿收好，再换人
   state.activeKey = key
   state.turns = []
@@ -292,6 +308,7 @@ export async function openSession(key) {
 
 export function startNewSession() {
   if (state.live) return
+  state.view = 'chat'
   saveDraft()
   state.activeKey = newSessionKey()
   state.pendingNew = true
@@ -602,13 +619,14 @@ export async function refreshArtifacts() {
  */
 export async function openArtifact(id, version = 0) {
   if (!id) return
-  state.panel = 'artifact'
+  // 作品库里是就地展开成整页，不该再弹一个抽屉出来盖住自己
+  if (state.view !== 'artifacts') state.panel = 'artifact'
   state.artifactLoading = true
   state.artifactNote = ''
   try {
     const detail = await api.getArtifact(id, version)
-    // 请求飞行途中用户又点了别的：这份正文已经不是他要看的了，丢掉
-    if (state.panel !== 'artifact') return
+    // 请求飞行途中用户把抽屉关了：这份内容已经不是他要看的了，丢掉
+    if (state.view !== 'artifacts' && state.panel !== 'artifact') return
     state.artifactDetail = detail
   } catch (error) {
     state.artifactDetail = null
@@ -616,6 +634,66 @@ export async function openArtifact(id, version = 0) {
   } finally {
     state.artifactLoading = false
   }
+}
+
+/* ── 作品库（独立入口）── */
+
+/**
+ * 打开作品库。
+ *
+ * **进来先清掉正在看的那一份**：从对话侧栏点进来时，抽屉里可能还停在上一次
+ * 打开的作品上，不清的话用户会看到一个跟他刚点的动作对不上的详情页。
+ */
+export async function openLibrary() {
+  state.view = 'artifacts'
+  state.panel = ''
+  state.artifactDetail = null
+  await refreshLibrary()
+}
+
+export function closeLibrary() {
+  state.view = 'chat'
+  state.artifactDetail = null
+}
+
+export async function refreshLibrary() {
+  if (!state.features.artifacts) return
+  state.libraryLoading = true
+  try {
+    // 不传 sessionKey = 这个人的全部作品（接口本来就支持，不用为它加后端）
+    const data = await api.listArtifacts()
+    state.libraryArtifacts = data.artifacts || []
+    state.artifactPreview = data.preview || { allowedOrigins: [] }
+    state.artifactNote = ''
+  } catch (error) {
+    state.artifactNote = `作品库加载失败：${error.message}`
+  } finally {
+    state.libraryLoading = false
+  }
+}
+
+/**
+ * 从作品跳回它所属的那条对话。
+ *
+ * 作品库里最常见的下一个动作就是"接着改它"，而改它要回到有上下文的那条会话 ——
+ * 在别的会话里说"把标题改成…"，模型根本不知道你说的是哪一份。
+ */
+export async function openArtifactSession(sessionKey) {
+  closeLibrary()
+  await openSession(sessionKey)
+}
+
+/**
+ * 照着指引开一份新的。
+ *
+ * **没有"新建作品"按钮**，因为作品是模型产出的，不是用户手填的表单。
+ * 所以这里做的是：回到对话、开一条新的、把话术填进输入框 —— 让用户看到
+ * "原来是这么要的"，而不是对着一个空列表猜。
+ */
+export function startArtifactFrom(prompt) {
+  closeLibrary()
+  startNewSession()
+  state.draft = prompt
 }
 
 export function toggleArtifactFull() {
@@ -649,7 +727,9 @@ export async function deleteArtifact(id) {
     return
   }
   if (state.artifactDetail?.meta?.id === id) state.artifactDetail = null
+  // 两份清单口径不同（本会话 / 全部），删完都要跟上，否则另一处还挂着一张已经没了的卡片
   await refreshArtifacts()
+  if (state.view === 'artifacts') await refreshLibrary()
 }
 
 /* ═══════════════ 模型 / 技能 / 身份 ═══════════════ */

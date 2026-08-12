@@ -2,6 +2,7 @@
 import { onMounted, onBeforeUnmount } from 'vue'
 
 import AppSidebar from './components/AppSidebar.vue'
+import ArtifactLibrary from './components/ArtifactLibrary.vue'
 import ArtifactPanel from './components/ArtifactPanel.vue'
 import ChatThread from './components/ChatThread.vue'
 import CronPanel from './components/CronPanel.vue'
@@ -11,7 +12,7 @@ import LoginOverlay from './components/LoginOverlay.vue'
 import MemoryPanel from './components/MemoryPanel.vue'
 import ProjectPanel from './components/ProjectPanel.vue'
 import SkillsPanel from './components/SkillsPanel.vue'
-import { boot, saveDraft, state, stop } from './stores/app.js'
+import { boot, closeArtifactDetail, closeLibrary, saveDraft, state, stop } from './stores/app.js'
 
 onMounted(boot)
 
@@ -23,6 +24,12 @@ function onKeydown(event) {
   if (event.key !== 'Escape') return
   if (state.lightbox) { state.lightbox = ''; return }
   if (state.panel) { state.panel = ''; return }
+  // 作品库里逐层退：详情 → 列表 → 对话。一步退到底会让人丢掉刚翻到的位置
+  if (state.view === 'artifacts') {
+    if (state.artifactDetail) closeArtifactDetail()
+    else closeLibrary()
+    return
+  }
   if (state.live) stop()
 }
 
@@ -45,7 +52,12 @@ onBeforeUnmount(() => {
   <LoginOverlay v-if="state.needLogin" />
   <div v-else class="layout" :class="{ 'sidebar-collapsed': state.sidebarCollapsed }">
     <AppSidebar />
-    <ChatThread />
+    <!--
+      作品库**替换**主区域而不是盖在上面：它是与对话并列的一个去处，
+      不是对话的一个弹层。会话列表留着，方便从库里跳回某条对话。
+    -->
+    <ArtifactLibrary v-if="state.view === 'artifacts'" />
+    <ChatThread v-else />
 
     <SkillsPanel v-if="state.panel === 'skills'" />
     <MemoryPanel v-else-if="state.panel === 'memory'" />

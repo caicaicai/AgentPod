@@ -6,7 +6,7 @@ import SessionRow from './SessionRow.vue'
 import {
   createProject, deleteSession, getDevUsername, identityName, logout, openSession, patchSession,
   renameSession, scheduleSearch, setDevUsername, startNewSession, state, switchProject,
-  toggleTheme, togglePanel,
+  toggleTheme, togglePanel, openLibrary,
 } from '../stores/app.js'
 
 /** 置顶的单独成组：它们是用户手动钉上去的，混在时间序里就等于没钉 */
@@ -192,9 +192,15 @@ function onDevUsernameChange(event) {
         既看不到它存在，也无从确认它有没有生效 —— 一个要靠模型先产出点什么
         才肯现身的入口，等于没有入口。
       -->
-      <button v-if="state.features.artifacts" type="button" class="navrow" @click="togglePanel('artifact')">
+      <button
+        v-if="state.features.artifacts"
+        type="button"
+        class="navrow"
+        :class="{ on: state.view === 'artifacts' }"
+        @click="openLibrary"
+      >
         <AppIcon name="app-window" :size="16" /><span>作品</span>
-        <span class="pill">{{ state.artifacts.length || 0 }}</span>
+        <span class="pill">{{ state.libraryArtifacts.length || state.artifacts.length || 0 }}</span>
       </button>
 
       <div class="identity">
@@ -483,6 +489,12 @@ function onDevUsernameChange(event) {
   cursor: pointer;
   transition: background 0.12s ease, color 0.12s ease;
 }
+/* 作品库是一个"去处"而不是一次动作，所以要有选中态 —— 否则用户不知道自己在哪 */
+.navrow.on {
+  background: color-mix(in srgb, var(--brand-accent) 12%, transparent);
+  color: var(--foreground);
+}
+
 .navrow:hover {
   background: var(--secondary);
   color: var(--foreground);

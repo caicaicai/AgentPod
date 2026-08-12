@@ -15,7 +15,9 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { PREVIEW_SANDBOX, buildPreviewDoc, kindLabel, needsFrame } from '../web/src/lib/artifact-view.js'
+import {
+  ARTIFACT_STARTERS, PREVIEW_SANDBOX, buildPreviewDoc, filterArtifacts, kindLabel, needsFrame,
+} from '../web/src/lib/artifact-view.js'
 import { resolvePath } from '../web/src/lib/artifact-vue.js'
 import { layoutBlocks, readArtifactCard, toolBrief } from '../web/src/lib/tools.js'
 
@@ -262,5 +264,69 @@ describe('类型标签', () => {
     assert.equal(kindLabel({ kind: 'web' }), '网页')
     assert.equal(kindLabel({ kind: 'vue' }), 'Vue 组件')
     assert.equal(kindLabel({ kind: 'markdown' }), '文档')
+  })
+})
+
+/**
+ * 作品库的筛选。这是那个页面唯一有逻辑的地方，而它决定"我的东西找不找得到" ——
+ * 搜不到比没有搜索更糟：用户会以为作品被删了。
+ */
+describe('作品库', () => {
+  const list = [
+    {
+      id: 'a1', title: '销售看板', kind: 'web', version: 2,
+      versions: [{ n: 1, files: [] }, { n: 2, files: [{ path: 'index.html' }, { path: 'app.js' }] }],
+    },
+    {
+      id: 'a2', title: '周报', kind: 'markdown', version: 1,
+      versions: [{ n: 1, files: [{ path: 'README.md' }] }],
+    },
+    {
+      id: 'a3', title: '组件库', kind: 'vue', version: 1,
+      versions: [{ n: 1, files: [{ path: 'App.vue' }, { path: 'components/Chart.vue' }] }],
+    },
+  ]
+  const ids = (result) => result.map((item) => item.id)
+
+  test('不传条件就是全部', () => {
+    assert.equal(filterArtifacts(list).length, 3)
+    assert.equal(filterArtifacts(list, { q: '  ', kind: '' }).length, 3)
+  })
+
+  test('按类型筛', () => {
+    assert.deepEqual(ids(filterArtifacts(list, { kind: 'vue' })), ['a3'])
+  })
+
+  /** 记不住标题但记得"那个 Chart.vue"是很常见的，只搜标题会让人以为作品没了 */
+  test('搜索同时匹配标题和文件名，且大小写不敏感', () => {
+    assert.deepEqual(ids(filterArtifacts(list, { q: '看板' })), ['a1'])
+    assert.deepEqual(ids(filterArtifacts(list, { q: 'chart.VUE' })), ['a3'])
+    assert.deepEqual(ids(filterArtifacts(list, { q: '.md' })), ['a2'])
+  })
+
+  /** 只看当前版本的文件：旧版里删掉的文件不该再把作品搜出来 */
+  test('文件名只匹配当前版本', () => {
+    assert.deepEqual(ids(filterArtifacts(list, { q: 'index.html' })), ['a1'])
+    assert.equal(filterArtifacts([{ ...list[0], version: 1 }], { q: 'index.html' }).length, 0)
+  })
+
+  test('类型与关键词是且的关系', () => {
+    assert.equal(filterArtifacts(list, { q: '看板', kind: 'markdown' }).length, 0)
+  })
+
+  /**
+   * 作品没有"新建"按钮（它是模型产出的）。空列表时用户的本能是找那个按钮，
+   * 找不到就会以为功能没做好 —— 所以指引里必须有能**直接点**的话术。
+   */
+  test('创建指引给的是能直接说出口的话，且覆盖主要类型', () => {
+    assert.ok(ARTIFACT_STARTERS.length >= 3)
+    for (const item of ARTIFACT_STARTERS) {
+      assert.ok(item.prompt.length > 15, `${item.title} 的话术太短，像功能名而不像人话`)
+      assert.ok(item.title && item.kind)
+    }
+    const kinds = ARTIFACT_STARTERS.map((item) => item.kind)
+    for (const kind of ['web', 'vue', 'markdown', 'mermaid']) {
+      assert.ok(kinds.includes(kind), `指引里没覆盖 ${kind}`)
+    }
   })
 })
