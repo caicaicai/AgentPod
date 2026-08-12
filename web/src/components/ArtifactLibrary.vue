@@ -40,8 +40,22 @@ const sessionTitle = (sessionKey) => state.sessions.find((item) => item.sessionK
 <template>
   <main class="library">
     <header class="lib-head">
-      <button type="button" class="icon-btn" title="回到对话" @click="closeLibrary">
+      <!--
+        侧栏收起时**必须**由这里提供展开入口：收起之后整条侧栏归零，
+        原来那个按钮跟着一起没了（见 AppSidebar 的样式说明）。
+        少了这一个，用户会被关在作品库里，再也打不开会话列表。
+      -->
+      <button
+        v-if="state.sidebarCollapsed"
+        type="button"
+        class="icon-btn"
+        title="展开会话列表"
+        @click="state.sidebarCollapsed = false"
+      >
         <AppIcon name="panel-open" :size="17" />
+      </button>
+      <button type="button" class="ghost-btn" title="回到对话" @click="closeLibrary">
+        <AppIcon name="chevron-right" :size="14" class="back" />对话
       </button>
       <h1>作品</h1>
       <span v-if="state.libraryArtifacts.length" class="head-count">

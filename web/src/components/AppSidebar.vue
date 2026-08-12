@@ -57,13 +57,12 @@ function onDevUsernameChange(event) {
         <span class="brand-mark"><AppIcon name="sparkle" :size="14" filled /></span>
         <span class="brand-name">AgentPod</span>
       </div>
-      <button
-        type="button"
-        class="icon-btn"
-        :title="state.sidebarCollapsed ? '展开会话列表' : '收起会话列表'"
-        @click="state.sidebarCollapsed = !state.sidebarCollapsed"
-      >
-        <AppIcon :name="state.sidebarCollapsed ? 'panel-open' : 'panel-close'" :size="17" />
+      <!--
+        只负责**收起**。收起之后整条侧栏（连同这个按钮）都不在了，
+        展开的入口在正文区顶栏 —— 见下面样式里那段说明。
+      -->
+      <button type="button" class="icon-btn" title="收起会话列表" @click="state.sidebarCollapsed = true">
+        <AppIcon name="panel-close" :size="17" />
       </button>
     </div>
 
@@ -258,28 +257,31 @@ function onDevUsernameChange(event) {
 }
 
 /*
-  收起来之后侧栏**留在流里**变成一条 50px 的窄轨，而不是浮在正文上面：
-  浮层会盖住正文，且展开按钮本身也跟着飘走。里面的内容用 visibility 藏掉
-  （不是 display:none）—— 保持原来的宽度让它被裁掉，而不是重排一遍。
+  收起来就是**收干净**：宽度归零，连边框和内边距一起收掉。
+
+  曾经留着一条 50px 的窄轨放展开按钮，理由是"展开的入口不能跟着侧栏一起消失"。
+  但那条窄轨在视觉上是一条谁也说不清是什么的灰边，而入口其实早就有了 ——
+  正文区的顶栏（对话 / 作品库）在收起状态下都会显示展开按钮。
+  一个功能有两个入口时，该去掉的是碍事的那个。
+
+  ⚠️ 因此有一条约束：**每个能占据正文区的视图，顶栏都必须在 sidebarCollapsed
+  时给出展开按钮**，否则用户会被关在一个再也打不开侧栏的页面里。
+  今天是 ChatThread 和 ArtifactLibrary 两个。
+
+  里面的内容用 visibility 藏掉（不是 display:none）：保持原来的宽度让它被裁掉，
+  而不是在动画过程中重排一遍。
 */
 .layout.sidebar-collapsed .sidebar {
-  width: 50px;
+  width: 0;
+  padding-inline: 0;
+  border-right-width: 0;
 }
-.layout.sidebar-collapsed .sidebar > :not(.brand) {
+.layout.sidebar-collapsed .sidebar > * {
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
 }
-.layout.sidebar-collapsed .brand-lockup {
-  width: 0;
-  opacity: 0;
-  overflow: hidden;
-}
-.layout.sidebar-collapsed .brand {
-  padding-inline: 0;
-  gap: 0;
-}
-.sidebar > :not(.brand) {
+.sidebar > * {
   min-width: calc(var(--sidebar-w) - 16px);
 }
 @media (prefers-reduced-motion: reduce) {
