@@ -1,5 +1,6 @@
 <script setup>
 import AppIcon from './AppIcon.vue'
+import ElementChip from './ElementChip.vue'
 import FileChips from './FileChips.vue'
 import { copyToClipboard } from '../lib/debug-bundle.js'
 import { formatClock } from '../lib/format.js'
@@ -21,7 +22,8 @@ async function copy() {
   <div class="message-row user-row">
     <div class="bubble-wrap">
       <div class="user-bubble">
-        <div class="user-text">{{ props.turn.text }}</div>
+        <ElementChip v-if="props.turn.element" :element="props.turn.element" class="user-element" />
+        <div v-if="props.turn.text" class="user-text">{{ props.turn.text }}</div>
         <FileChips
           :files="props.turn.files || []"
           @preview="(url) => emit('preview', url)"
@@ -69,6 +71,13 @@ async function copy() {
   font-size: 15px;
   line-height: 1.55;
 }
+.user-element {
+  margin-bottom: 8px;
+  /* 气泡是主色底，chip 自己那层浅色底在上面会糊成一片，压深一点 */
+  background: color-mix(in srgb, var(--background) 22%, transparent);
+  border-color: color-mix(in srgb, var(--background) 35%, transparent);
+}
+
 .user-text {
   white-space: pre-wrap;
   word-break: break-word;

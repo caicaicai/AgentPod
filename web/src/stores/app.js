@@ -17,6 +17,7 @@ import {
 } from '../lib/api.js'
 import { formatTurnStats } from '../lib/format.js'
 import { parseInlinedAttachments, toWire } from '../lib/attachments.js'
+import { composeElementPrompt, parsePickedElement } from '../lib/artifact-view.js'
 
 const MODEL_KEY = 'ap.model'
 const PROJECT_KEY = 'ap.projectId'
@@ -67,6 +68,15 @@ export const state = reactive({
   draft: '',
   attachments: [],
   composerError: '',
+  /**
+   * 结构化的引用上下文：现在只有"预览里选中的那个元素"一种。
+   * `{ meta, pick }`。
+   *
+   * **与 draft 分开存**，因为它不是用户打的字：拼成提示词塞进输入框的话，
+   * 用户自己那句"把它改成蓝色的"会被埋在十几行标记中间，改也不好改、看也不好看。
+   * 发送时才拼（见 send），显示时折回一枚 chip（见 parsePickedElement）。
+   */
+  composerContext: null,
 
   // ── 项目 ──
   projects: [],
@@ -102,6 +112,16 @@ export const state = reactive({
   /** 类型筛选，空串 = 全部 */
   libraryKind: '',
   libraryLoading: false,
+  /**
+   * 预览里选中的那个元素：{ selector, label, html, text }。
+   *
+   * ⚠️ 这四个字段来自沙箱文档的 postMessage，**是不可信输入** ——
+   * 那份文档是模型生成的，可以伪造。所以只当字符串用（模板插值会转义），
+   * 长度在收进来那一刻就截断，见 onPreviewMessage。
+   */
+  artifactPick: null,
+  /** 元素拾取模式开着没有 */
+  artifactPicking: false,
   /** 创建向导：选类型 + 写一句描述 → 拼成给模型的话 */
   wizardOpen: false,
   wizardKind: 'web',
@@ -138,6 +158,8 @@ export const state = reactive({
  * 而"关掉浏览器之后附件还在"并不是谁真正需要的东西。
  */
 const attachmentDrafts = new Map()
+/** 引用上下文也按会话存：切走再切回来，那枚 chip 该还在 */
+const contextDrafts = new Map()
 
 export function showBanner(text) {
   state.banner = text
@@ -195,12 +217,16 @@ export function toTurns(messages = []) {
     if (message.role === 'user') {
       // 文本附件是拼进 prompt 正文发出去的，这里把它折回 chip ——
       // 否则刷新之后同一条消息会从"两个附件"变成一堵几千字的墙
-      const { text, files } = parseInlinedAttachments(message.text)
+      // 两层都要折回来：选中的元素、以及拼进正文的文本附件。
+      // 不折的话，刷新之后这条消息会从"一句话 + 两枚 chip"变成一堵标记墙
+      const picked = parsePickedElement(message.text)
+      const { text, files } = parseInlinedAttachments(picked.text)
       turns.push({
         role: 'user',
         text,
         images: message.images || 0,
         files,
+        element: picked.element,
         timestamp: message.timestamp || 0,
       })
       continue
@@ -252,17 +278,21 @@ export function saveDraft() {
   else localStorage.removeItem(DRAFT_PREFIX + state.activeKey)
   if (state.attachments.length) attachmentDrafts.set(state.activeKey, state.attachments.slice())
   else attachmentDrafts.delete(state.activeKey)
+  if (state.composerContext) contextDrafts.set(state.activeKey, state.composerContext)
+  else contextDrafts.delete(state.activeKey)
 }
 
 function loadDraft() {
   state.draft = localStorage.getItem(DRAFT_PREFIX + state.activeKey) || ''
   state.attachments = attachmentDrafts.get(state.activeKey) || []
+  state.composerContext = contextDrafts.get(state.activeKey) || null
   state.composerError = ''
 }
 
 function clearDraft(key) {
   localStorage.removeItem(DRAFT_PREFIX + key)
   attachmentDrafts.delete(key)
+  contextDrafts.delete(key)
 }
 
 /* ═══════════════ 会话 ═══════════════ */
@@ -801,6 +831,53 @@ export function setArtifactWidth(px) {
 /** 回到清单（面板不关）：作品往往不止一份，看完一个多半要看下一个 */
 export function closeArtifactDetail() {
   state.artifactDetail = null
+  clearPick()
+}
+
+/* ── 预览里的元素拾取 ── */
+
+export function setPicking(on) {
+  state.artifactPicking = on
+  if (!on) return
+  // 开始重新选时先把上一个清掉：否则界面上会同时挂着"已选中"和"正在选"，
+  // 用户不知道点下去替换的是哪一个
+  state.artifactPick = null
+}
+
+export function clearPick() {
+  state.artifactPick = null
+  state.artifactPicking = false
+}
+
+/** 沙箱报上来的选中结果。**长度在这里截断**，来源校验在组件里（要比对 iframe 身份） */
+export function setPick(raw) {
+  const text = (value, max) => String(value ?? '').slice(0, max)
+  state.artifactPick = {
+    label: text(raw?.label, 80) || '元素',
+    selector: text(raw?.selector, 300),
+    html: text(raw?.html, 2000),
+    text: text(raw?.text, 200),
+  }
+  state.artifactPicking = false
+}
+
+/**
+ * 「让助手改这里」：带着选中的元素回到那条对话。
+ *
+ * 与「继续改它」同一条退路 —— 原对话不在了就开一条新的（作品按用户存，不绑会话）。
+ * 话术里带着元素的 outerHTML，模型基本可以直接拿它当 update 的 old_str。
+ */
+export async function askAboutElement() {
+  const meta = state.artifactDetail?.meta
+  const pick = state.artifactPick
+  if (!meta || !pick) return
+  const context = { meta: { id: meta.id, title: meta.title, kind: meta.kind }, pick }
+  clearPick()
+  closeLibrary()
+  if (!(meta.sessionKey && await openSession(meta.sessionKey))) startNewSession()
+  // 挂成一枚 chip，输入框留给用户写"要怎么改"
+  state.composerContext = context
+  state.panel = ''
 }
 
 export async function deleteArtifact(id) {
@@ -941,21 +1018,32 @@ function pushBlock(live, block) {
 }
 
 export async function send() {
-  const prompt = state.draft.trim()
+  const typed = state.draft.trim()
   const attachments = state.attachments.slice()
-  if ((!prompt && !attachments.length) || state.live) return
+  const context = state.composerContext
+  if ((!typed && !attachments.length) || state.live) return
+
+  /**
+   * 引用上下文在**这一刻**才拼进正文。
+   *
+   * 发出去的是完整提示词（模型要那些标记才知道改哪儿），而界面上留下的是
+   * "一句话 + 一枚 chip" —— 两者形状不同是有意的，折回来的规则见 parsePickedElement。
+   */
+  const prompt = context ? composeElementPrompt({ ...context, instruction: typed }) : typed
 
   state.draft = ''
   state.attachments = []
+  state.composerContext = null
   state.composerError = ''
   clearDraft(state.activeKey) // 已经发出去了，草稿不该再留着
   hideBanner()
 
   state.turns.push({
     role: 'user',
-    text: prompt,
+    text: typed,
     images: 0,
     files: attachments,
+    element: context ? { label: context.pick.label, info: '', html: context.pick.html } : null,
     timestamp: Date.now(),
   })
 

@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
 import AppIcon from './AppIcon.vue'
+import ElementChip from './ElementChip.vue'
 import FileChips from './FileChips.vue'
 import { LARGE_PASTE_CHARS, MAX_FILES, readAll, textToAttachment } from '../lib/attachments.js'
 import { currentProject, saveDraft, send, state, stop } from '../stores/app.js'
@@ -18,6 +19,18 @@ let dragDepth = 0
 const running = computed(() => Boolean(state.live))
 const project = computed(() => currentProject())
 const canSend = computed(() => Boolean(state.draft.trim() || state.attachments.length))
+
+/**
+ * chip 上那行说明。
+ *
+ * 刻意**不**把 id 摆出来：`a_b41df2cb075f` 对人没有任何意义，它是给模型认的，
+ * 拼进正文里就够了。人要看的是"哪份作品的哪个元素"。
+ */
+const contextInfo = computed(() => {
+  const context = state.composerContext
+  if (!context) return ''
+  return [`作品「${context.meta.title}」`, context.pick.selector].filter(Boolean).join(' · ')
+})
 
 /* ═══════════════ 高度自适应 ═══════════════ */
 
@@ -218,6 +231,16 @@ function onInput() {
         </button>
       </div>
 
+      <!--
+        引用的元素排在附件之上：它决定"改哪儿"，比"带了什么文件"更该先看到。
+      -->
+      <ElementChip
+        v-if="state.composerContext"
+        :element="{ label: state.composerContext.pick.label, info: contextInfo, html: state.composerContext.pick.html }"
+        removable
+        @remove="state.composerContext = null"
+      />
+
       <FileChips
         :files="state.attachments"
         removable
@@ -231,7 +254,9 @@ function onInput() {
         v-model="state.draft"
         rows="1"
         class="composer-input"
-        placeholder="给智能助手发消息 —— Enter 发送，Shift+Enter 换行，输入 / 看可用指令，也可以直接把文件拖进来"
+        :placeholder="state.composerContext
+          ? '说说这一处要怎么改 —— 只有选中的那个元素会被改动'
+          : '给智能助手发消息 —— Enter 发送，Shift+Enter 换行，输入 / 看可用指令，也可以直接把文件拖进来'"
         @input="onInput"
         @keydown="onKeydown"
         @paste="onPaste"

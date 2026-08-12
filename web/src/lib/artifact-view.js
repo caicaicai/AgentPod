@@ -61,6 +61,184 @@ export function needsFrame(kind) {
 }
 
 /**
+ * 哪些类型支持"点一下预览里的元素，让助手只改那一处"。
+ *
+ * 只有真的有 DOM 的才给：markdown / mermaid 的源码是文本和图语法，
+ * 点中的那个节点在源码里根本不是一段可定位的标记 —— 给了只会让人选完发现没用。
+ */
+export function supportsInspect(kind) {
+  return kind === 'web' || kind === 'vue' || kind === 'svg'
+}
+
+/**
+ * 注入进预览文档的元素拾取器。
+ *
+ * ── 为什么这段代码必须跑在沙箱里面 ──────────────────────────────────────
+ *
+ * 父页面碰不到沙箱文档的 DOM（不透明源，跨源），所以"鼠标停在哪个元素上"
+ * 这件事只能由文档自己回答。它通过 postMessage 把结果报上来。
+ *
+ * ⚠️ 因此**父页面收到的东西一律是不可信输入**：那份文档是模型生成的，
+ * 它完全可以不装这个拾取器、自己伪造一条消息。所以父页面只做两件事：
+ * 校验消息确实来自这个 iframe（`event.source` 身份比对，不能比 origin ——
+ * 不透明源的 origin 是字符串 "null"，谁都能伪造），以及**只当字符串用**
+ * （Vue 插值会转义，绝不 innerHTML）。
+ *
+ * 拾取器本身刻意做得很轻：不改页面结构，只加一个绝对定位的高亮框和一条标签，
+ * 关掉时整个移除 —— 免得用户点了一圈之后，预览已经不是作品原来的样子了。
+ */
+const INSPECTOR_SCRIPT = `
+(() => {
+  let on = false
+  let box = null
+  let tip = null
+
+  function ensure() {
+    if (box) return
+    box = document.createElement('div')
+    box.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;border:2px solid #2563eb;'
+      + 'background:rgba(37,99,235,.12);border-radius:2px;transition:all .05s linear'
+    tip = document.createElement('div')
+    tip.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;padding:2px 6px;'
+      + 'border-radius:4px;background:#2563eb;color:#fff;font:11px/1.5 ui-monospace,monospace;white-space:nowrap'
+    document.body.appendChild(box)
+    document.body.appendChild(tip)
+  }
+  function teardown() {
+    box?.remove(); tip?.remove(); box = null; tip = null
+  }
+
+  function label(el) {
+    return el.tagName.toLowerCase()
+      + (el.id ? '#' + el.id : '')
+      + (el.classList.length ? '.' + [...el.classList].slice(0, 2).join('.') : '')
+  }
+
+  /** 从根往下拼一条能唯一定位的路径。有 id 就到此为止 —— 再往上没有意义 */
+  function cssPath(el) {
+    const parts = []
+    let node = el
+    while (node && node.nodeType === 1 && node !== document.body && parts.length < 6) {
+      if (node.id) { parts.unshift(node.tagName.toLowerCase() + '#' + node.id); break }
+      let part = node.tagName.toLowerCase()
+      const siblings = [...(node.parentNode?.children || [])].filter((x) => x.tagName === node.tagName)
+      if (siblings.length > 1) part += ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')'
+      parts.unshift(part)
+      node = node.parentElement
+    }
+    return parts.join(' > ')
+  }
+
+  function paint(el) {
+    ensure()
+    const r = el.getBoundingClientRect()
+    box.style.cssText += ';top:' + r.top + 'px;left:' + r.left + 'px;width:' + r.width + 'px;height:' + r.height + 'px'
+    tip.textContent = label(el)
+    // 顶到屏幕上沿时把标签翻到元素下面，否则它会被裁掉
+    tip.style.top = (r.top > 22 ? r.top - 20 : r.bottom + 4) + 'px'
+    tip.style.left = Math.max(2, r.left) + 'px'
+  }
+
+  window.addEventListener('message', (event) => {
+    if (event.data?.__ap !== 'inspect') return
+    on = Boolean(event.data.on)
+    document.documentElement.style.cursor = on ? 'crosshair' : ''
+    if (!on) teardown()
+  })
+
+  document.addEventListener('mousemove', (event) => {
+    if (!on) return
+    const el = event.target
+    if (el && el.nodeType === 1 && el !== document.body) paint(el)
+  }, true)
+
+  document.addEventListener('click', (event) => {
+    if (!on) return
+    // 拦住原来的行为：选中模式下点按钮不该真的触发按钮
+    event.preventDefault()
+    event.stopPropagation()
+    const el = event.target
+    if (!el || el.nodeType !== 1) return
+    on = false
+    document.documentElement.style.cursor = ''
+    teardown()
+    parent.postMessage({
+      __ap: 'picked',
+      selector: cssPath(el),
+      label: label(el),
+      // 上限就在这儿卡死：父页面还会再卡一次，但让它一开始就不必收一份几 MB 的字符串
+      html: (el.outerHTML || '').slice(0, 2000),
+      text: (el.textContent || '').trim().slice(0, 200),
+    }, '*')
+  }, true)
+})()
+`
+
+/** 把拾取器塞进文档尾部。放 </body> 之前，让它在正文都在了之后才初始化 */
+function withInspector(html) {
+  const tag = `<script>${INSPECTOR_SCRIPT}</script>`
+  return html.includes('</body>') ? html.replace('</body>', `${tag}</body>`) : html + tag
+}
+
+/**
+ * 选中一个元素之后，拼给模型的话。
+ *
+ * 关键是 `html` 那一段：`artifact` 工具的 `update` 要求 old_str **在文件里唯一出现**，
+ * 而元素的 outerHTML 正好是最可能唯一、又最好定位的那一段。把它原样给出去，
+ * 模型基本可以直接拿它当 old_str —— 这比让它按"第二个按钮"去数强得多。
+ *
+ * Vue 要多说一句：那份 DOM 是**渲染出来的**，源码里不存在一模一样的字符串，
+ * 得让模型自己去 template 里找对应的那段。不说的话它会拿渲染结果当 old_str，
+ * 然后收到一句"找不到"，再瞎改几轮。
+ */
+/** 正文里标记"这条消息引用了预览里的某个元素"。与附件的【附件 x】同一个套路 */
+const PICK_MARK = '【选中元素 '
+
+export function composeElementPrompt({ meta, pick, instruction = '' }) {
+  if (!meta || !pick) return ''
+  const info = [
+    `作品「${meta.title}」（id: ${meta.id}）`,
+    pick.selector,
+    pick.text ? `文字：${pick.text}` : '',
+  ].filter(Boolean).join(' · ')
+
+  return [
+    `${PICK_MARK}${pick.label}】${info}`,
+    '````html',
+    pick.html,
+    '````',
+    meta.kind === 'vue'
+      ? '（这是渲染出来的 DOM，源码是 .vue 组件 —— 请先 read 找到对应的模板片段，再用 update 定点修改，不要动别处。）'
+      : '（请用 artifact 的 update 定点修改这一段，不要重写整个文件。）',
+    '',
+    String(instruction || '').trim(),
+  ].join('\n').trim()
+}
+
+/**
+ * 把上面那个块从消息正文里折回一枚 chip。
+ *
+ * 与附件是同一个套路（见 attachments.js 的 parseInlinedAttachments）：
+ * **发出去的是完整提示词，显示出来的是结构化的东西**。不折的话，用户自己那句
+ * "把它改成蓝色的" 会被埋在十几行标记里，一屏都在读机器写给机器的话。
+ *
+ * 用四个反引号围栏：元素的 outerHTML 里出现三个反引号是可能的，
+ * 用三个会被自己的内容提前闭合。
+ */
+const PICKED_RE = /【选中元素 ([^】]+)】([^\n]*)\n````html\n([\s\S]*?)\n````\n（[^\n]*）\n*/
+
+export function parsePickedElement(raw) {
+  const text = String(raw || '')
+  if (!text.includes(PICK_MARK)) return { text, element: null }
+  let element = null
+  const rest = text.replace(PICKED_RE, (match, label, info, html) => {
+    element = { label, info: info.trim(), html }
+    return ''
+  })
+  return { text: rest.trim(), element }
+}
+
+/**
  * 作品库的筛选。
  *
  * 抽成纯函数而不是写在组件的 computed 里：它决定"我的东西找不找得到"，
@@ -255,8 +433,8 @@ const DOC_STYLE = `
                   background: #fef2f2; color: #b91c1c; font-size: 13px; white-space: pre-wrap; }
 `
 
-function wrapDoc({ body, allowedOrigins, style = '' }) {
-  return [
+function wrapDoc({ body, allowedOrigins, style = '', inspector = true }) {
+  const html = [
     '<!doctype html><html><head><meta charset="utf-8">',
     cspMeta(allowedOrigins),
     '<meta name="viewport" content="width=device-width, initial-scale=1">',
@@ -265,6 +443,7 @@ function wrapDoc({ body, allowedOrigins, style = '' }) {
     body,
     '</body></html>',
   ].join('')
+  return inspector ? withInspector(html) : html
 }
 
 /* ═══════════════ web：多文件静态网页 ═══════════════ */
@@ -327,8 +506,8 @@ function buildWebDoc({ files, entry, allowedOrigins }) {
    * 插晚了，前面那些 `<script src>` 就已经放行了，而这种漏法在界面上
    * 完全看不出来（页面照常显示，只是防线没了）。
    */
-  if (/<head[\s>]/i.test(inlined)) return inlined.replace(/<head([^>]*)>/i, `<head$1>${meta}`)
-  if (/<html[\s>]/i.test(inlined)) return inlined.replace(/<html([^>]*)>/i, `<html$1>${meta}`)
+  if (/<head[\s>]/i.test(inlined)) return withInspector(inlined.replace(/<head([^>]*)>/i, `<head$1>${meta}`))
+  if (/<html[\s>]/i.test(inlined)) return withInspector(inlined.replace(/<html([^>]*)>/i, `<html$1>${meta}`))
   return wrapDoc({ body: inlined, allowedOrigins })
 }
 
@@ -433,7 +612,7 @@ async function buildMarkdownDoc({ files, entry, allowedOrigins }) {
   }))
 
   const body = renderMarkdown(staged).replace(/\u0000MMD(\d+)\u0000/g, (match, index) => rendered[Number(index)])
-  return wrapDoc({ body: `<div class="doc">${body}</div>`, allowedOrigins, style: DOC_STYLE })
+  return wrapDoc({ body: `<div class="doc">${body}</div>`, allowedOrigins, style: DOC_STYLE, inspector: false })
 }
 
 async function buildMermaidDoc({ files, entry, allowedOrigins }) {
@@ -444,7 +623,7 @@ async function buildMermaidDoc({ files, entry, allowedOrigins }) {
   } catch (error) {
     body = `<div class="render-error">${escapeHtml(error.message)}</div>`
   }
-  return wrapDoc({ body: `<div class="doc">${body}</div>`, allowedOrigins, style: DOC_STYLE })
+  return wrapDoc({ body: `<div class="doc">${body}</div>`, allowedOrigins, style: DOC_STYLE, inspector: false })
 }
 
 function buildSvgDoc({ files, entry, allowedOrigins }) {

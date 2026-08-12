@@ -17,7 +17,7 @@ import assert from 'node:assert/strict'
 
 import {
   ARTIFACT_RECIPES, KIND_META, PREVIEW_SANDBOX, buildPreviewDoc, composeArtifactPrompt,
-  filterArtifacts, kindLabel, needsFrame,
+  composeElementPrompt, filterArtifacts, kindLabel, needsFrame, parsePickedElement, supportsInspect,
 } from '../web/src/lib/artifact-view.js'
 import { resolvePath } from '../web/src/lib/artifact-vue.js'
 import { layoutBlocks, readArtifactCard, toolBrief } from '../web/src/lib/tools.js'
@@ -353,5 +353,125 @@ describe('作品库', () => {
     assert.equal(composeArtifactPrompt('web', full), full)
     // 不认识的类型退化成原样，不吞掉用户的话
     assert.equal(composeArtifactPrompt('nope', '随便什么'), '随便什么')
+  })
+})
+
+/**
+ * 预览里的元素拾取：点一个元素，让助手只改那一处。
+ *
+ * 拾取器本身跑在沙箱里（要 DOM，node 测不了），这里钉住的是它的**契约**：
+ * 哪些类型给这个能力、拾取器有没有被注入、以及选完之后拼给模型的那段话。
+ */
+describe('元素拾取', () => {
+  const web = (over = {}) => buildPreviewDoc({
+    kind: 'web',
+    files: [{ path: 'index.html', content: '<button class="go">提交</button>' }],
+    entry: 'index.html',
+    ...over,
+  })
+
+  test('只有真的有 DOM 的类型才给这个能力', () => {
+    assert.equal(supportsInspect('web'), true)
+    assert.equal(supportsInspect('vue'), true)
+    assert.equal(supportsInspect('svg'), true)
+    // markdown / mermaid 的源码是文本和图语法，点中的节点在源码里不是一段可定位的标记
+    assert.equal(supportsInspect('markdown'), false)
+    assert.equal(supportsInspect('mermaid'), false)
+    assert.equal(supportsInspect('code'), false)
+  })
+
+  test('拾取器注入进网页预览，且回报走 postMessage', async () => {
+    const { html } = await web()
+    assert.match(html, /__ap: 'picked'/)
+    assert.match(html, /parent\.postMessage/)
+    // 装在 </body> 之前：正文都在了它才初始化
+    assert.ok(html.indexOf("__ap: 'picked'") < html.indexOf('</body>'))
+  })
+
+  test('模型自带完整文档时也注入得进去', async () => {
+    const { html } = await web({
+      files: [{ path: 'index.html', content: '<!doctype html><html><body><p>x</p></body></html>' }],
+    })
+    assert.match(html, /__ap: 'picked'/)
+  })
+
+  test('文档类预览不注入 —— 那里选了也没用', async () => {
+    const { html } = await buildPreviewDoc({
+      kind: 'markdown', entry: 'a.md', files: [{ path: 'a.md', content: '# x' }],
+    })
+    assert.equal(html.includes("__ap: 'picked'"), false)
+  })
+
+  /**
+   * 拼给模型的话里，`html` 那一段是关键：`update` 要求 old_str 在文件里**唯一**出现，
+   * 而元素的 outerHTML 正好是最可能唯一、又最好定位的那一段。
+   */
+  test('选中之后的话术带上定位信息和原文片段', () => {
+    const prompt = composeElementPrompt({
+      meta: { id: 'a_1', title: '看板', kind: 'web' },
+      pick: { label: 'button.go', selector: 'div > button', html: '<button class="go">提交</button>', text: '提交' },
+    })
+    assert.match(prompt, /作品「看板」（id: a_1）/)
+    assert.match(prompt, /button\.go/)
+    assert.match(prompt, /div > button/)
+    assert.match(prompt, /<button class="go">提交<\/button>/)
+    assert.match(prompt, /update 定点修改/)
+  })
+
+  /**
+   * Vue 的 DOM 是渲染出来的，源码里不存在一模一样的字符串。不说这句的话，
+   * 模型会拿渲染结果当 old_str，然后收到"找不到"，再瞎改几轮。
+   */
+  test('Vue 要多说一句：那是渲染结果，去模板里找对应片段', () => {
+    const prompt = composeElementPrompt({
+      meta: { id: 'a_2', title: '组件', kind: 'vue' },
+      pick: { label: 'button', selector: 'button', html: '<button>x</button>', text: 'x' },
+    })
+    assert.match(prompt, /渲染出来的 DOM/)
+    assert.match(prompt, /\.vue 组件/)
+  })
+
+  test('缺少作品或选中信息时不拼半截话', () => {
+    assert.equal(composeElementPrompt({ meta: null, pick: { label: 'a' } }), '')
+    assert.equal(composeElementPrompt({ meta: { id: 'a' }, pick: null }), '')
+  })
+
+  /**
+   * 发出去的是完整提示词，**显示出来的是结构化的东西** —— 与附件同一个套路。
+   * 这一对必须能来回走：折不回来的话，刷新之后那条消息会从"一句话 + 一枚 chip"
+   * 变成一堵机器写给机器的标记墙。
+   */
+  test('话术能折回成 chip：正文只剩用户自己说的那句', () => {
+    const prompt = composeElementPrompt({
+      meta: { id: 'a_1', title: '看板', kind: 'web' },
+      pick: { label: 'button.go', selector: 'div > button', html: '<button class="go">提交</button>', text: '提交' },
+      instruction: '把它改成蓝色的',
+    })
+    const { text, element } = parsePickedElement(prompt)
+    assert.equal(text, '把它改成蓝色的')
+    assert.equal(element.label, 'button.go')
+    assert.equal(element.html, '<button class="go">提交</button>')
+    assert.match(element.info, /作品「看板」/)
+  })
+
+  test('没有标记的普通消息原样返回，不误伤', () => {
+    const plain = '帮我看看这段代码'
+    assert.deepEqual(parsePickedElement(plain), { text: plain, element: null })
+  })
+
+  /**
+   * 元素的 outerHTML 里出现三个反引号是可能的（页面里贴了段 markdown 示例）。
+   * 围栏用四个就是为了不被自己的内容提前闭合 —— 闭早了，后面整段都会被当成正文。
+   */
+  test('内容里带三个反引号也不会把围栏撑破', () => {
+    const html = '<pre>```js\nx\n```</pre>'
+    const prompt = composeElementPrompt({
+      meta: { id: 'a_1', title: 't', kind: 'web' },
+      pick: { label: 'pre', selector: 'pre', html, text: '' },
+      instruction: '删掉它',
+    })
+    const parsed = parsePickedElement(prompt)
+    assert.equal(parsed.element.html, html)
+    assert.equal(parsed.text, '删掉它')
   })
 })

@@ -1,10 +1,14 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import AppIcon from './AppIcon.vue'
 import { copyToClipboard } from '../lib/debug-bundle.js'
-import { PREVIEW_SANDBOX, buildPreviewDoc, downloadText, needsFrame } from '../lib/artifact-view.js'
-import { deleteArtifact, openArtifact, state } from '../stores/app.js'
+import {
+  PREVIEW_SANDBOX, buildPreviewDoc, downloadText, needsFrame, supportsInspect,
+} from '../lib/artifact-view.js'
+import {
+  askAboutElement, clearPick, deleteArtifact, openArtifact, setPick, setPicking, state,
+} from '../stores/app.js'
 
 /**
  * 一份作品的正文视图：预览 / 源码 / 版本 / 下载 / 删除。
@@ -95,6 +99,44 @@ function onDelete() {
 }
 
 const kb = (bytes) => (bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`)
+
+/* ═══════════════ 元素拾取 ═══════════════ */
+
+const frame = ref(null)
+const canInspect = computed(() => Boolean(meta.value) && supportsInspect(meta.value.kind) && tab.value === 'preview')
+
+function togglePicking() {
+  const next = !state.artifactPicking
+  setPicking(next)
+  frame.value?.contentWindow?.postMessage({ __ap: 'inspect', on: next }, '*')
+}
+
+/**
+ * 沙箱报上来的选中结果。
+ *
+ * ⚠️ **来源校验只能比对 `event.source`，不能比 origin。** 这个 iframe 是不透明源，
+ * 它的 origin 就是字符串 "null" —— 任何一个别的 sandbox 页面也能报出同样的 origin，
+ * 拿它当判据等于没判。而 contentWindow 是身份，伪造不了。
+ *
+ * 校验通过也只说明"这条消息确实来自这个预览"，**不说明内容可信** ——
+ * 那份文档是模型生成的，可以自己伪造一条 picked。所以内容一律当字符串用：
+ * 截断在 setPick 里，展示走模板插值（Vue 会转义），绝不 innerHTML。
+ */
+function onPreviewMessage(event) {
+  if (!frame.value || event.source !== frame.value.contentWindow) return
+  if (event.data?.__ap !== 'picked') return
+  setPick(event.data)
+}
+
+onMounted(() => window.addEventListener('message', onPreviewMessage))
+onBeforeUnmount(() => {
+  window.removeEventListener('message', onPreviewMessage)
+  clearPick()
+})
+
+// 换作品、换版本、切到源码页：选中状态和拾取模式都得清掉，
+// 否则会拿着上一份作品里的元素去问这一份
+watch(() => [meta.value?.id, detail.value?.version, tab.value].join(':'), clearPick)
 </script>
 
 <template>
@@ -126,6 +168,16 @@ const kb = (bytes) => (bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${by
       </div>
 
       <div class="acts">
+        <button
+          v-if="canInspect"
+          type="button"
+          class="icon-btn"
+          :class="{ on: state.artifactPicking }"
+          :title="state.artifactPicking ? '取消选择' : '在预览里点一个元素，让助手只改那一处'"
+          @click="togglePicking"
+        >
+          <AppIcon name="crosshair" :size="15" />
+        </button>
         <button type="button" class="icon-btn" :title="copied ? '已复制' : '复制当前文件源码'" @click="copySource">
           <AppIcon :name="copied ? 'check' : 'copy'" :size="15" />
         </button>
@@ -151,6 +203,26 @@ const kb = (bytes) => (bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${by
       <span class="spinner" />{{ previewing ? '正在渲染…' : '载入中…' }}
     </div>
 
+    <p v-if="state.artifactPicking" class="note pick-hint">
+      在预览里点一个元素 —— 只有那一处会被交给助手。按这个按钮或换标签页可取消。
+    </p>
+
+    <!--
+      选中结果只用插值渲染（Vue 会转义）。它来自沙箱文档，而那份文档是模型
+      生成的：当 HTML 塞进去等于把第一道防线绕过来了。
+    -->
+    <div v-if="state.artifactPick" class="picked">
+      <div class="picked-main">
+        <code class="picked-label">{{ state.artifactPick.label }}</code>
+        <span v-if="state.artifactPick.text" class="picked-text">{{ state.artifactPick.text }}</span>
+        <code class="picked-path">{{ state.artifactPick.selector }}</code>
+      </div>
+      <button type="button" class="ghost-btn" @click="clearPick">取消</button>
+      <button type="button" class="primary-btn" @click="askAboutElement">
+        <AppIcon name="sparkle" :size="14" filled />让助手改这里
+      </button>
+    </div>
+
     <!--
       ⚠️ 预览必须走这个 iframe，而且 sandbox 里**绝不能出现 allow-same-origin**。
       内容是模型生成的，而模型的输入里有邮件和网页 —— 谁能往里塞脚本，
@@ -159,6 +231,7 @@ const kb = (bytes) => (bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${by
     -->
     <iframe
       v-else-if="tab === 'preview' && needsFrame(meta.kind)"
+      ref="frame"
       :key="`${meta.id}-${detail.version}`"
       class="preview-frame"
       :sandbox="PREVIEW_SANDBOX"
@@ -285,6 +358,55 @@ const kb = (bytes) => (bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${by
 }
 .icon-btn.danger:hover {
   color: var(--destructive);
+}
+.icon-btn.on {
+  background: color-mix(in srgb, var(--brand-accent) 16%, transparent);
+  color: var(--brand-accent);
+}
+
+.pick-hint {
+  color: var(--brand-accent);
+}
+
+.picked {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--brand-accent) 40%, var(--border));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--brand-accent) 8%, transparent);
+}
+.picked-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.picked-label {
+  flex: 0 0 auto;
+  color: var(--brand-accent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+.picked-text {
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.picked-path {
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* 下载没有专门的图标，把"上传"那个箭头转过来用 */
 .down {
