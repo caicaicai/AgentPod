@@ -9,6 +9,7 @@ import {
 import {
   askAboutElement, clearPick, deleteArtifact, openArtifact, setPick, setPicking, state,
 } from '../stores/app.js'
+import { askConfirm } from '../lib/dialog.js'
 
 /**
  * 一份作品的正文视图：预览 / 源码 / 版本 / 下载 / 删除。
@@ -93,9 +94,14 @@ function save() {
   downloadText({ content: current.value.content, fileName: current.value.path.split('/').pop() })
 }
 
-function onDelete() {
-  if (!window.confirm(`删除作品「${meta.value.title}」？所有版本都会一起删掉，不可恢复。`)) return
-  deleteArtifact(meta.value.id)
+async function onDelete() {
+  const ok = await askConfirm({
+    title: '删除作品',
+    message: `「${meta.value.title}」的所有版本都会一起删掉，此操作不可恢复。`,
+    confirmText: '删除',
+    danger: true,
+  })
+  if (ok) deleteArtifact(meta.value.id)
 }
 
 const kb = (bytes) => (bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`)

@@ -3,6 +3,7 @@ import { ref, watchEffect } from 'vue'
 
 import SidePanel from './SidePanel.vue'
 import { closePanel, currentProject, deleteProject, saveProject } from '../stores/app.js'
+import { askConfirm } from '../lib/dialog.js'
 
 const form = ref({ name: '', description: '', instructions: '' })
 const saving = ref(false)
@@ -31,14 +32,17 @@ async function onSave() {
   }
 }
 
-function onDelete() {
+async function onDelete() {
   const project = currentProject()
   if (!project) return
   // 说清楚"会话不会跟着删"：不说的话没人敢点，说错了更糟
-  if (!window.confirm(
-    `删除项目「${project.name}」？\n\n它下面的对话不会被删除，会退回「未分组」。项目指令与项目记忆会一并删除。`,
-  )) return
-  deleteProject()
+  const ok = await askConfirm({
+    title: `删除项目「${project.name}」`,
+    message: '它下面的对话不会被删除，会退回「未分组」。\n项目指令与项目记忆会一并删除。',
+    confirmText: '删除项目',
+    danger: true,
+  })
+  if (ok) deleteProject()
 }
 </script>
 

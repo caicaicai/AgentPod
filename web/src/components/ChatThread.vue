@@ -11,6 +11,7 @@ import { getRecentEvents, getStreamTrace } from '../lib/api.js'
 import {
   clearActiveSession, currentSession, hideBanner, setModel, state, threadTitle, togglePanel,
 } from '../stores/app.js'
+import { askConfirm } from '../lib/dialog.js'
 
 const scroller = ref(null)
 const previewFile = ref(null)
@@ -90,8 +91,13 @@ async function copyDebug() {
 }
 
 async function onClear() {
-  if (!window.confirm('清空当前会话的全部历史？此操作不可恢复。')) return
-  await clearActiveSession()
+  const ok = await askConfirm({
+    title: '清空会话',
+    message: '当前会话的全部历史都会被删掉，此操作不可恢复。',
+    confirmText: '清空',
+    danger: true,
+  })
+  if (ok) await clearActiveSession()
 }
 
 function useSample(sample) {

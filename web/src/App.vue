@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted, onBeforeUnmount } from 'vue'
 
+import AppDialog from './components/AppDialog.vue'
 import AppSidebar from './components/AppSidebar.vue'
 import ArtifactLibrary from './components/ArtifactLibrary.vue'
 import ArtifactPanel from './components/ArtifactPanel.vue'
@@ -13,6 +14,7 @@ import MemoryPanel from './components/MemoryPanel.vue'
 import ProjectPanel from './components/ProjectPanel.vue'
 import SkillsPanel from './components/SkillsPanel.vue'
 import { boot, closeArtifactDetail, closeLibrary, closeWizard, saveDraft, state, stop } from './stores/app.js'
+import { dialog } from './lib/dialog.js'
 
 onMounted(boot)
 
@@ -22,6 +24,8 @@ onMounted(boot)
  */
 function onKeydown(event) {
   if (event.key !== 'Escape') return
+  // 询问框自己处理 Esc（要兑现那个 Promise），这里不能抢在它前面把面板关掉
+  if (dialog.open) return
   if (state.wizardOpen) { closeWizard(); return }
   if (state.lightbox) { state.lightbox = ''; return }
   if (state.panel) { state.panel = ''; return }
@@ -68,6 +72,8 @@ onBeforeUnmount(() => {
     <DebugPanel v-else-if="state.panel === 'debug'" />
 
     <ImageLightbox v-if="state.lightbox" :src="state.lightbox" @close="state.lightbox = ''" />
+    <!-- 全局只挂一个：同一时刻只可能有一个问题在问 -->
+    <AppDialog />
   </div>
 </template>
 

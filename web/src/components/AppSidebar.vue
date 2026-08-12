@@ -8,6 +8,7 @@ import {
   renameSession, scheduleSearch, setDevUsername, startNewSession, state, switchProject,
   toggleTheme, togglePanel, openLibrary,
 } from '../stores/app.js'
+import { askConfirm, askText } from '../lib/dialog.js'
 
 /** 置顶的单独成组：它们是用户手动钉上去的，混在时间序里就等于没钉 */
 const pinned = computed(() => state.sessions.filter((s) => s.pinned))
@@ -16,14 +17,22 @@ const others = computed(() => state.sessions.filter((s) => !s.pinned))
 const devMode = computed(() => state.health?.authMode === 'dev')
 const passwordMode = computed(() => state.health?.authMode === 'password')
 
-function onProjectChange(event) {
+async function onProjectChange(event) {
   const value = event.target.value
   if (value === '__new__') {
     // 选完就把下拉框拨回原位：新建可能被取消，而下拉框停在「＋ 新建项目…」上
     // 会让人以为当前正处在一个叫这个名字的项目里
     event.target.value = state.projectId
-    const name = window.prompt('项目名称', '')
-    if (name?.trim()) createProject(name).then((project) => { if (project) togglePanel('project') })
+    const name = await askText({
+      title: '新建项目',
+      message: '项目是一组对话 + 一份长期指令 + 一份项目记忆。建好之后，这个项目下的每轮对话都会带上它们。',
+      label: '项目名称',
+      placeholder: '例如：结算中台',
+      confirmText: '创建',
+    })
+    if (!name) return
+    const project = await createProject(name)
+    if (project) togglePanel('project')
     return
   }
   switchProject(value)
@@ -32,13 +41,23 @@ function onProjectChange(event) {
 async function onRowAction(action, session) {
   const key = session.sessionKey
   if (action === 'delete') {
-    if (!window.confirm(`删除会话「${session.title || key}」？此操作不可恢复。`)) return
-    return deleteSession(key)
+    const ok = await askConfirm({
+      title: '删除会话',
+      message: `「${session.title || key}」的全部消息都会被删掉，此操作不可恢复。`,
+      confirmText: '删除',
+      danger: true,
+    })
+    return ok ? deleteSession(key) : undefined
   }
   if (action === 'rename') {
-    const title = window.prompt('会话名称', session.title || '')
-    if (title === null) return
-    return renameSession(key, title)
+    const title = await askText({
+      title: '重命名会话',
+      label: '会话名称',
+      value: session.title || '',
+      confirmText: '保存',
+    })
+    // null = 用户取消。空标题走不到这儿（对话框自己拦了），所以不必再判一次
+    return title === null ? undefined : renameSession(key, title)
   }
   if (action === 'pin') return patchSession(key, { pinned: !session.pinned })
   if (action === 'archive') return patchSession(key, { archived: !session.archived })

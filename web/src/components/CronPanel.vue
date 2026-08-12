@@ -4,6 +4,7 @@ import { computed, ref } from 'vue'
 import AppIcon from './AppIcon.vue'
 import SidePanel from './SidePanel.vue'
 import { cronAction, createCron, state } from '../stores/app.js'
+import { askConfirm } from '../lib/dialog.js'
 import { describeSchedule, formatDateTime, formatTime } from '../lib/format.js'
 
 const FIRE_STATUS_TEXT = {
@@ -41,9 +42,14 @@ async function onCreate() {
   }
 }
 
-function onDelete(cron) {
-  if (!window.confirm(`删除定时任务「${cron.title || '(未命名)'}」？`)) return
-  cronAction(cron, 'delete')
+async function onDelete(cron) {
+  const ok = await askConfirm({
+    title: '删除定时任务',
+    message: `「${cron.title || '(未命名)'}」删掉之后不会再触发。`,
+    confirmText: '删除',
+    danger: true,
+  })
+  if (ok) cronAction(cron, 'delete')
 }
 </script>
 
