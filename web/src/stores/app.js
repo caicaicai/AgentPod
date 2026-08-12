@@ -9,7 +9,7 @@
  * 用 reactive 单例而不是 Pinia：这个界面只有一份状态、没有服务端渲染，
  * 引一个状态库要换来的只是多一层 API。
  */
-import { reactive } from 'vue'
+import { reactive, watch } from 'vue'
 
 import {
   api, streamChat, getDevUsername, setDevUsername, getAuthToken, setAuthToken, ApiError,
@@ -22,7 +22,6 @@ import { composeElementPrompt, parsePickedElement } from '../lib/artifact-view.j
 const MODEL_KEY = 'ap.model'
 const PROJECT_KEY = 'ap.projectId'
 const THEME_KEY = 'ap.theme'
-const ARTIFACT_FULL_KEY = 'ap.artifactFull'
 const ARTIFACT_WIDTH_KEY = 'ap.artifactWidth'
 const DRAFT_PREFIX = 'ap.draft.'
 
@@ -133,12 +132,17 @@ export const state = reactive({
   artifactLoading: false,
   artifactNote: '',
   /**
-   * 作品面板铺满整个界面。
+   * 作品面板铺满整个界面。**一次性的：抽屉一关就复位。**
    *
-   * 记在 localStorage 而不是组件里：面板是 v-if 挂载的，关一次就重建，
-   * 存组件里等于"每次打开都退回窄的"—— 而偏好全屏的人是**每次**都想要全屏。
+   * 曾经记在 localStorage 里，理由是"偏好全屏的人每次都想要全屏"。
+   * 那个理由站不住：全屏是为了**把眼前这一份看清楚**（一个整页网页、一张大图），
+   * 而不是一种长期口味。记下来之后，下次打开一份小作品也是满屏，
+   * 而用户完全不记得自己什么时候"设置"过 —— 于是它表现得像个 bug。
+   *
+   * 宽度（artifactWidth）仍然记盘：那是"这个抽屉在我屏幕上该多宽"，
+   * 确实是长期偏好，两者性质不同。
    */
-  artifactFull: localStorage.getItem(ARTIFACT_FULL_KEY) === '1',
+  artifactFull: false,
   /** 用户拖出来的面板宽度（像素）。0 = 用默认档位。同样记盘，理由同上 */
   artifactWidth: Number(localStorage.getItem(ARTIFACT_WIDTH_KEY)) || 0,
 
@@ -812,8 +816,21 @@ export function setWizardKind(kind) {
 
 export function toggleArtifactFull() {
   state.artifactFull = !state.artifactFull
-  localStorage.setItem(ARTIFACT_FULL_KEY, state.artifactFull ? '1' : '0')
 }
+
+/**
+ * 抽屉一关就退出全屏。
+ *
+ * 用 watch 盯着 `panel` 而不是在每个关闭点各写一行：关掉它的路径有好几条
+ * （关闭按钮、togglePanel、Esc 直接改 state.panel、切去作品库…），
+ * 逐个补迟早漏一个 —— 而漏掉的那条正好就是"我明明关了它怎么还是全屏"。
+ */
+watch(
+  () => state.panel,
+  (panel, previous) => {
+    if (previous === 'artifact' && panel !== 'artifact') state.artifactFull = false
+  },
+)
 
 /**
  * 拖出来的宽度。

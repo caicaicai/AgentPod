@@ -43,7 +43,7 @@ const meta = computed(() => detail.value?.meta || null)
       <button
         type="button"
         class="icon-btn"
-        :title="state.artifactFull ? '退出全屏（保留这个选择）' : '铺满窗口（保留这个选择）'"
+        :title="state.artifactFull ? '退出全屏' : '铺满窗口看（关掉抽屉就恢复）'"
         @click="toggleArtifactFull"
       >
         <AppIcon :name="state.artifactFull ? 'shrink' : 'expand'" :size="16" />
