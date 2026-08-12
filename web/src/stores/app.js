@@ -288,19 +288,36 @@ export async function openSession(key) {
   state.artifactDetail = null
   loadDraft()
   refreshArtifacts()
-  // 搜索结果里的会话可能不在当前列表（属于别的项目 / 已归档），也要认
-  const known = Boolean(findSession(key))
-  state.pendingNew = !known
-  if (!known) return
 
+  /**
+   * **不再因为"本地列表里没有"就直接不加载。**
+   *
+   * 从前这里是 `if (!findSession(key)) return` —— 本意是省掉一次必然 404 的请求。
+   * 但能点到 openSession 的地方越来越多（搜索结果、作品库里的"继续改它"），
+   * 而那些入口指向的会话**完全可能不在当前列表里**：属于别的项目、已归档、
+   * 或者列表还没刷新。于是表现是"点了之后进到一个空白的聊天框"，
+   * 没有加载中、没有报错、什么都没有 —— 这是最难查的一类失败。
+   *
+   * 现在一律去问服务端，404 才认定它不存在，并**把这件事说出来**（回 false，
+   * 由调用方决定怎么补救）。多打一次必然失败的请求，换掉一个静默的空白页，划算。
+   */
+  state.pendingNew = !findSession(key)
   state.loadingSession = true
   try {
     const detail = await api.getSession(key)
     // 请求飞行途中用户又切走了：这份历史已经不属于当前会话，丢掉
-    if (state.activeKey !== key) return
+    if (state.activeKey !== key) return false
     state.turns = toTurns(detail.messages || [])
+    state.pendingNew = false
+    return true
   } catch (error) {
-    if (error.status !== 404) showBanner(`会话加载失败：${error.message}`)
+    if (error.status !== 404) {
+      showBanner(`会话加载失败：${error.message}`)
+      return false
+    }
+    // 服务端没有这条会话。留在这个 key 上当新对话用，让调用方决定要不要提示
+    state.pendingNew = true
+    return false
   } finally {
     if (state.activeKey === key) state.loadingSession = false
   }
@@ -673,14 +690,30 @@ export async function refreshLibrary() {
 }
 
 /**
- * 从作品跳回它所属的那条对话。
+ * 「继续改它」：回到产出这份作品的那条对话。
  *
- * 作品库里最常见的下一个动作就是"接着改它"，而改它要回到有上下文的那条会话 ——
- * 在别的会话里说"把标题改成…"，模型根本不知道你说的是哪一份。
+ * 首选是回到原对话 —— 那里有上下文（当初为什么这么做、用户的偏好），
+ * 接着说"把标题改成…"模型就懂。
+ *
+ * ── 原对话不在了怎么办 ──────────────────────────────────────────────────
+ *
+ * 这不是边角情况：`SESSION_STORE=memory`（默认值）下，服务一重启对话就全没了，
+ * 而作品落在 DATA_DIR 上活得好好的 —— 于是作品指向一条不存在的会话。
+ *
+ * 好在**作品是按用户存的，不绑会话**：read / update / write 只按 username + id
+ * 取，所以在任意一条新对话里，模型照样改得动它。所以这里退化成"开一条新对话，
+ * 把作品 id 放进输入框"，而不是把人丢在一个空白页面上自己猜。
  */
-export async function openArtifactSession(sessionKey) {
+export async function openArtifactSession(meta) {
   closeLibrary()
-  await openSession(sessionKey)
+  if (meta?.sessionKey && await openSession(meta.sessionKey)) return
+
+  startNewSession()
+  state.draft = `继续修改作品「${meta.title}」（id: ${meta.id}）：`
+  showBanner(
+    '产出这份作品的对话已经不在了，已为你开一条新对话（作品 id 在输入框里，助手可以直接接着改）。'
+    + '会话默认只存在内存里，重启即丢 —— 想留住历史请把 SESSION_STORE 设成 file。',
+  )
 }
 
 /**

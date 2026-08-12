@@ -68,11 +68,10 @@ const sessionTitle = (sessionKey) => state.sessions.find((item) => item.sessionK
         <h2>{{ detail.meta.title }}</h2>
         <span class="detail-meta">{{ kindLabel(detail.meta) }} · 第 {{ detail.meta.version }} 版</span>
         <button
-          v-if="detail.meta.sessionKey"
           type="button"
           class="ghost-btn"
           title="回到产出它的那条对话，接着让助手改"
-          @click="openArtifactSession(detail.meta.sessionKey)"
+          @click="openArtifactSession(detail.meta)"
         >
           <AppIcon name="sparkle" :size="14" />继续改它
         </button>
