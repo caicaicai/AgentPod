@@ -106,6 +106,26 @@ async function onDelete() {
 
 const kb = (bytes) => (bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`)
 
+/**
+ * 按目录分组：根目录的文件排在最前，其余目录按字母序。
+ *
+ * 分组而不是平铺整条路径，是因为作品拆模块之后目录名会高度重复
+ * （`components/` 下四五个文件），平铺出来一列全是同一个前缀，
+ * 真正要认的文件名反而被挤到看不见。
+ */
+const fileGroups = computed(() => {
+  const groups = new Map()
+  for (const file of files.value) {
+    const cut = file.path.lastIndexOf('/')
+    const dir = cut < 0 ? '' : file.path.slice(0, cut)
+    if (!groups.has(dir)) groups.set(dir, [])
+    groups.get(dir).push({ ...file, name: cut < 0 ? file.path : file.path.slice(cut + 1) })
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => (a === '' ? -1 : b === '' ? 1 : a.localeCompare(b)))
+    .map(([dir, list]) => ({ dir, files: list.sort((x, y) => x.name.localeCompare(y.name)) }))
+})
+
 /* ═══════════════ 元素拾取 ═══════════════ */
 
 const frame = ref(null)
@@ -287,22 +307,32 @@ watch(() => [meta.value?.id, detail.value?.version, tab.value].join(':'), clearP
     </div>
 
     <template v-else>
-      <!-- 多文件才画文件条：单文件作品画一排只有一个格子的标签是噪音 -->
-      <div v-if="files.length > 1" class="filebar">
-        <button
-          v-for="file in files"
-          :key="file.path"
-          type="button"
-          class="filechip"
-          :class="{ on: current && file.path === current.path }"
-          :title="`${file.path} · ${kb(file.bytes)}`"
-          @click="activeFile = file.path"
-        >
-          {{ file.path }}
-          <span v-if="file.path === meta.entry" class="entry-dot" title="入口文件">●</span>
-        </button>
+      <!--
+        多文件才画文件栏：单文件作品画一列只有一行的清单是噪音。
+        按目录分组而不是把整条路径塞进一个标签 —— `components/Chart.vue` 那种
+        路径挤成一排之后，一眼看过去全是重复的目录名，反而认不出文件。
+      -->
+      <div class="source-wrap">
+        <nav v-if="files.length > 1" class="filelist">
+          <template v-for="group in fileGroups" :key="group.dir">
+            <div v-if="group.dir" class="dir">{{ group.dir }}</div>
+            <button
+              v-for="file in group.files"
+              :key="file.path"
+              type="button"
+              class="filerow"
+              :class="{ on: current && file.path === current.path, nested: Boolean(group.dir) }"
+              :title="`${file.path} · ${kb(file.bytes)}`"
+              @click="activeFile = file.path"
+            >
+              <span class="filename">{{ file.name }}</span>
+              <span v-if="file.path === meta.entry" class="entry-tag">入口</span>
+              <span class="filesize">{{ kb(file.bytes) }}</span>
+            </button>
+          </template>
+        </nav>
+        <pre class="source">{{ current ? current.content : '' }}</pre>
       </div>
-      <pre class="source">{{ current ? current.content : '' }}</pre>
     </template>
   </div>
 </template>
@@ -560,8 +590,125 @@ watch(() => [meta.value?.id, detail.value?.version, tab.value].join(':'), clearP
   min-height: 480px;
 }
 
+/*
+  源码页：左边一列文件，右边正文。
+
+  ⚠️ 这一套样式在把详情视图从 ArtifactPanel 抽成 ArtifactViewer 时**漏掉了** ——
+  于是那排文件按钮退化成浏览器默认样式挤在一起。抽组件时样式跟着走，
+  这件事没有任何机制保证，只能靠看。
+*/
+.source-wrap {
+  display: flex;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+}
+
+.filelist {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 0 0 auto;
+  width: 176px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--secondary) 34%, var(--background));
+  overflow-y: auto;
+}
+
+/* 目录名是分组标签，不是可点的东西 —— 做小、做淡，别跟文件抢 */
+.dir {
+  padding: 8px 8px 4px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dir:not(:first-child) {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.filerow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.filerow.nested {
+  padding-left: 14px;
+}
+.filerow:hover {
+  background: color-mix(in srgb, var(--foreground) 6%, transparent);
+  color: var(--foreground);
+}
+.filerow.on {
+  background: color-mix(in srgb, var(--brand-accent) 14%, transparent);
+  color: var(--foreground);
+  font-weight: 500;
+}
+.filename {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.entry-tag {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--brand-accent) 18%, transparent);
+  color: var(--brand-accent);
+  font-family: var(--app-font);
+  font-size: 10px;
+}
+/* 体积平时不抢眼，选中或悬停时才显出来 —— 它是"顺便看一眼"的信息 */
+.filesize {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  opacity: 0;
+}
+.filerow:hover .filesize,
+.filerow.on .filesize {
+  opacity: 0.75;
+}
+
+/* 窄的时候（手机、抽屉被拖得很窄）横过来放，别把正文挤没 */
+@media (max-width: 620px) {
+  .source-wrap {
+    flex-direction: column;
+  }
+  .filelist {
+    flex-direction: row;
+    width: auto;
+    max-height: 96px;
+    flex-wrap: wrap;
+  }
+  .dir {
+    display: none;
+  }
+  .filerow.nested {
+    padding-left: 8px;
+  }
+}
+
 .source {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   margin: 0;
   padding: 12px 13px;
