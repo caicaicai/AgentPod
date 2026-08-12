@@ -19,6 +19,7 @@ import { createMemoryStore } from '../src/memory/store.js'
 import { createProjectStore } from '../src/projects/store.js'
 import { createCronStore } from '../src/cron/store.js'
 import { createCronCredentialVault } from '../src/cron/credentials.js'
+import { createArtifactStore } from '../src/artifacts/store.js'
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {}, child() { return silentLogger } }
 
@@ -33,6 +34,7 @@ function buildConfig(dataDir, overrides = {}) {
     cron: { enabled: true, scheduler: true, tickMs: 30000, credentialMode: 'none' },
     memory: { enabled: true, capture: false },
     projects: { enabled: true },
+    artifacts: { enabled: true, maxBytes: 256 * 1024, maxVersions: 20, allowedOrigins: [] },
     devConsole: false,
     webUi: false,
     ...overrides,
@@ -45,6 +47,7 @@ async function startServer(dataDir, { config = buildConfig(dataDir), stores = {}
   const projects = stores.projects ?? createProjectStore({ config, logger: silentLogger })
   const crons = stores.crons ?? createCronStore({ config, logger: silentLogger })
   const cronVault = stores.cronVault ?? createCronCredentialVault({ config, logger: silentLogger })
+  const artifacts = stores.artifacts ?? createArtifactStore({ config, logger: silentLogger })
 
   const app = createServer({
     config,
@@ -55,13 +58,13 @@ async function startServer(dataDir, { config = buildConfig(dataDir), stores = {}
       snapshot: () => ({ activeRuns: 0, budget: 8, perUserLimit: 2, users: [] }),
       listSkills: () => [], abort: () => ({ ok: true }), execute: async () => ({ runId: 'r', durationMs: 1, finalText: '' }),
     },
-    store, memory, projects, crons, cronVault,
+    store, memory, projects, crons, cronVault, artifacts,
     scheduler: { enabled: true, runNow: async () => ({ ok: true }) },
     llmInfoClient: null,
     metrics: { snapshot: () => ({}) },
   })
   await app.listen(0)
-  return { app, base: `http://127.0.0.1:${app.server.address().port}`, store, memory, projects, crons }
+  return { app, base: `http://127.0.0.1:${app.server.address().port}`, store, memory, projects, crons, artifacts }
 }
 
 /** 三个动词的薄封装，省得每处都拼一遍 headers */
@@ -110,6 +113,7 @@ describe('能力宣告', () => {
       cron: true,
       cronScheduler: true,
       cronCredentialMode: 'none',
+      artifacts: true,
     })
   })
 
@@ -117,13 +121,122 @@ describe('能力宣告', () => {
     const off = await startServer(dataDir, {
       config: buildConfig(dataDir, {
         memory: { enabled: false }, projects: { enabled: false }, cron: { enabled: false, credentialMode: 'none' },
+        artifacts: { enabled: false, allowedOrigins: [] },
       }),
     })
     const offApi = client(off.base)
     assert.equal((await offApi.get('/v1/projects')).status, 404)
     assert.equal((await offApi.get('/v1/memory')).status, 404)
     assert.equal((await offApi.get('/v1/crons')).status, 404)
+    assert.equal((await offApi.get('/v1/artifacts')).status, 404)
     await off.app.close({ timeoutMs: 500 })
+  })
+})
+
+describe('作品接口', () => {
+  const seed = (over = {}) => server.artifacts.create({
+    username: 'u1',
+    sessionKey: 's_1',
+    kind: 'web',
+    title: '看板',
+    files: [{ path: 'index.html', content: '<h1>hi</h1>' }, { path: 'app.js', content: 'let a = 1' }],
+    ...over,
+  })
+
+  test('清单按会话过滤，并把预览约束一起回给前端', async () => {
+    await seed()
+    await seed({ sessionKey: 's_2', title: '别的会话' })
+
+    const all = await api.get('/v1/artifacts')
+    assert.equal(all.body.artifacts.length, 2)
+    // 前端要拿它拼预览 iframe 的 CSP。硬编在前端的话，改了服务端配置而前端没跟上，
+    // 表现是"配了 CDN 却还是加载不到"，两边谁也看不出来
+    assert.deepEqual(all.body.preview, { allowedOrigins: [] })
+
+    const one = await api.get('/v1/artifacts?sessionKey=s_1')
+    assert.equal(one.body.artifacts.length, 1)
+    assert.equal(one.body.artifacts[0].title, '看板')
+  })
+
+  test('详情带全部文件；指定版本读旧版', async () => {
+    const meta = await seed()
+    await server.artifacts.write({
+      username: 'u1', id: meta.id, files: [{ path: 'index.html', content: '<h1>v2</h1>' }],
+    })
+
+    const latest = await api.get(`/v1/artifacts/${meta.id}`)
+    assert.equal(latest.body.version, 2)
+    assert.deepEqual(latest.body.files.map((file) => file.path).sort(), ['app.js', 'index.html'])
+    assert.equal(latest.body.files.find((file) => file.path === 'index.html').content, '<h1>v2</h1>')
+    assert.equal(latest.body.meta.entry, 'index.html')
+
+    const old = await api.get(`/v1/artifacts/${meta.id}?v=1`)
+    assert.equal(old.body.files.find((file) => file.path === 'index.html').content, '<h1>hi</h1>')
+  })
+
+  /**
+   * 这条是整个功能的安全支点。
+   *
+   * 正文是**模型生成的 HTML**：只要它能以 `text/html` 从本服务的源上吐出来，
+   * 这个 URL 就是一个同源页面，能读走 localStorage 里的登录令牌 —— 而触发它
+   * 只需要一封诱导邮件。预览走的是另一条路（正文进 JSON，前端塞进不带
+   * allow-same-origin 的 sandbox iframe），所以这里永远不需要 text/html。
+   */
+  test('raw 一律 text/plain + nosniff —— 绝不以 HTML 的身份吐出模型生成的内容', async () => {
+    const meta = await seed({ files: [{ path: 'index.html', content: '<script>alert(1)</script>' }] })
+    const response = await fetch(`${server.base}/v1/artifacts/${meta.id}/raw`, { headers: { 'X-Username': 'u1' } })
+
+    assert.equal(response.headers.get('content-type'), 'text/plain; charset=utf-8')
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
+    assert.equal(await response.text(), '<script>alert(1)</script>')
+  })
+
+  test('raw 按 path 取单个文件，不传取入口', async () => {
+    const meta = await seed()
+    const one = await fetch(`${server.base}/v1/artifacts/${meta.id}/raw?path=app.js`, { headers: { 'X-Username': 'u1' } })
+    assert.equal(await one.text(), 'let a = 1')
+
+    const missing = await fetch(`${server.base}/v1/artifacts/${meta.id}/raw?path=nope.js`, { headers: { 'X-Username': 'u1' } })
+    assert.equal(missing.status, 404)
+  })
+
+  test('中文文件名走 RFC 6266 两段式 —— 直接塞进头会让 Node 抛错', async () => {
+    const meta = await seed({ kind: 'markdown', files: [{ path: '方案.md', content: '# x' }] })
+    const download = await fetch(`${server.base}/v1/artifacts/${meta.id}/raw?download=1`, { headers: { 'X-Username': 'u1' } })
+    const disposition = download.headers.get('content-disposition')
+    assert.match(disposition, /^attachment; filename="__\.md"/)
+    assert.match(disposition, /filename\*=UTF-8''%E6%96%B9%E6%A1%88\.md$/)
+  })
+
+  test('别人的作品：查不到、删不掉', async () => {
+    const meta = await seed()
+    assert.equal((await api.get('/v1/artifacts', 'u2')).body.artifacts.length, 0)
+    assert.equal((await api.get(`/v1/artifacts/${meta.id}`, 'u2')).status, 404)
+    assert.equal((await api.del(`/v1/artifacts/${meta.id}`, 'u2')).status, 404)
+    assert.equal((await api.get(`/v1/artifacts/${meta.id}`, 'u1')).status, 200)
+  })
+
+  /**
+   * "作品不存在"和"这一版太老、正文已经被清理了"是两件事。都糊成 404 的话，
+   * 用户看到的是"作品不存在"——而他明明在列表里看得见它。
+   */
+  test('版本不对回 400 并说清原因，与"没这个作品"分开', async () => {
+    const meta = await seed()
+    const bad = await api.get(`/v1/artifacts/${meta.id}?v=9`)
+    assert.equal(bad.status, 400)
+    assert.match(bad.body.message, /没有第 9 版/)
+    assert.equal((await api.get('/v1/artifacts/a_nope')).status, 404)
+  })
+
+  test('删会话时它名下的作品跟着走，别的会话不受影响', async () => {
+    const gone = await seed()
+    const keep = await seed({ sessionKey: 's_2' })
+    // 会话得先真的存在，否则删的是一条不存在的记录
+    await server.store.save({ username: 'u1', sessionKey: 's_1', sessionId: 'x', jsonl: '', entryCount: 0, title: 't' })
+
+    assert.equal((await api.del('/v1/sessions/s_1')).status, 200)
+    assert.equal((await api.get(`/v1/artifacts/${gone.id}`)).status, 404)
+    assert.equal((await api.get(`/v1/artifacts/${keep.id}`)).status, 200)
   })
 })
 

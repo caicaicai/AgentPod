@@ -13,6 +13,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { normalizeAttachments } from '../agent/attachments.js'
+import { artifactFileName, artifactDisposition } from '../artifacts/store.js'
 import { AppError, Errors, toAppError } from '../errors.js'
 import { validateCredentials, signToken } from '../identity/password-auth.js'
 import { toPublicModels } from '../models/llminfo-client.js'
@@ -165,8 +166,27 @@ async function serveStatic(res, pathname, { webDir, confineTo = webDir } = {}) {
 export function createServer({
   config, logger, identity, broker, runService, store, llmInfoClient, metrics, workspace = null,
   skillManager = null, memory = null, projects = null, crons = null, scheduler = null, cronVault = null,
+  artifacts = null,
 }) {
   const webDir = config.webDir || DEFAULT_WEB_DIR
+
+  /**
+   * 读一份作品的正文，把 store 抛出来的两类失败翻译成对应的 HTTP 语义。
+   *
+   * store 对"没有这个作品"（回 null）和"没有这一版 / 这一版被清理了"（抛错）
+   * 是分开表达的，这里必须跟着分开：全都糊成 404 的话，用户看到的是"作品不存在"
+   * ——而他明明在列表里看得见它，只是点了一个太老的版本。
+   */
+  async function readArtifactOr404({ username, id, version }) {
+    let current
+    try {
+      current = await artifacts.read({ username, id, version: Number(version) || 0 })
+    } catch (error) {
+      throw Errors.badRequest(error.message)
+    }
+    if (!current) throw Errors.notFound('作品不存在')
+    return current
+  }
 
   const server = http.createServer(async (req, res) => {
     const requestId = randomUUID().slice(0, 8)
@@ -212,6 +232,7 @@ export function createServer({
           cron: Boolean(crons?.enabled),
           cronScheduler: Boolean(scheduler?.enabled),
           cronCredentialMode: config.cron.credentialMode,
+          artifacts: Boolean(artifacts?.enabled),
         },
       })
     }
@@ -479,6 +500,86 @@ export function createServer({
         await workspace?.removeSession?.({ username: subject.username, sessionKey }).catch((error) => {
           reqLogger.warn('会话工作区清理失败', { sessionKey, err: error?.message })
         })
+        // 作品同理：它们只在这条会话的面板里露面，会话没了就再也点不到了
+        await artifacts?.removeSession?.({ username: subject.username, sessionKey }).catch((error) => {
+          reqLogger.warn('会话作品清理失败', { sessionKey, err: error?.message })
+        })
+        return sendJson(res, 200, { ok: true })
+      }
+    }
+
+    /* ─────────────── 作品 ─────────────── */
+
+    if (url.pathname === '/v1/artifacts' || url.pathname.startsWith('/v1/artifacts/')) {
+      if (!artifacts?.enabled) throw Errors.notFound('本部署未启用作品功能（ARTIFACTS_ENABLED=0）')
+
+      if (req.method === 'GET' && url.pathname === '/v1/artifacts') {
+        return sendJson(res, 200, {
+          artifacts: await artifacts.list({
+            username: subject.username,
+            // 不传 sessionKey = 这个人的全部作品。界面默认只看当前会话的，
+            // 但"我上周做的那个报表在哪"要有地方能翻
+            sessionKey: url.searchParams.get('sessionKey') || '',
+          }),
+          /**
+           * 预览环境的约束一并回给前端。
+           *
+           * 它得拿这个拼预览 iframe 的 CSP —— 前端自己硬编一份的话，改了服务端
+           * 配置而前端没跟上，表现是"配了 CDN 却还是加载不到"，两边谁也看不出来。
+           */
+          preview: { allowedOrigins: config.artifacts.allowedOrigins },
+        })
+      }
+
+      const rest = decodeURIComponent(url.pathname.slice('/v1/artifacts/'.length) || '')
+      const isRaw = rest.endsWith('/raw')
+      const artifactId = isRaw ? rest.slice(0, -'/raw'.length) : rest
+      if (!artifactId || artifactId.includes('/')) throw Errors.notFound('没有这个接口')
+
+      /**
+       * 单个文件的原文。`?path=` 指定哪一个，不传取入口文件。
+       *
+       * ⚠️ **无论什么后缀，一律 `text/plain` 下发。** 这里躺着的是模型生成的 HTML：
+       * 用 `text/html` 回，这个 URL 就成了一个**同源**的、内容由模型（也就可能由
+       * 一封诱导邮件）决定的页面 —— 它能读走 localStorage 里的登录令牌。
+       * 预览走的是另一条路：文件进 JSON，由前端拼好后塞进不带 allow-same-origin 的
+       * sandbox iframe（见 web/src/lib/artifact-view.js）。
+       * 所以这条不变量很值钱：**本服务从不以 HTML 的身份吐出任何模型生成的内容**。
+       */
+      if (req.method === 'GET' && isRaw) {
+        const current = await readArtifactOr404({
+          username: subject.username, id: artifactId, version: url.searchParams.get('v'),
+        })
+        const wanted = url.searchParams.get('path') || current.meta.entry
+        const file = current.files.find((item) => item.path === wanted)
+        if (!file) throw Errors.notFound(`第 ${current.version} 版没有 ${wanted}`)
+
+        const body = Buffer.from(file.content, 'utf8')
+        res.writeHead(200, {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Content-Length': body.length,
+          // 没有它，浏览器会去嗅探内容，一段 HTML 照样能被当页面渲染 ——
+          // 上面那条不变量就白写了
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Disposition': artifactDisposition({
+            fileName: artifactFileName({ title: current.meta.title, entry: file.path }),
+            download: url.searchParams.get('download') === '1',
+          }),
+          'Cache-Control': 'no-store',
+        })
+        return res.end(body)
+      }
+
+      if (req.method === 'GET') {
+        const current = await readArtifactOr404({
+          username: subject.username, id: artifactId, version: url.searchParams.get('v'),
+        })
+        return sendJson(res, 200, current)
+      }
+
+      if (req.method === 'DELETE') {
+        const removed = await artifacts.remove({ username: subject.username, id: artifactId })
+        if (!removed) throw Errors.notFound('作品不存在')
         return sendJson(res, 200, { ok: true })
       }
     }

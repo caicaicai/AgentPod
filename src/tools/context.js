@@ -66,8 +66,11 @@ export function createToolContext({
   browserCookieDomains = ['.xiaocaicai.com'],
   memory = null,
   crons = null,
+  artifacts = null,
   /** 本轮所属项目。决定 memory 工具写进哪一份 MEMORY.md */
   projectId = '',
+  /** 本轮所属会话。决定 artifact 工具产出的作品挂在哪条对话下 */
+  sessionKey = '',
 }) {
   if (!username) throw new Error('createToolContext 缺少 username —— 隔离契约 #4')
 
@@ -161,16 +164,38 @@ export function createToolContext({
       }
     : { available: false }
 
+  /**
+   * 作品的读写能力。
+   *
+   * 与上面几个同一个套路：**username / sessionKey 关在闭包里**。工具只能往
+   * "这个用户 + 这条会话"下产出作品，拿不到 store 本身 —— 所以模型即使把
+   * `username` 当参数传进来也改不到别人的东西。逐字段取而不是展开入参，
+   * 是同一条纪律的落法（反面教材见 http/server.js 里 PATCH 那段注释）。
+   */
+  const artifactOps = artifacts?.enabled
+    ? {
+        available: true,
+        create: ({ kind, title, files, entry, language }) =>
+          artifacts.create({ username, sessionKey, projectId, kind, title, files, entry, language }),
+        read: ({ id, version }) => artifacts.read({ username, id, version }),
+        write: ({ id, files, remove, entry, title }) =>
+          artifacts.write({ username, id, files, remove, entry, title }),
+        replace: ({ id, path, oldStr, newStr }) => artifacts.replace({ username, id, path, oldStr, newStr }),
+      }
+    : { available: false }
+
   return {
     runId,
     username,
     projectId,
+    sessionKey,
     credentialFacts: facts,
     http,
     browser,
     skills,
     memory: memoryOps,
     crons: cronOps,
+    artifacts: artifactOps,
     signal,
     logger: logger.child({ runId, username }),
   }

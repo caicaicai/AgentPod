@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 
 import AppIcon from './AppIcon.vue'
+import ArtifactCard from './ArtifactCard.vue'
 import PlanCard from './PlanCard.vue'
 import ToolCard from './ToolCard.vue'
 import { copyToClipboard } from '../lib/debug-bundle.js'
@@ -59,6 +60,8 @@ async function copy() {
         <div v-else-if="item.kind === 'text'" class="md" v-html="renderMarkdown(item.block.text)" />
 
         <PlanCard v-else-if="item.kind === 'plan'" :plan="item.plan" />
+
+        <ArtifactCard v-else-if="item.kind === 'artifact'" :card="item.card" />
 
         <ToolCard
           v-else-if="item.kind === 'tool'"

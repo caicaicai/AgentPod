@@ -17,6 +17,7 @@ import { createServer } from './http/server.js'
 import { createMemoryStore } from './memory/store.js'
 import { createMemoryCapture } from './memory/capture.js'
 import { createProjectStore } from './projects/store.js'
+import { createArtifactStore } from './artifacts/store.js'
 import { createCronStore } from './cron/store.js'
 import { createCronCredentialVault } from './cron/credentials.js'
 import { createScheduler } from './cron/scheduler.js'
@@ -45,6 +46,7 @@ async function main() {
   const memory = createMemoryStore({ config, logger })
   const memoryCapture = createMemoryCapture({ memory, config, logger })
   const projects = createProjectStore({ config, logger })
+  const artifacts = createArtifactStore({ config, logger })
   const crons = createCronStore({ config, logger })
   const cronVault = createCronCredentialVault({ config, logger })
 
@@ -87,13 +89,13 @@ async function main() {
 
   const runService = createRunService({
     config, logger, store, sandbox, broker, metrics, workspace, skillManager,
-    memory, memoryCapture, projects, crons,
+    memory, memoryCapture, projects, crons, artifacts,
   })
   // 调度器要用 runService，所以只能排在它后面建
   const scheduler = createScheduler({ config, logger, crons, vault: cronVault, runService, sessionStore: store })
   const app = createServer({
     config, logger, identity, broker, runService, store, llmInfoClient, metrics, workspace, skillManager,
-    memory, projects, crons, scheduler, cronVault,
+    memory, projects, crons, scheduler, cronVault, artifacts,
   })
 
   await app.listen(config.port)
@@ -114,6 +116,9 @@ async function main() {
         : '开（由模型经 memory 工具写入，不额外调模型）')
       : '关',
     projects: projects.enabled ? '开' : '关',
+    artifacts: artifacts.enabled
+      ? `开（预览外部源：${config.artifacts.allowedOrigins.length ? config.artifacts.allowedOrigins.join(' ') : '全部禁止'}）`
+      : '关',
     cron: crons.enabled ? `开（调度${scheduler.enabled ? '中' : '未启用'}，凭据 ${cronVault.mode}）` : '关',
     userWorkspace: workspace.enabled ? workspace.root : null,
     sandbox: sandbox.mode,
@@ -132,7 +137,15 @@ async function main() {
     // 想留住历史用 SESSION_STORE=file（落 DATA_DIR）或 mysql。
     logger.warn('SESSION_STORE=memory：会话只在进程内存里，重启即全部丢失', { 建议: 'SESSION_STORE=file' })
   }
-  if (store.driver === 'file' || memory.enabled || crons.enabled) {
+  if (config.artifacts.allowedOrigins.length) {
+    // 与 SANDBOX_INJECT_ME_TOKEN 同一类：这是在预览沙箱上开的一道口子，
+    // 开了之后模型生成的页面就能往这些地址发请求（也就能把页面里的东西带出去）。
+    // 不是不能开，是不能在日志里悄悄开。
+    logger.warn('ARTIFACT_ALLOWED_ORIGINS 已配置：作品预览可以加载并连接这些外部源', {
+      origins: config.artifacts.allowedOrigins,
+    })
+  }
+  if (store.driver === 'file' || memory.enabled || crons.enabled || artifacts.enabled) {
     // 本机磁盘。多副本部署下同一个人可能落到不同副本，看到的历史/记忆就会不一样。
     logger.info('本地数据目录已启用', {
       dataDir: config.dataDir,

@@ -186,6 +186,16 @@ function onDevUsernameChange(event) {
         <AppIcon name="clock" :size="16" /><span>定时任务</span>
         <span class="pill">{{ state.crons.filter((c) => c.enabled).length || 0 }}</span>
       </button>
+      <!--
+        和上面几个一样**常驻**，哪怕这条会话一份作品都没有。
+        曾经做成"有作品才出现"，结果是：新装好的部署里这个功能没有任何入口，
+        既看不到它存在，也无从确认它有没有生效 —— 一个要靠模型先产出点什么
+        才肯现身的入口，等于没有入口。
+      -->
+      <button v-if="state.features.artifacts" type="button" class="navrow" @click="togglePanel('artifact')">
+        <AppIcon name="app-window" :size="16" /><span>作品</span>
+        <span class="pill">{{ state.artifacts.length || 0 }}</span>
+      </button>
 
       <div class="identity">
         <!--

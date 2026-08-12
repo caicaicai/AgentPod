@@ -25,6 +25,7 @@ AgentPod is a **server-side, multi-tenant AI agent service** powered by the [pi]
 - **Multi-tenant isolation** — Per-user session, memory, and workspace separation enforced at the storage layer, verified by static analysis rules and runtime isolation tests.
 - **Sandboxed code execution** — Commands run in isolated Linux namespaces (PID/mount/network/uts/ipc) with independent cgroups per slot. No shared state between tenants.
 - **Conversational UI** — Built-in Vue 3 chat interface with SSE streaming, project management, session history, and slash commands.
+- **Artifacts** — Substantial output is stored as a standalone versioned **set of files** instead of being pasted into the chat: multi-file web pages, Vue 3 SFC projects, Markdown documents (with mermaid diagrams), SVG and code. Live preview in a side panel, per-file source view, version switching, download; edits are surgical string replacements rather than full rewrites. Vue is compiled in the browser and mermaid is self-hosted, so **previews are fully offline by default**, running inside a sandboxed iframe without `allow-same-origin` under a `default-src 'none'` CSP — model-generated scripts can neither read your session token nor reach the network.
 - **Long-term memory** — Cross-session facts stored as human-readable `MEMORY.md`, editable by both users and the model.
 - **Projects** — Group sessions under projects with persistent instructions and project-scoped memory.
 - **Scheduled tasks** — 5-field cron expressions with IANA timezone support. The model can create tasks directly from conversation.
@@ -191,6 +192,9 @@ See [`.env.example`](.env.example) for the complete annotated reference.
 |----------|---------|-------------|
 | `MEMORY_ENABLED` | `1` | Long-term cross-session memory |
 | `PROJECTS_ENABLED` | `1` | Project-based session grouping with instructions |
+| `ARTIFACTS_ENABLED` | `1` | Versioned artifacts kept outside the transcript |
+| `ARTIFACT_ALLOWED_ORIGINS` | empty | External origins the artifact preview may load (comma-separated). **Fully offline by default** (Vue / mermaid runtimes ship with the app) |
+| `ARTIFACT_MAX_FILES` | `40` | Maximum files per artifact |
 | `CRON_ENABLED` | `1` | Scheduled task support |
 | `WEB_UI` | `1` | Serve the built-in chat UI at `/` |
 | `DEV_CONSOLE` | `0` | Debug endpoints (must be `0` in production) |
@@ -271,6 +275,17 @@ For local development with real models (without a platform backend):
 | PATCH | `/v1/projects/:id` | Update name / description / instructions / archived |
 | DELETE | `/v1/projects/:id` | Delete project (sessions are ungrouped, not deleted) |
 
+### Artifacts
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/v1/artifacts?sessionKey=` | Artifact list (**no content**) plus the origins the preview may load |
+| GET | `/v1/artifacts/:id?v=` | Details including **every file's content** for that version. Latest version when `v` is omitted |
+| GET | `/v1/artifacts/:id/raw?path=&v=&download=1` | Raw content of a single file (`path` defaults to the entry file). **Always `text/plain` + `nosniff`** — this service never serves model-generated content as HTML |
+| DELETE | `/v1/artifacts/:id` | Delete an artifact and all of its versions |
+
+Writes happen only through the model's `artifact` tool; there is no public write endpoint.
+
 ### Memory
 
 | Method | Path | Description |
@@ -338,6 +353,7 @@ src/                    Core agent service
 ├── identity/           Authentication (password JWT / dev header)
 ├── models/             LLM provider client, model factory, retry logic
 ├── sessions/           Session store (memory / file / mysql)
+├── artifacts/          Versioned multi-file artifacts (metadata + per-version file tree)
 ├── memory/             Long-term memory (MEMORY.md + optimistic locking)
 ├── projects/           Project management (grouping + instructions)
 ├── cron/               Scheduled tasks (5-field cron + timezone)

@@ -230,6 +230,17 @@ export const api = {
   saveMemory: (projectId, content, revision) =>
     request(`/v1/memory${q({ projectId })}`, { method: 'PUT', body: { content, revision } }),
 
+  /**
+   * 作品。
+   *
+   * 详情**带正文**（预览要用），所以别拿它当清单刷 —— 清单接口是专门不带正文的。
+   * 原文另有 `/v1/artifacts/:id/raw`，界面用不上（正文已经在详情里了，
+   * 下载走 Blob，见 lib/artifact-view.js 的 downloadText）。
+   */
+  listArtifacts: (sessionKey = '') => request(`/v1/artifacts${q({ sessionKey })}`),
+  getArtifact: (id, version = 0) => request(`/v1/artifacts/${encodeURIComponent(id)}${q({ v: version || undefined })}`),
+  deleteArtifact: (id) => request(`/v1/artifacts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
   listCrons: () => request('/v1/crons'),
   createCron: (body) => request('/v1/crons', { method: 'POST', body }),
   updateCron: (id, body) => request(`/v1/crons/${encodeURIComponent(id)}`, { method: 'PATCH', body }),

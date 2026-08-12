@@ -25,6 +25,7 @@ AgentPod 是一个**服务端多租户 AI Agent 服务**，基于 [pi](https://g
 - **多租户隔离** — 会话、记忆、工作空间按用户强隔离，存储层强制分区，并通过静态分析规则和运行时隔离测试持续验证。
 - **沙盒代码执行** — 命令运行在隔离的 Linux 命名空间中（PID/mount/network/uts/ipc），每个槽位独立 cgroup，租户间零共享。
 - **对话界面** — 内置 Vue 3 聊天界面，支持 SSE 流式输出、项目管理、会话历史、斜杠命令。
+- **作品（Artifact）** — 助手产出的成品**作为一组文件**单独存，不贴在对话里：多文件网页、Vue 3 单文件组件项目、Markdown 文档（支持 mermaid 图）、SVG、代码。右侧面板实时预览、按文件读源码、切版本、下载；改一行走定点替换，不必整份重发。Vue 在浏览器里现编译、mermaid 自托管，**预览默认完全离线**，跑在不带 `allow-same-origin` 的沙箱 iframe + `default-src 'none'` 的 CSP 里 —— 模型生成的脚本既读不到登录态也出不了网。
 - **长期记忆** — 跨会话事实存储为人类可读的 `MEMORY.md`，用户和模型均可编辑。
 - **项目管理** — 按项目分组会话，支持持久化的项目级指令和项目专属记忆。
 - **定时任务** — 5 段 cron 表达式 + IANA 时区。模型可以在对话中直接创建定时任务。
@@ -191,6 +192,9 @@ sandbox-worker/bin/check-namespace-caps.sh
 |------|--------|------|
 | `MEMORY_ENABLED` | `1` | 跨会话长期记忆 |
 | `PROJECTS_ENABLED` | `1` | 项目分组 + 项目级指令 |
+| `ARTIFACTS_ENABLED` | `1` | 作品：带版本的成品，独立于对话正文 |
+| `ARTIFACT_ALLOWED_ORIGINS` | 空 | 作品预览允许加载的外部源（逗号分隔）。**默认完全离线**（Vue / mermaid 运行时自带，无需 CDN） |
+| `ARTIFACT_MAX_FILES` | `40` | 一份作品最多几个文件 |
 | `CRON_ENABLED` | `1` | 定时任务 |
 | `WEB_UI` | `1` | 在 `/` 提供内置对话界面 |
 | `DEV_CONSOLE` | `0` | 调试端点（生产环境必须为 `0`） |
@@ -270,6 +274,17 @@ sandbox-worker/bin/check-namespace-caps.sh
 | GET | `/v1/projects/:id` | 项目详情 |
 | PATCH | `/v1/projects/:id` | 修改名称 / 描述 / 指令 / 归档状态 |
 | DELETE | `/v1/projects/:id` | 删除项目（会话退回未分组，不删除） |
+
+### 作品
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/v1/artifacts?sessionKey=` | 作品清单（**不含正文**）+ 预览允许的外部源 |
+| GET | `/v1/artifacts/:id?v=` | 详情，含该版**全部文件的内容**。不传 `v` 取最新版 |
+| GET | `/v1/artifacts/:id/raw?path=&v=&download=1` | 单个文件的原文（`path` 不传取入口文件）。**一律 `text/plain` + `nosniff`** —— 本服务从不以 HTML 的身份吐出模型生成的内容 |
+| DELETE | `/v1/artifacts/:id` | 删除作品（所有版本一起删） |
+
+写入只能由模型经 `artifact` 工具完成，没有对外的写接口。
 
 ### 记忆
 

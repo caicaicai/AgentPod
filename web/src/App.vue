@@ -2,6 +2,7 @@
 import { onMounted, onBeforeUnmount } from 'vue'
 
 import AppSidebar from './components/AppSidebar.vue'
+import ArtifactPanel from './components/ArtifactPanel.vue'
 import ChatThread from './components/ChatThread.vue'
 import CronPanel from './components/CronPanel.vue'
 import DebugPanel from './components/DebugPanel.vue'
@@ -50,6 +51,7 @@ onBeforeUnmount(() => {
     <MemoryPanel v-else-if="state.panel === 'memory'" />
     <CronPanel v-else-if="state.panel === 'cron'" />
     <ProjectPanel v-else-if="state.panel === 'project'" />
+    <ArtifactPanel v-else-if="state.panel === 'artifact'" />
     <DebugPanel v-else-if="state.panel === 'debug'" />
 
     <ImageLightbox v-if="state.lightbox" :src="state.lightbox" @close="state.lightbox = ''" />

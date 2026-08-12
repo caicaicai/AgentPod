@@ -393,9 +393,36 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
      * **agent 不持有任何 OSS 配置。** 凭据与桶配置都在 sandbox-manager，
      * 这里只是替沙盒转一次换取地址的调用。
      * 所以"能不能用"完全取决于接没接管理端。
+     *
+     * ⚠️ 曾经叫 `artifacts`，与下面那个「作品」撞名了。两者毫无关系：这个是
+     * 沙盒里跑出来的大文件往对象存储传，那个是助手产出的、给人看的成品。
+     * 一个名字底下两种东西，迟早有人在错的那个上面加开关。
+     */
+    sandboxArtifacts: {
+      enabled: str(env.SANDBOX_MODE, 'http') === 'manager' && Boolean(str(env.SANDBOX_MANAGER_URL)),
+    },
+
+    /**
+     * 作品（artifact）：助手产出的、独立于对话正文的成品。落 DATA_DIR，
+     * 与会话驱动无关（SESSION_STORE=mysql 时一样能用）。见 src/artifacts/store.js。
      */
     artifacts: {
-      enabled: str(env.SANDBOX_MODE, 'http') === 'manager' && Boolean(str(env.SANDBOX_MANAGER_URL)),
+      enabled: bool(env.ARTIFACTS_ENABLED, true),
+      /** 单个版本**所有文件加起来**的上限。更大的东西该走沙盒工作区，不该塞进一次工具调用 */
+      maxBytes: num(env.ARTIFACT_MAX_BYTES, 512 * 1024),
+      /** 一份作品最多几个文件。拆模块是好事，但拆到几十个就该是个仓库而不是作品了 */
+      maxFiles: num(env.ARTIFACT_MAX_FILES, 40),
+      /** 保留多少份历史。更早的删文件、留元信息 */
+      maxVersions: num(env.ARTIFACT_MAX_VERSIONS, 20),
+      /**
+       * 预览 iframe 允许加载的外部源（逗号分隔，形如 `https://cdn.jsdelivr.net`）。
+       *
+       * **默认空 = 完全离线**：模型生成的页面连不上任何外部地址。这是刻意的默认值——
+       * 那段 HTML 是模型现写的，一旦它能出网，"把页面里的数据 POST 到某处"就成了
+       * 一封诱导邮件（prompt injection）能做到的事。要用 CDN 就在这里显式列出来，
+       * 列的同时也就知道自己开了什么。
+       */
+      allowedOrigins: csvExact(env.ARTIFACT_ALLOWED_ORIGINS),
     },
 
     /** 联网搜索（`web_search` 工具）。 */
@@ -500,6 +527,19 @@ function validate(config) {
       errors.push(`SANDBOX_MANAGER_URL 必须是 http:// 或 https:// 开头的绝对地址，当前 ${config.sandbox.managerUrl}`)
     }
   }
+  /**
+   * 这几个值会原样拼进预览 iframe 的 CSP。写错一个（带上路径、少个协议头）不会
+   * 报错，只会让那条 CSP 指令失效或整体收紧 —— 现象是"预览一片空白"，
+   * 而排查的人根本不会想到是环境变量里多打了一个斜杠。
+   */
+  for (const origin of config.artifacts.allowedOrigins) {
+    if (!/^https?:\/\/[^/\s;,']+$/.test(origin)) {
+      errors.push(`ARTIFACT_ALLOWED_ORIGINS 里的 ${origin} 不是合法的源：要形如 https://cdn.example.com，不带路径和结尾斜杠`)
+    }
+  }
+  if (config.artifacts.maxBytes < 1024) errors.push(`ARTIFACT_MAX_BYTES 太小（当前 ${config.artifacts.maxBytes}），至少 1024`)
+  if (config.artifacts.maxVersions < 1) errors.push(`ARTIFACT_MAX_VERSIONS 至少为 1，当前 ${config.artifacts.maxVersions}`)
+
   if (config.userWorkspace.root && !path.isAbsolute(config.userWorkspace.root)) {
     errors.push(`USER_WORKSPACE_ROOT 必须是绝对路径，当前 ${config.userWorkspace.root}`)
   }

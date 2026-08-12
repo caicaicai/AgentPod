@@ -14,6 +14,7 @@ export const TOOL_LABELS = {
   workstation_browser: '浏览器',
   // 没有这一条时卡片显示的是原始工具名，用户看到 `skill_save` 只能自己猜
   skill_save: '保存技能',
+  artifact: '作品',
 }
 
 export const TOOL_STATUS_TEXT = { running: '执行中', done: '完成', error: '失败', aborted: '未完成' }
@@ -27,6 +28,7 @@ export const TOOL_ICONS = {
   task_plan: 'tasks',
   workstation_browser: 'globe',
   skill_save: 'puzzle',
+  artifact: 'app-window',
 }
 
 /** 摘要行：一眼看出这次调用在干什么，不用展开 */
@@ -36,6 +38,12 @@ export function toolBrief(name, args = {}) {
   if (name === 'read' || name === 'write' || name === 'edit') return args.path || args.file_path || ''
   if (name === 'workstation_browser') return [args.action, args.url].filter(Boolean).join(' ')
   if (name === 'skill_save') return args.dir || ''
+  // 文件内容可能几百 KB，绝不能落到下面那个 JSON.stringify —— 那会把整份作品
+  // 拼成一行塞进摘要，卡片直接卡住
+  if (name === 'artifact') {
+    const what = args.title || args.path || (args.files || []).map((file) => file.path).join(' ') || args.id || ''
+    return [args.action, what].filter(Boolean).join(' ')
+  }
   const keys = Object.keys(args)
   if (!keys.length) return ''
   return first(JSON.stringify(args))
@@ -75,6 +83,41 @@ export function planKeepIndexes(blocks) {
 }
 
 /**
+ * 一次 artifact 调用该不该画成作品卡片。
+ *
+ * 三种情况**不画**，让它退回普通的工具卡片：
+ *   - `read`：那是模型自己读回正文，没有产出，画一张卡片会让人以为又生成了一份
+ *   - 失败：`{ok:false}` 时该看到的是错误原文
+ *   - 结果解析不出来：宁可显示原始工具卡片，也不要画一张空卡
+ *
+ * 还在跑的时候先画一张占位卡：create 的正文是整段发出去的，
+ * 大一点的作品要好几秒，这几秒里对话里什么都没有会让人以为卡住了。
+ */
+export function readArtifactCard(block) {
+  if (block.args?.action === 'read') return null
+
+  if (block.status === 'running') {
+    return {
+      pending: true,
+      title: block.args?.title || '正在生成…',
+      kind: block.args?.kind || 'code',
+      action: block.args?.action || 'create',
+      // 边生成边显示文件名：多文件作品要好几秒，这几秒里让人看到它在铺哪些文件
+      files: (block.args?.files || []).map((file) => file.path).filter(Boolean),
+    }
+  }
+
+  try {
+    const parsed = JSON.parse(block.preview)
+    if (!parsed?.ok || !parsed.artifact?.id) return null
+    return { ...parsed.artifact, action: block.args?.action || 'create' }
+  } catch {
+    // 结果被截断（preview 有长度上限）时会走到这儿
+    return null
+  }
+}
+
+/**
  * 一轮里的 block 按**到达顺序**排开，不把工具收拢到顶部。
  *
  * 模型常常先说一句"我先看看环境"再动手，把那句挪到工具下面读起来就是倒的。
@@ -90,6 +133,17 @@ export function layoutBlocks(blocks = []) {
       if (!planIndexes.has(index)) return
       const plan = readPlan(block.preview) || normalizePlan(block.args)
       if (plan) { out.push({ kind: 'plan', key: `plan-${index}`, plan }); return }
+    }
+    /**
+     * 作品**不做 task_plan 那样的去重**。
+     *
+     * 同一份计划被反复更新时，用户要的是"一张清单实时打勾"；而作品的每一次调用
+     * 是一个各不相同的事件（建了 v1、这里改成了 v2），按时间摆开读起来才是
+     * 一条能对上号的线索。
+     */
+    if (block.type === 'tool' && block.toolName === 'artifact') {
+      const card = readArtifactCard(block)
+      if (card) { out.push({ kind: 'artifact', key: `artifact-${index}`, card }); return }
     }
     out.push({ kind: block.type, key: `${block.type}-${index}`, block })
   })

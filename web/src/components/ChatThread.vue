@@ -115,6 +115,22 @@ function useSample(sample) {
       <h1 class="thread-title">{{ threadTitle() }}</h1>
 
       <div class="thread-actions">
+        <!--
+          有作品才出现这个按钮。作品是"这次对话产出了东西"的信号，
+          常驻一个永远是 0 的入口只会让人以为功能坏了。
+        -->
+        <button
+          v-if="state.features.artifacts && state.artifacts.length"
+          type="button"
+          class="ghost-btn"
+          :class="{ on: state.panel === 'artifact' }"
+          title="本次对话产出的作品"
+          @click="togglePanel('artifact')"
+        >
+          <AppIcon name="app-window" :size="14" />
+          作品 {{ state.artifacts.length }}
+        </button>
+
         <div v-if="state.models.length" class="select-wrap">
           <select :value="state.modelId" title="选择模型" @change="setModel($event.target.value)">
             <option v-for="model in state.models" :key="model.id" :value="model.id">{{ model.id }}</option>
@@ -208,7 +224,9 @@ function useSample(sample) {
   align-items: center;
   gap: 10px;
   flex: 0 0 auto;
-  padding: 10px 16px;
+  /* 高度走 --head-h，与右侧抽屉的头部共用，两条底线才对得上（见 tokens.css） */
+  height: var(--head-h);
+  padding: 0 16px;
   border-bottom: 1px solid var(--border);
 }
 .thread-title {
@@ -253,6 +271,12 @@ function useSample(sample) {
   right: 7px;
   color: var(--muted-foreground);
   pointer-events: none;
+}
+
+/* 面板开着时按钮保持高亮，否则看不出这个抽屉是谁打开的 */
+.ghost-btn.on {
+  border-color: color-mix(in srgb, var(--brand-accent) 45%, var(--border));
+  color: var(--brand-accent);
 }
 
 .banner {
@@ -370,7 +394,7 @@ function useSample(sample) {
 
 @media (max-width: 760px) {
   .thread-head {
-    padding: 9px 12px;
+    padding: 0 12px;
   }
   /* 窄屏先砍这两个：模型名和调试按钮都是"知道要用才会用"的东西，
      而标题和清空是每次都要看到的 */

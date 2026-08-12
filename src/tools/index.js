@@ -15,6 +15,7 @@ import { skillSavePlugin } from './skill-save.js'
 import { workstationBrowserPlugin } from './workstation-browser.js'
 import { memoryPlugin } from './memory.js'
 import { cronPlugin } from './cron.js'
+import { artifactPlugin } from './artifact.js'
 
 /**
  * 已完成迁移的插件，以及各自的启用条件。
@@ -26,6 +27,7 @@ const PLUGIN_REGISTRY = [
   { plugin: cronPlugin, requires: ['cron'] }, // 要 CRON_ENABLED + DATA_DIR
   { plugin: skillSavePlugin, requires: ['skills'] }, // 要用户工作空间（USER_WORKSPACE_ROOT）
   { plugin: workstationBrowserPlugin, requires: ['browser'] }, // 要沙盒提供浏览器能力
+  { plugin: artifactPlugin, requires: ['artifacts'] }, // 要 ARTIFACTS_ENABLED + DATA_DIR
 ]
 
 function describeMissing(requires, capabilities) {
@@ -37,7 +39,7 @@ function describeMissing(requires, capabilities) {
  */
 export function buildApTools({
   runId, username, credential, logger, config = {}, sandboxSession = null, workspace = null,
-  memory = null, crons = null, projectId = '',
+  memory = null, crons = null, artifacts = null, projectId = '', sessionKey = '',
 }) {
   const ctx = createToolContext({
     runId,
@@ -48,7 +50,9 @@ export function buildApTools({
     workspace,
     memory,
     crons,
+    artifacts,
     projectId,
+    sessionKey,
     browserCookieDomains: config.browserCookieDomains,
   })
 
@@ -58,6 +62,7 @@ export function buildApTools({
     skills: ctx.skills.available,
     memory: ctx.memory.available,
     cron: ctx.crons.available,
+    artifacts: ctx.artifacts.available,
   }
 
   const enabled = []

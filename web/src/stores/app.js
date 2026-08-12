@@ -21,6 +21,8 @@ import { parseInlinedAttachments, toWire } from '../lib/attachments.js'
 const MODEL_KEY = 'ap.model'
 const PROJECT_KEY = 'ap.projectId'
 const THEME_KEY = 'ap.theme'
+const ARTIFACT_FULL_KEY = 'ap.artifactFull'
+const ARTIFACT_WIDTH_KEY = 'ap.artifactWidth'
 const DRAFT_PREFIX = 'ap.draft.'
 
 function newSessionKey() {
@@ -83,9 +85,28 @@ export const state = reactive({
   cronNote: '',
   cronNoteWarn: false,
 
+  // ── 作品 ──
+  /** 当前会话的作品清单（不含正文） */
+  artifacts: [],
+  /** 服务端下发的预览约束，前端拿它拼 iframe 的 CSP，不在这边硬编 */
+  artifactPreview: { allowedOrigins: [] },
+  /** 面板里打开的那一份：{ meta, version, content, fileName } */
+  artifactDetail: null,
+  artifactLoading: false,
+  artifactNote: '',
+  /**
+   * 作品面板铺满整个界面。
+   *
+   * 记在 localStorage 而不是组件里：面板是 v-if 挂载的，关一次就重建，
+   * 存组件里等于"每次打开都退回窄的"—— 而偏好全屏的人是**每次**都想要全屏。
+   */
+  artifactFull: localStorage.getItem(ARTIFACT_FULL_KEY) === '1',
+  /** 用户拖出来的面板宽度（像素）。0 = 用默认档位。同样记盘，理由同上 */
+  artifactWidth: Number(localStorage.getItem(ARTIFACT_WIDTH_KEY)) || 0,
+
   // ── 界面开关 ──
   sidebarCollapsed: false,
-  panel: '', // '' | 'skills' | 'memory' | 'cron' | 'project' | 'debug'
+  panel: '', // '' | 'skills' | 'memory' | 'cron' | 'project' | 'debug' | 'artifact'
   debugText: '',
   debugNote: '',
   lightbox: '',
@@ -117,6 +138,7 @@ export function togglePanel(name) {
   state.panel = state.panel === name ? '' : name
   if (state.panel === 'memory') loadMemory()
   if (state.panel === 'cron') refreshCrons()
+  if (state.panel === 'artifact') refreshArtifacts()
 }
 export function closePanel() {
   state.panel = ''
@@ -245,7 +267,11 @@ export async function openSession(key) {
   saveDraft() // 先把当前这条的草稿收好，再换人
   state.activeKey = key
   state.turns = []
+  // 作品跟着会话走：不清掉的话，切过去的头一瞬间列的还是上一条会话的东西
+  state.artifacts = []
+  state.artifactDetail = null
   loadDraft()
+  refreshArtifacts()
   // 搜索结果里的会话可能不在当前列表（属于别的项目 / 已归档），也要认
   const known = Boolean(findSession(key))
   state.pendingNew = !known
@@ -270,6 +296,9 @@ export function startNewSession() {
   state.activeKey = newSessionKey()
   state.pendingNew = true
   state.turns = []
+  // 新会话还没有任何作品，不清就会挂着上一条的
+  state.artifacts = []
+  state.artifactDetail = null
   loadDraft()
 }
 
@@ -545,6 +574,84 @@ export async function cronAction(cron, action) {
   }
 }
 
+/* ═══════════════ 作品 ═══════════════ */
+
+/**
+ * 当前会话的作品清单。
+ *
+ * **按会话拉，不是按用户**：作品面板是跟着当前对话走的，把别的会话的混进来，
+ * 用户只会以为串号了。清单接口刻意不带正文，所以这一次请求很轻，可以在每轮
+ * 对话结束时随手刷一遍。
+ */
+export async function refreshArtifacts() {
+  if (!state.features.artifacts) return
+  try {
+    const data = await api.listArtifacts(state.activeKey)
+    state.artifacts = data.artifacts || []
+    state.artifactPreview = data.preview || { allowedOrigins: [] }
+    state.artifactNote = ''
+  } catch (error) {
+    state.artifactNote = `作品清单加载失败：${error.message}`
+  }
+}
+
+/**
+ * 打开某一份（或某一版）。
+ *
+ * 详情**带正文**，可能几百 KB，所以只在真的要看时才取，不随清单一起下来。
+ */
+export async function openArtifact(id, version = 0) {
+  if (!id) return
+  state.panel = 'artifact'
+  state.artifactLoading = true
+  state.artifactNote = ''
+  try {
+    const detail = await api.getArtifact(id, version)
+    // 请求飞行途中用户又点了别的：这份正文已经不是他要看的了，丢掉
+    if (state.panel !== 'artifact') return
+    state.artifactDetail = detail
+  } catch (error) {
+    state.artifactDetail = null
+    state.artifactNote = `打开失败：${error.message}`
+  } finally {
+    state.artifactLoading = false
+  }
+}
+
+export function toggleArtifactFull() {
+  state.artifactFull = !state.artifactFull
+  localStorage.setItem(ARTIFACT_FULL_KEY, state.artifactFull ? '1' : '0')
+}
+
+/**
+ * 拖出来的宽度。
+ *
+ * 每次 pointermove 都写一次 localStorage 看着很浪费，但这是**同步的本地写入、
+ * 值只有几个字节**，实测比一次重排还便宜；而换来的是拖到一半刷新页面也不会丢。
+ * 真要省，省的应该是别的地方。
+ */
+export function setArtifactWidth(px) {
+  state.artifactWidth = px
+  if (px) localStorage.setItem(ARTIFACT_WIDTH_KEY, String(px))
+  else localStorage.removeItem(ARTIFACT_WIDTH_KEY)
+}
+
+/** 回到清单（面板不关）：作品往往不止一份，看完一个多半要看下一个 */
+export function closeArtifactDetail() {
+  state.artifactDetail = null
+}
+
+export async function deleteArtifact(id) {
+  try {
+    await api.deleteArtifact(id)
+  } catch (error) {
+    state.artifactNote = `删除失败：${error.message}`
+    return
+  }
+  if (state.artifactDetail?.meta?.id === id) state.artifactDetail = null
+  await refreshArtifacts()
+}
+
 /* ═══════════════ 模型 / 技能 / 身份 ═══════════════ */
 
 export async function loadModels() {
@@ -797,6 +904,11 @@ export async function send() {
             block.previewTruncated = Boolean(data.previewTruncated)
             block.resultLength = data.resultLength || 0
             block.images = data.images || []
+            /**
+             * 作品是刚刚才存下来的，清单得当场跟上 —— 等到这一轮结束再刷的话，
+             * 模型一边写第二份、用户一边看着侧栏只有第一份，会以为没存上。
+             */
+            if (block.toolName === 'artifact' && !data.isError) refreshArtifacts()
             break
           }
           case 'final':

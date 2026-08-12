@@ -19,6 +19,7 @@ import { projectPrompt } from '../projects/store.js'
 export function createRunService({
   config, logger, store, sandbox, broker, metrics, workspace = null,
   skillManager = null, memory = null, memoryCapture = null, projects = null, crons = null,
+  artifacts = null,
 }) {
   const active = new Map() // runId -> { username, abort, startedAt, source }
   const perUser = new Map() // username -> count
@@ -273,11 +274,17 @@ export function createRunService({
           workspace,
           memory,
           crons,
+          artifacts,
           projectId: context.projectId,
+          // 作品挂在会话下，所以 sessionKey 必须一路带到工具上下文里
+          sessionKey,
           config: {
             browserCookieDomains: config.sandbox?.browserCookieDomains || ['.xiaocaicai.com'],
             imageCapable: (model.input || []).includes('image'),
             webSearch: config.webSearch,
+            // 预览 iframe 允许的外部源。工具描述要照着它告诉模型"能不能用 CDN"，
+            // 说错了模型会产出一个在预览里必然白屏的页面
+            artifacts: { allowedOrigins: config.artifacts?.allowedOrigins || [] },
           },
         })
         if (skipped.length) runLogger.debug('部分 AP 工具未启用', { skipped })
