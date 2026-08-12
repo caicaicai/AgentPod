@@ -243,6 +243,18 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
 
     sessions: {
       driver: str(env.SESSION_STORE, 'memory'), // memory | file | mysql
+
+      /**
+       * 会话第一轮时，让模型看着用户那句话起个标题。
+       *
+       * 与 MEMORY_CAPTURE 那个默认关掉的开关**不是一个量级**：那个是每轮都额外
+       * 调一次模型（等于把全产品调用次数翻倍），这个是**一个会话一次**、几十个
+       * token，而且与本轮并行发出，用户感觉不到延迟。所以默认开。
+       *
+       * 关掉就退回"截取第一句话的前 24 个字"。LLM_MODE=faux 时自动跳过 ——
+       * 假模型回的是一段固定的自我介绍，拿它当标题只会让侧栏变成一排一样的字。
+       */
+      autoTitle: bool(env.SESSION_AUTO_TITLE, true),
       mysql: {
         host: str(env.MYSQL_HOST),
         port: num(env.MYSQL_PORT, 3306),

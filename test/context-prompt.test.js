@@ -18,6 +18,7 @@ import { registerFauxProvider, fauxAssistantMessage } from '@mariozechner/pi-ai'
 
 import { runTurn } from '../src/agent/run-turn.js'
 import { createRunService } from '../src/agent/run-service.js'
+import { TITLE_PROMPT } from '../src/sessions/title.js'
 import { createMemoryStore as createSessionMemoryStore } from '../src/sessions/store.js'
 import { createMemoryStore } from '../src/memory/store.js'
 import { createProjectStore } from '../src/projects/store.js'
@@ -42,11 +43,25 @@ after(() => faux?.unregister())
 
 /** 跑一轮，回收模型真正收到的系统提示 */
 function captureSystemPrompt() {
-  const captured = { systemPrompt: '' }
-  faux.setResponses([(context) => {
+  const captured = { systemPrompt: '', titleCalls: 0 }
+  /**
+   * **responder 每次用完要自己续上。**
+   *
+   * 这一轮之外还会有第二次模型调用：run-service 给新会话起标题
+   * （见 src/sessions/title.js）。只放一个 responder 的话，它会被先发出的
+   * 标题调用消耗掉，真正那一轮反而没人应答 —— 现象是"捕获到的系统提示
+   * 变成了标题提示词"，而这跟本次改动看起来毫无关系。
+   */
+  const responder = (context) => {
+    faux.appendResponses([responder])
+    if (context.systemPrompt === TITLE_PROMPT) {
+      captured.titleCalls += 1
+      return fauxAssistantMessage('测试标题')
+    }
     captured.systemPrompt = context.systemPrompt || captured.systemPrompt
     return fauxAssistantMessage('好的')
-  }])
+  }
+  faux.setResponses([responder])
   return captured
 }
 
@@ -268,5 +283,41 @@ describe('run-service 装配的上下文（整条链）', () => {
     })
     assert.ok(result.runId, '读记忆失败时这一轮仍然要跑完')
     assert.doesNotMatch(captured.systemPrompt, /长期记忆/)
+  })
+
+  /**
+   * 起标题只在**会话第一轮**做一次。
+   *
+   * 判据必须在跑之前取（跑完那条会话一定存在了）。判错的后果有两个，
+   * 而且都不会立刻被发现：每轮多花一次模型调用，以及把用户手动改的名字
+   * 在下一轮覆盖掉。
+   */
+  test('新会话起一次标题，第二轮不再起', async () => {
+    const captured = captureSystemPrompt()
+
+    await runService.execute({
+      subject: { username: 'zhangsan', credential: '' },
+      sessionKey: 's_title', prompt: '帮我看看结算中台的报错', source: 'test',
+    })
+    assert.equal(captured.titleCalls, 1, '第一轮该起一次')
+    assert.equal((await sessions.load({ username: 'zhangsan', sessionKey: 's_title' })).title, '测试标题')
+
+    await runService.execute({
+      subject: { username: 'zhangsan', credential: '' },
+      sessionKey: 's_title', prompt: '再看看别的', source: 'test',
+    })
+    assert.equal(captured.titleCalls, 1, '第二轮不该再起 —— 否则用户改过的名字会被覆盖')
+  })
+
+  test('关掉开关就完全不调用', async () => {
+    const captured = captureSystemPrompt()
+    config.sessions = { autoTitle: false }
+    await runService.execute({
+      subject: { username: 'zhangsan', credential: '' },
+      sessionKey: 's_off', prompt: '帮我看看报错', source: 'test',
+    })
+    assert.equal(captured.titleCalls, 0)
+    // 退回截断标题，仍然有个能认的名字
+    assert.equal((await sessions.load({ username: 'zhangsan', sessionKey: 's_off' })).title, '帮我看看报错')
   })
 })

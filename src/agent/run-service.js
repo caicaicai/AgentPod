@@ -15,6 +15,7 @@ import { buildModel, pickModel } from '../models/model-factory.js'
 import { buildApTools } from '../tools/index.js'
 import { memoryPrompt } from '../memory/capture.js'
 import { projectPrompt } from '../projects/store.js'
+import { generateTitle } from '../sessions/title.js'
 
 export function createRunService({
   config, logger, store, sandbox, broker, metrics, workspace = null,
@@ -114,8 +115,12 @@ export function createRunService({
   async function buildContext({ username, sessionKey, requestedProjectId }) {
     const prompts = []
     let projectId = ''
+    // 起标题只在会话的第一轮做一次。判据就在这儿：这次跑之前存储里还没有它。
+    // **不能事后判**（跑完它一定存在了），所以顺着这次已经发生的 load 一起带出去
+    let isNew = false
     try {
       const existing = await store.load({ username, sessionKey })
+      isNew = !existing
       projectId = existing ? String(existing.projectId || '') : String(requestedProjectId || '')
 
       let project = null
@@ -147,7 +152,7 @@ export function createRunService({
     } catch (error) {
       logger.warn('上下文装配失败，本轮不带项目与记忆', { username, sessionKey, err: error?.message })
     }
-    return { prompts, projectId }
+    return { prompts, projectId, isNew }
   }
 
   function snapshot() {
@@ -289,6 +294,20 @@ export function createRunService({
         })
         if (skipped.length) runLogger.debug('部分 AP 工具未启用', { skipped })
 
+        /**
+         * 起标题，**与本轮并行**。
+         *
+         * 不排在 runTurn 后面，是因为那样它的耗时会实打实地加在用户等待上 ——
+         * memory capture 曾经就是这么干的，实测让界面在模型答完之后又转 4.3 秒。
+         * 而标题只需要用户的第一句话，本来就不必等回复。等这一轮跑完时，
+         * 它早就回来了，`await` 基本是零成本。
+         *
+         * 只在会话第一轮做一次；失败一律回空串，退回 runTurn 里那个截断标题。
+         */
+        const titling = context.isNew && config.sessions?.autoTitle !== false && config.llm?.mode !== 'faux'
+          ? generateTitle({ model, apiKey: llm.key || access.apiKey, prompt, logger: runLogger })
+          : null
+
         const result = await runTurn({
           runId,
           username,
@@ -356,6 +375,22 @@ export function createRunService({
           },
         })
 
+        /**
+         * 标题落库要排在 final **之前**：前端收到 final 就会去刷会话列表，
+         * 晚一步的话侧栏上会先闪一下截断标题，过一会儿才变 —— 而这一下闪动
+         * 看起来就像"标题被改错了又改回来"。
+         */
+        let title = ''
+        if (titling) {
+          title = await titling
+          if (title) {
+            await store.patch?.({ username, sessionKey, title })?.catch?.((error) => {
+              runLogger.warn('标题落库失败，保留截断标题', { err: error?.message })
+            })
+            runLogger.debug('已为新会话起标题', { sessionKey })
+          }
+        }
+
         metrics?.recordRun({ username, source, status: 'ok', durationMs: result.durationMs, usage: result.usage, modelId: model.id })
         runLogger.info('run 完成', {
           durationMs: result.durationMs,
@@ -373,6 +408,9 @@ export function createRunService({
           // 本轮耗时与工具调用次数，给界面显示。与刷新后历史里的那份**同源同算法**
           // （见 sessions/transcript.js 的 attachTurnStats），所以刷新前后一定一致。
           turnStats: result.turnStats,
+          // 新会话这一轮起的标题（没起成就是空串）。界面照常会去刷会话列表，
+          // 带上它是给 OpenAPI 这类拿不到列表的调用方看的
+          title,
         })
 
         /**

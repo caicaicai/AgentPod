@@ -192,6 +192,7 @@ sandbox-worker/bin/check-namespace-caps.sh
 |------|--------|------|
 | `MEMORY_ENABLED` | `1` | 跨会话长期记忆 |
 | `PROJECTS_ENABLED` | `1` | 项目分组 + 项目级指令 |
+| `SESSION_AUTO_TITLE` | `1` | 第一轮让模型给会话起标题（一个会话一次） |
 | `ARTIFACTS_ENABLED` | `1` | 作品：带版本的成品，独立于对话正文 |
 | `ARTIFACT_ALLOWED_ORIGINS` | 空 | 作品预览允许加载的外部源（逗号分隔）。**默认完全离线**（Vue / mermaid 运行时自带，无需 CDN） |
 | `ARTIFACT_MAX_FILES` | `40` | 一份作品最多几个文件 |

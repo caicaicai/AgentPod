@@ -192,6 +192,7 @@ See [`.env.example`](.env.example) for the complete annotated reference.
 |----------|---------|-------------|
 | `MEMORY_ENABLED` | `1` | Long-term cross-session memory |
 | `PROJECTS_ENABLED` | `1` | Project-based session grouping with instructions |
+| `SESSION_AUTO_TITLE` | `1` | Let the model name each conversation on its first turn (once per session) |
 | `ARTIFACTS_ENABLED` | `1` | Versioned artifacts kept outside the transcript |
 | `ARTIFACT_ALLOWED_ORIGINS` | empty | External origins the artifact preview may load (comma-separated). **Fully offline by default** (Vue / mermaid runtimes ship with the app) |
 | `ARTIFACT_MAX_FILES` | `40` | Maximum files per artifact |
