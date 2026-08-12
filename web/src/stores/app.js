@@ -867,17 +867,44 @@ export function setPick(raw) {
  * 与「继续改它」同一条退路 —— 原对话不在了就开一条新的（作品按用户存，不绑会话）。
  * 话术里带着元素的 outerHTML，模型基本可以直接拿它当 update 的 old_str。
  */
-export async function askAboutElement() {
+export async function askAboutElement(instruction = '') {
   const meta = state.artifactDetail?.meta
   const pick = state.artifactPick
   if (!meta || !pick) return
+
   const context = { meta: { id: meta.id, title: meta.title, kind: meta.kind }, pick }
+  const said = String(instruction || '').trim()
+  /**
+   * **把预览留住。**
+   *
+   * `openSession` 会清掉 artifactDetail（切会话时该清），但这条路径正相反：
+   * 用户刚在预览里点了一个元素，接下来要看着它被改。从前这里还顺手
+   * `state.panel = ''` 把抽屉也关了 —— 于是人被甩到一个没有预览的页面上，
+   * 而他本来正盯着那个元素。快照下来，跳完再放回去。
+   */
+  const keepOpen = state.artifactDetail
   clearPick()
   closeLibrary()
-  if (!(meta.sessionKey && await openSession(meta.sessionKey))) startNewSession()
-  // 挂成一枚 chip，输入框留给用户写"要怎么改"
+
+  if (meta.sessionKey && !(await openSession(meta.sessionKey))) startNewSession()
+  else if (!meta.sessionKey) startNewSession()
+
+  state.artifactDetail = keepOpen
+  state.panel = 'artifact'
   state.composerContext = context
-  state.panel = ''
+
+  /**
+   * 说了要改什么就直接发，没说就只把它挂到输入框上。
+   *
+   * 不自动发的那一支是有用的：有人习惯在大输入框里慢慢写，浮层里那两行不够。
+   * 正在跑一轮时也不发 —— send 本来就会拒绝，静默失败还不如留着让他自己发。
+   */
+  if (!said || state.live) {
+    state.draft = said
+    return
+  }
+  state.draft = said
+  await send()
 }
 
 export async function deleteArtifact(id) {

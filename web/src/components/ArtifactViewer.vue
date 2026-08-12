@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import AppIcon from './AppIcon.vue'
 import { copyToClipboard } from '../lib/debug-bundle.js'
@@ -103,6 +103,9 @@ const kb = (bytes) => (bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${by
 /* ═══════════════ 元素拾取 ═══════════════ */
 
 const frame = ref(null)
+const note = ref(null)
+/** 悬浮卡里那句"要怎么改" —— 留在组件里，它是一次性的，不值得进全局状态 */
+const pickNote = ref('')
 const canInspect = computed(() => Boolean(meta.value) && supportsInspect(meta.value.kind) && tab.value === 'preview')
 
 function togglePicking() {
@@ -126,6 +129,19 @@ function onPreviewMessage(event) {
   if (!frame.value || event.source !== frame.value.contentWindow) return
   if (event.data?.__ap !== 'picked') return
   setPick(event.data)
+  pickNote.value = ''
+  // 选完光标直接落进输入框：下一步一定是说"要怎么改"
+  nextTick(() => note.value?.focus())
+}
+
+function confirmPick() {
+  askAboutElement(pickNote.value)
+  pickNote.value = ''
+}
+
+function onNoteKeydown(event) {
+  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') confirmPick()
+  if (event.key === 'Escape') clearPick()
 }
 
 onMounted(() => window.addEventListener('message', onPreviewMessage))
@@ -199,46 +215,70 @@ watch(() => [meta.value?.id, detail.value?.version, tab.value].join(':'), clearP
     -->
     <p v-if="previewError && tab === 'preview'" class="note warn">{{ previewError }}</p>
 
+    <!--
+      ⚠️ 这三支必须是**连着的一条 v-if 链**，中间不能插别的带 v-if 的元素。
+      插断过一次，代价是：iframe 变成在 previewHtml 还是空串时就挂载，
+      而之后改 srcdoc 不会让它重新导航 —— 表现是"打开一片空白，切到源码再切回来才有"。
+      所以拾取相关的浮层都放在 .preview-wrap **里面**，不参与这条链。
+    -->
     <div v-if="state.artifactLoading || (previewing && tab === 'preview')" class="empty">
       <span class="spinner" />{{ previewing ? '正在渲染…' : '载入中…' }}
     </div>
 
-    <p v-if="state.artifactPicking" class="note pick-hint">
-      在预览里点一个元素 —— 只有那一处会被交给助手。按这个按钮或换标签页可取消。
-    </p>
+    <div v-else-if="tab === 'preview' && needsFrame(meta.kind)" class="preview-wrap">
+      <!--
+        ⚠️ 预览必须走这个 iframe，而且 sandbox 里**绝不能出现 allow-same-origin**。
+        内容是模型生成的，而模型的输入里有邮件和网页 —— 谁能往里塞脚本，
+        取决于谁能给这个用户发东西。理由与另一道防线（文档内 CSP）见
+        web/src/lib/artifact-view.js 的文件头。
+      -->
+      <iframe
+        ref="frame"
+        :key="`${meta.id}-${detail.version}`"
+        class="preview-frame"
+        :sandbox="PREVIEW_SANDBOX"
+        :srcdoc="previewHtml"
+        title="作品预览"
+        referrerpolicy="no-referrer"
+      />
 
-    <!--
-      选中结果只用插值渲染（Vue 会转义）。它来自沙箱文档，而那份文档是模型
-      生成的：当 HTML 塞进去等于把第一道防线绕过来了。
-    -->
-    <div v-if="state.artifactPick" class="picked">
-      <div class="picked-main">
-        <code class="picked-label">{{ state.artifactPick.label }}</code>
-        <span v-if="state.artifactPick.text" class="picked-text">{{ state.artifactPick.text }}</span>
-        <code class="picked-path">{{ state.artifactPick.selector }}</code>
+      <div v-if="state.artifactPicking" class="pick-hint">
+        <AppIcon name="crosshair" :size="13" />在预览里点一个元素
+        <button type="button" @click="togglePicking">取消</button>
       </div>
-      <button type="button" class="ghost-btn" @click="clearPick">取消</button>
-      <button type="button" class="primary-btn" @click="askAboutElement">
-        <AppIcon name="sparkle" :size="14" filled />让助手改这里
-      </button>
-    </div>
 
-    <!--
-      ⚠️ 预览必须走这个 iframe，而且 sandbox 里**绝不能出现 allow-same-origin**。
-      内容是模型生成的，而模型的输入里有邮件和网页 —— 谁能往里塞脚本，
-      取决于谁能给这个用户发东西。理由与另一道防线（文档内 CSP）见
-      web/src/lib/artifact-view.js 的文件头。
-    -->
-    <iframe
-      v-else-if="tab === 'preview' && needsFrame(meta.kind)"
-      ref="frame"
-      :key="`${meta.id}-${detail.version}`"
-      class="preview-frame"
-      :sandbox="PREVIEW_SANDBOX"
-      :srcdoc="previewHtml"
-      title="作品预览"
-      referrerpolicy="no-referrer"
-    />
+      <!--
+        选中之后就地弹一张小卡，**不离开预览**。
+        从前是直接跳回对话、把提示词塞进输入框 —— 预览被关掉、人被甩到另一个页面，
+        而他本来正盯着那个元素看。改这一处的全过程都该发生在看得见它的地方。
+
+        卡片里的字段来自沙箱文档的 postMessage（模型生成的页面可以伪造），
+        所以只用插值渲染，Vue 会转义。绝不 v-html。
+      -->
+      <div v-if="state.artifactPick" class="pick-pop">
+        <div class="pop-head">
+          <code>{{ state.artifactPick.label }}</code>
+          <span v-if="state.artifactPick.text" class="pop-text">{{ state.artifactPick.text }}</span>
+          <button type="button" class="chip-x" title="取消" @click="clearPick">
+            <AppIcon name="x" :size="12" />
+          </button>
+        </div>
+        <code class="pop-path">{{ state.artifactPick.selector }}</code>
+        <textarea
+          ref="note"
+          v-model="pickNote"
+          rows="2"
+          placeholder="这一处要怎么改？（留空则只把它带到输入框）"
+          @keydown="onNoteKeydown"
+        />
+        <div class="pop-foot">
+          <span class="pop-hint">⌘/Ctrl + Enter</span>
+          <button type="button" class="primary-btn" :disabled="Boolean(state.live)" @click="confirmPick">
+            <AppIcon name="sparkle" :size="13" filled />让助手改这里
+          </button>
+        </div>
+      </div>
+    </div>
 
     <template v-else>
       <!-- 多文件才画文件条：单文件作品画一排只有一个格子的标签是噪音 -->
@@ -364,87 +404,138 @@ watch(() => [meta.value?.id, detail.value?.version, tab.value].join(':'), clearP
   color: var(--brand-accent);
 }
 
-.pick-hint {
-  color: var(--brand-accent);
+/* 预览容器：浮层都定位在它里面，而不是插进上面那条 v-if 链 */
+.preview-wrap {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 320px;
 }
 
-.picked {
+.pick-hint {
+  position: absolute;
+  top: 10px;
+  left: 50%;
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex: 0 0 auto;
-  padding: 9px 11px;
+  gap: 7px;
+  padding: 6px 8px 6px 11px;
+  border-radius: 999px;
+  background: var(--brand-accent);
+  color: #fff;
+  font-size: 12px;
+  white-space: nowrap;
+  transform: translateX(-50%);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--foreground) 25%, transparent);
+}
+.pick-hint button {
+  padding: 1px 8px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+  color: #fff;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.pick-hint button:hover {
+  background: rgba(255, 255, 255, 0.34);
+}
+
+/*
+  选中之后的小卡：**压在预览上**，不把人带走。
+  放右下角是因为大多数页面的重点在左上，盖住那儿最碍事。
+*/
+.pick-pop {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: min(340px, calc(100% - 24px));
+  padding: 10px 11px;
   border: 1px solid color-mix(in srgb, var(--brand-accent) 40%, var(--border));
   border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--brand-accent) 8%, transparent);
+  background: var(--background);
+  box-shadow: 0 12px 34px color-mix(in srgb, var(--foreground) 26%, transparent);
 }
-.picked-main {
+.pop-head {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex: 1;
+  align-items: center;
+  gap: 7px;
   min-width: 0;
 }
-.picked-label {
+.pop-head code {
   flex: 0 0 auto;
   color: var(--brand-accent);
   font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 600;
 }
-.picked-text {
+.pop-text {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
-  color: var(--foreground);
-  font-size: 12.5px;
+  color: var(--muted-foreground);
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.picked-path {
-  flex: 0 1 auto;
+.pop-path {
   overflow: hidden;
   color: var(--muted-foreground);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 下载没有专门的图标，把"上传"那个箭头转过来用 */
-.down {
-  transform: rotate(180deg);
-}
-
-/* 文件多起来之后要能换行看全，而不是挤成一条横向滚动的缝 */
-.filebar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  flex: 0 0 auto;
-}
-.filechip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 9px;
+.pick-pop textarea {
+  padding: 7px 9px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 12.5px;
+  line-height: 1.55;
+  resize: vertical;
+}
+.pick-pop textarea:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--brand-accent) 50%, var(--border));
+}
+.pop-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pop-hint {
+  margin-right: auto;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.pop-foot .primary-btn {
+  padding: 6px 11px;
+  font-size: 12.5px;
+}
+.chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
   background: transparent;
   color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
   cursor: pointer;
 }
-.filechip:hover {
+.chip-x:hover {
   background: var(--secondary);
   color: var(--foreground);
-}
-.filechip.on {
-  border-color: color-mix(in srgb, var(--brand-accent) 45%, var(--border));
-  background: color-mix(in srgb, var(--brand-accent) 10%, transparent);
-  color: var(--foreground);
-}
-.entry-dot {
-  color: var(--brand-accent);
-  font-size: 8px;
 }
 
 /*
@@ -453,14 +544,13 @@ watch(() => [meta.value?.id, detail.value?.version, tab.value].join(':'), clearP
 */
 .preview-frame {
   flex: 1;
-  min-height: 320px;
   width: 100%;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   /* 生成的页面基本都假设自己在白底上，跟着深色主题走会出现白字白底 */
   background: #fff;
 }
-.viewer.roomy .preview-frame {
+.viewer.roomy .preview-wrap {
   min-height: 480px;
 }
 
