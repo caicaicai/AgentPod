@@ -199,7 +199,7 @@ function onDevUsernameChange(event) {
         @click="openLibrary"
       >
         <AppIcon name="app-window" :size="16" /><span>作品</span>
-        <span class="pill">{{ state.libraryArtifacts.length || state.artifacts.length || 0 }}</span>
+        <span class="pill">{{ state.libraryArtifacts.length }}</span>
       </button>
 
       <div class="identity">

@@ -44,9 +44,18 @@ export function onNeedLogin(callback) {
 
 /**
  * 401 时弹出前端登录框（password 模式）。
+ *
+ * `sentToken` 是**这次请求实际带出去的那个令牌**。它存在是为了挡住一类竞态：
+ * 页面加载时会并发打好几个接口，如果 localStorage 里躺着一个失效令牌
+ * （服务端没配 SESSION_SECRET 时，重启就会让所有旧令牌失效），这几个请求会**一起** 401。
+ * 第一条把令牌清掉、弹出登录框；用户登录成功之后，**后到的那几条 401 仍在路上** ——
+ * 不判一下就会把刚登录好的人又踢回登录框。
+ *
+ * 判据是"令牌变过没有"：变过就说明这条 401 说的是一个我们已经扔掉的身份，与现在无关。
  */
-function handleUnauthorized(status, payload) {
+function handleUnauthorized(status, payload, sentToken) {
   if (status !== 401 || redirecting) return ''
+  if (sentToken && sentToken !== getAuthToken()) return ''
 
   // password 模式：清掉过期 token，通知前端弹登录框
   if (payload?.details?.authMode === 'password') {
@@ -157,7 +166,7 @@ export function getStreamTrace() {
 }
 
 /** 两处（普通请求 / SSE 流）用同一套 401 处理与记账，别各写一遍 */
-function toApiError(response, payload, text, { method = 'GET', path = '' } = {}) {
+function toApiError(response, payload, text, { method = 'GET', path = '', sentToken = '' } = {}) {
   recordEvent({
     method,
     path,
@@ -167,7 +176,7 @@ function toApiError(response, payload, text, { method = 'GET', path = '' } = {})
     requestId: payload?.requestId || response.headers.get('x-request-id') || '',
     traceId: response.headers.get('x-trace-id') || '',
   })
-  const redirectMessage = handleUnauthorized(response.status, payload)
+  const redirectMessage = handleUnauthorized(response.status, payload, sentToken)
   return new ApiError(redirectMessage || payload?.message || text || `HTTP ${response.status}`, {
     code: payload?.code || '',
     status: response.status,
@@ -178,6 +187,8 @@ function toApiError(response, payload, text, { method = 'GET', path = '' } = {})
 }
 
 async function request(path, { method = 'GET', body } = {}) {
+  // 发出去之前记下用的是哪个令牌 —— 回来时要靠它判断这条 401 还算不算数
+  const sentToken = getAuthToken()
   const response = await fetch(path, {
     method,
     credentials: 'include', // sso 模式全靠它把登录态 cookie 带上
@@ -191,7 +202,7 @@ async function request(path, { method = 'GET', body } = {}) {
   } catch {
     // 不是 JSON（网关的错误页之类），把原文当消息
   }
-  if (!response.ok) throw toApiError(response, payload, text, { method, path })
+  if (!response.ok) throw toApiError(response, payload, text, { method, path, sentToken })
   return payload
 }
 

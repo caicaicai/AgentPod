@@ -8,7 +8,7 @@ import {
   ARTIFACT_STARTERS, KIND_META, filterArtifacts, kindIcon, kindLabel,
 } from '../lib/artifact-view.js'
 import {
-  closeArtifactDetail, closeLibrary, openArtifact, openArtifactSession, refreshLibrary,
+  closeArtifactDetail, closeLibrary, openArtifact, openArtifactSession, refreshArtifacts,
   startArtifactFrom, state,
 } from '../stores/app.js'
 
@@ -67,7 +67,7 @@ const sessionTitle = (sessionKey) => state.sessions.find((item) => item.sessionK
           <AppIcon name="search" :size="14" />
           <input v-model="state.librarySearch" type="search" placeholder="搜标题或文件名" />
         </div>
-        <button type="button" class="icon-btn" title="刷新" @click="refreshLibrary">
+        <button type="button" class="icon-btn" title="刷新" @click="refreshArtifacts">
           <AppIcon name="refresh" :size="16" />
         </button>
       </div>

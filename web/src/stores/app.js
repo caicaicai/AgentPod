@@ -142,6 +142,25 @@ export function hideBanner() {
   state.banner = ''
 }
 
+/**
+ * 加载类失败 → 横幅。**但 401 不算**。
+ *
+ * ── 这条规则是从一个真实现象里来的 ────────────────────────────────────
+ *
+ * 服务端没配 SESSION_SECRET 时，签名密钥每次启动随机生成，于是重启之后
+ * localStorage 里那个令牌就失效了。而 `boot()` 只看"有没有令牌"、不看它还灵不灵，
+ * 所以会带着这个死令牌把首屏那一批接口全打出去 —— 六条一起 401。
+ * 第一条弹出登录框，同时 `refreshSessions` 的 catch 画出一条
+ * 「会话列表加载失败：需要登录」。用户登录成功、一切正常之后，**那条横幅还挂在上面**。
+ *
+ * 根子上 401 就不该走横幅这条路：它不是一个用户能处理的错误，
+ * 而"要登录"这件事已经由登录框本身表达了。横幅只会盖在它上面变成噪音。
+ */
+function reportLoadError(prefix, error) {
+  if (error?.status === 401 || error?.redirecting) return
+  showBanner(`${prefix}：${error.message}`)
+}
+
 export function toggleTheme() {
   state.theme = state.theme === 'dark' ? 'light' : 'dark'
   document.documentElement.dataset.theme = state.theme
@@ -272,7 +291,7 @@ export async function refreshSessions() {
     // 当前会话已经落库了，"新对话"那行就该消失
     if (state.sessions.some((session) => session.sessionKey === state.activeKey)) state.pendingNew = false
   } catch (error) {
-    showBanner(`会话列表加载失败：${error.message}`)
+    reportLoadError('会话列表加载失败', error)
   }
 }
 
@@ -283,8 +302,8 @@ export async function openSession(key) {
   saveDraft() // 先把当前这条的草稿收好，再换人
   state.activeKey = key
   state.turns = []
-  // 作品跟着会话走：不清掉的话，切过去的头一瞬间列的还是上一条会话的东西
-  state.artifacts = []
+  // 作品跟着会话走。先按缓存本地算一遍（立刻就对），再后台拉一次兜住别处的改动
+  syncSessionArtifacts()
   state.artifactDetail = null
   loadDraft()
   refreshArtifacts()
@@ -312,7 +331,7 @@ export async function openSession(key) {
     return true
   } catch (error) {
     if (error.status !== 404) {
-      showBanner(`会话加载失败：${error.message}`)
+      reportLoadError('会话加载失败', error)
       return false
     }
     // 服务端没有这条会话。留在这个 key 上当新对话用，让调用方决定要不要提示
@@ -330,8 +349,8 @@ export function startNewSession() {
   state.activeKey = newSessionKey()
   state.pendingNew = true
   state.turns = []
-  // 新会话还没有任何作品，不清就会挂着上一条的
-  state.artifacts = []
+  // 新会话名下还没有作品，本地过滤自然得到空列表
+  syncSessionArtifacts()
   state.artifactDetail = null
   loadDraft()
 }
@@ -418,7 +437,7 @@ export async function refreshProjects() {
       localStorage.removeItem(PROJECT_KEY)
     }
   } catch (error) {
-    showBanner(`项目列表加载失败：${error.message}`)
+    reportLoadError('项目列表加载失败', error)
   }
 }
 
@@ -611,22 +630,38 @@ export async function cronAction(cron, action) {
 /* ═══════════════ 作品 ═══════════════ */
 
 /**
- * 当前会话的作品清单。
+ * 作品清单：**一次请求，一份真相**。
  *
- * **按会话拉，不是按用户**：作品面板是跟着当前对话走的，把别的会话的混进来，
- * 用户只会以为串号了。清单接口刻意不带正文，所以这一次请求很轻，可以在每轮
- * 对话结束时随手刷一遍。
+ * ── 为什么不按会话去拉 ──────────────────────────────────────────────────
+ *
+ * 起初是两份：侧栏/库读"全部"，对话抽屉读"当前会话"，各有各的请求。
+ * 于是它们会不一致 —— 侧栏那个数字要等你**点进作品库**才被填上，在那之前
+ * 明明有作品却显示 0；删掉一份也得记着两处都刷，漏一处就留下一张已经没了的卡片。
+ *
+ * 清单接口本来就不带正文（很轻），所以一次全取回来，
+ * "当前会话那份"退化成一次本地过滤。两个数字从此不可能对不上。
  */
 export async function refreshArtifacts() {
   if (!state.features.artifacts) return
+  state.libraryLoading = true
   try {
-    const data = await api.listArtifacts(state.activeKey)
-    state.artifacts = data.artifacts || []
+    // 不传 sessionKey = 这个人的全部作品
+    const data = await api.listArtifacts()
+    state.libraryArtifacts = data.artifacts || []
     state.artifactPreview = data.preview || { allowedOrigins: [] }
+    syncSessionArtifacts()
     state.artifactNote = ''
   } catch (error) {
-    state.artifactNote = `作品清单加载失败：${error.message}`
+    // 401 由登录框负责表达，见 reportLoadError 的说明
+    if (error?.status !== 401) state.artifactNote = `作品清单加载失败：${error.message}`
+  } finally {
+    state.libraryLoading = false
   }
+}
+
+/** 当前会话那份 = 全量的过滤结果。切会话时先本地算一次，界面不用等请求回来 */
+function syncSessionArtifacts() {
+  state.artifacts = state.libraryArtifacts.filter((item) => item.sessionKey === state.activeKey)
 }
 
 /**
@@ -665,7 +700,7 @@ export async function openLibrary() {
   state.view = 'artifacts'
   state.panel = ''
   state.artifactDetail = null
-  await refreshLibrary()
+  await refreshArtifacts()
 }
 
 export function closeLibrary() {
@@ -673,21 +708,6 @@ export function closeLibrary() {
   state.artifactDetail = null
 }
 
-export async function refreshLibrary() {
-  if (!state.features.artifacts) return
-  state.libraryLoading = true
-  try {
-    // 不传 sessionKey = 这个人的全部作品（接口本来就支持，不用为它加后端）
-    const data = await api.listArtifacts()
-    state.libraryArtifacts = data.artifacts || []
-    state.artifactPreview = data.preview || { allowedOrigins: [] }
-    state.artifactNote = ''
-  } catch (error) {
-    state.artifactNote = `作品库加载失败：${error.message}`
-  } finally {
-    state.libraryLoading = false
-  }
-}
 
 /**
  * 「继续改它」：回到产出这份作品的那条对话。
@@ -760,9 +780,8 @@ export async function deleteArtifact(id) {
     return
   }
   if (state.artifactDetail?.meta?.id === id) state.artifactDetail = null
-  // 两份清单口径不同（本会话 / 全部），删完都要跟上，否则另一处还挂着一张已经没了的卡片
+  // 只有一份清单，刷一次两处都跟上（侧栏计数、库、抽屉列表）
   await refreshArtifacts()
-  if (state.view === 'artifacts') await refreshLibrary()
 }
 
 /* ═══════════════ 模型 / 技能 / 身份 ═══════════════ */
@@ -777,7 +796,11 @@ export async function loadModels() {
     state.user = data.user || null
     if (data.stale) showBanner('模型清单来自缓存（平台暂时取不到最新的），可继续使用')
   } catch (error) {
-    showBanner(`模型清单获取失败：${error.message}${error.requestId ? `（requestId ${error.requestId}）` : ''}`)
+    reportLoadError(
+      '模型清单获取失败',
+      // requestId 拼进消息里：用户拿一条报错来问时，凭它就能在服务端日志里定位那次请求
+      { ...error, message: `${error.message}${error.requestId ? `（requestId ${error.requestId}）` : ''}` },
+    )
   }
 }
 
@@ -1097,6 +1120,8 @@ async function bootAfterLogin() {
     refreshSessions(),
     state.features.memory ? loadMemory() : null,
     state.features.cron ? refreshCrons() : null,
+    // 不拉的话，侧栏「作品」后面那个数字要等用户点进作品库才变准
+    state.features.artifacts ? refreshArtifacts() : null,
   ])
 
   if (!isRedirectingToLogin()) clearSsoRetryMarker()
@@ -1110,7 +1135,12 @@ async function bootAfterLogin() {
 
 export async function boot() {
   // password 模式下，401 时不跳 SSO 而是弹登录框
-  onNeedLogin(() => { state.needLogin = true })
+  onNeedLogin(() => {
+    state.needLogin = true
+    // 登录框一出来就把横幅清掉：这时候屏幕上挂着的多半是"因为没登录"才失败的那几条，
+    // 它们全都会在登录之后自动好，留着只会让人以为登录之后还有别的问题
+    hideBanner()
+  })
 
   try {
     state.health = await api.health()
