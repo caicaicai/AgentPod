@@ -16,7 +16,8 @@ import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  ARTIFACT_STARTERS, PREVIEW_SANDBOX, buildPreviewDoc, filterArtifacts, kindLabel, needsFrame,
+  ARTIFACT_RECIPES, KIND_META, PREVIEW_SANDBOX, buildPreviewDoc, composeArtifactPrompt,
+  filterArtifacts, kindLabel, needsFrame,
 } from '../web/src/lib/artifact-view.js'
 import { resolvePath } from '../web/src/lib/artifact-vue.js'
 import { layoutBlocks, readArtifactCard, toolBrief } from '../web/src/lib/tools.js'
@@ -315,18 +316,42 @@ describe('作品库', () => {
   })
 
   /**
-   * 作品没有"新建"按钮（它是模型产出的）。空列表时用户的本能是找那个按钮，
-   * 找不到就会以为功能没做好 —— 所以指引里必须有能**直接点**的话术。
+   * 作品没有"新建"按钮（它是模型产出的）。所以向导必须**覆盖每一种能产出的类型** ——
+   * 少一种，用户就永远不知道平台能做那件事。
    */
-  test('创建指引给的是能直接说出口的话，且覆盖主要类型', () => {
-    assert.ok(ARTIFACT_STARTERS.length >= 3)
-    for (const item of ARTIFACT_STARTERS) {
-      assert.ok(item.prompt.length > 15, `${item.title} 的话术太短，像功能名而不像人话`)
-      assert.ok(item.title && item.kind)
+  test('向导的配方覆盖全部类型，每条都说得清它擅长什么', () => {
+    assert.deepEqual(
+      ARTIFACT_RECIPES.map((item) => item.kind).sort(),
+      Object.keys(KIND_META).sort(),
+      '配方表和能渲染的类型必须一一对上',
+    )
+    for (const item of ARTIFACT_RECIPES) {
+      assert.ok(item.blurb.length > 8, `${item.kind} 的说明太短`)
+      assert.ok(item.lead, `${item.kind} 少了话术前缀`)
+      assert.ok(item.examples.length >= 2, `${item.kind} 的例子少于两条`)
+      for (const example of item.examples) {
+        assert.ok(example.length > 10, `${item.kind} 的例子太短，像功能名而不像人话`)
+      }
     }
-    const kinds = ARTIFACT_STARTERS.map((item) => item.kind)
-    for (const kind of ['web', 'vue', 'markdown', 'mermaid']) {
-      assert.ok(kinds.includes(kind), `指引里没覆盖 ${kind}`)
-    }
+  })
+
+  /**
+   * 拼歪了的表现是"我选了画图，它给我写了段代码"—— 而用户完全看不出是哪一步错的。
+   */
+  test('拼话术：把类型说进去，空描述不拼，已经说过的不重复说', () => {
+    assert.equal(
+      composeArtifactPrompt('mermaid', '下单到发货的流程'),
+      '画一张图：下单到发货的流程。',
+    )
+    assert.match(composeArtifactPrompt('vue', '一个数据表格'), /^用 Vue 3 写一个组件：一个数据表格/)
+    assert.match(composeArtifactPrompt('vue', '一个数据表格'), /components\/ 下的子组件。$/)
+
+    // 空描述拼不出话，按钮也该是禁用的
+    assert.equal(composeArtifactPrompt('web', '   '), '')
+    // 用户自己把话说全了就别再套一层
+    const full = '帮我做一个网页：贷款计算器'
+    assert.equal(composeArtifactPrompt('web', full), full)
+    // 不认识的类型退化成原样，不吞掉用户的话
+    assert.equal(composeArtifactPrompt('nope', '随便什么'), '随便什么')
   })
 })

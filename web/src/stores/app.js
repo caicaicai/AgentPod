@@ -102,6 +102,10 @@ export const state = reactive({
   /** 类型筛选，空串 = 全部 */
   libraryKind: '',
   libraryLoading: false,
+  /** 创建向导：选类型 + 写一句描述 → 拼成给模型的话 */
+  wizardOpen: false,
+  wizardKind: 'web',
+  wizardDraft: '',
   /** 服务端下发的预览约束，前端拿它拼 iframe 的 CSP，不在这边硬编 */
   artifactPreview: { allowedOrigins: [] },
   /** 面板里打开的那一份：{ meta, version, content, fileName } */
@@ -742,11 +746,38 @@ export async function openArtifactSession(meta) {
  * **没有"新建作品"按钮**，因为作品是模型产出的，不是用户手填的表单。
  * 所以这里做的是：回到对话、开一条新的、把话术填进输入框 —— 让用户看到
  * "原来是这么要的"，而不是对着一个空列表猜。
+ *
+ * 刻意**不自动发送**：那句话多半还要改一改（换个数据、加个条件），
+ * 替他按下回车等于剥夺了这一步。
  */
 export function startArtifactFrom(prompt) {
+  closeWizard()
   closeLibrary()
   startNewSession()
   state.draft = prompt
+}
+
+/* ── 创建向导 ── */
+
+/**
+ * 打开创建向导。
+ *
+ * 它不创建任何东西 —— 只是把"选类型 + 写一句想要什么"拼成一句给模型的话。
+ * 存在的理由见 artifact-view.js 里 ARTIFACT_RECIPES 上面那段：
+ * 指引只画在空状态里的话，做出第一份作品之后就再也没人知道还能做别的了。
+ */
+export function openWizard(kind = 'web') {
+  state.wizardKind = kind
+  state.wizardDraft = ''
+  state.wizardOpen = true
+}
+
+export function closeWizard() {
+  state.wizardOpen = false
+}
+
+export function setWizardKind(kind) {
+  state.wizardKind = kind
 }
 
 export function toggleArtifactFull() {

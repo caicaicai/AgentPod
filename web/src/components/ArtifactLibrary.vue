@@ -4,12 +4,13 @@ import { computed } from 'vue'
 import AppIcon from './AppIcon.vue'
 import ArtifactViewer from './ArtifactViewer.vue'
 import { formatTime } from '../lib/format.js'
+import ArtifactWizard from './ArtifactWizard.vue'
 import {
-  ARTIFACT_STARTERS, KIND_META, filterArtifacts, kindIcon, kindLabel,
+  ARTIFACT_RECIPES, KIND_META, filterArtifacts, kindIcon, kindLabel,
 } from '../lib/artifact-view.js'
 import {
-  closeArtifactDetail, closeLibrary, openArtifact, openArtifactSession, refreshArtifacts,
-  startArtifactFrom, state,
+  closeArtifactDetail, closeLibrary, openArtifact, openArtifactSession, openWizard,
+  refreshArtifacts, state,
 } from '../stores/app.js'
 
 /**
@@ -69,6 +70,13 @@ const sessionTitle = (sessionKey) => state.sessions.find((item) => item.sessionK
         </div>
         <button type="button" class="icon-btn" title="刷新" @click="refreshArtifacts">
           <AppIcon name="refresh" :size="16" />
+        </button>
+        <!--
+          常驻。指引只画在空状态里的话，用户做出第一份之后就再也看不到了 ——
+          于是"原来还能画流程图、还能写 Vue 组件"这件事永远没人知道。
+        -->
+        <button type="button" class="primary-btn" title="选类型、写一句想要什么" @click="openWizard()">
+          <AppIcon name="plus" :size="14" />新建作品
         </button>
       </div>
     </header>
@@ -145,27 +153,30 @@ const sessionTitle = (sessionKey) => state.sessions.find((item) => item.sessionK
           它不贴在对话里，而是单独存成一组文件，可以预览、切版本、下载，
           后续想改就在那条对话里接着说，助手会在原来那份上出新版本。
         </p>
-        <p class="guide-lead subtle">
-          没有「新建」按钮 —— 直接在对话里提要求就行。下面几句可以直接用：
-        </p>
+        <button type="button" class="primary-btn guide-cta" @click="openWizard()">
+          <AppIcon name="sparkle" :size="15" filled />新建作品
+        </button>
+
+        <p class="guide-lead subtle">或者直接挑一种，看看它能做什么：</p>
 
         <div class="starters">
           <button
-            v-for="item in ARTIFACT_STARTERS"
-            :key="item.title"
+            v-for="item in ARTIFACT_RECIPES"
+            :key="item.kind"
             type="button"
             class="starter"
-            @click="startArtifactFrom(item.prompt)"
+            @click="openWizard(item.kind)"
           >
             <span class="starter-head">
-              <AppIcon :name="kindIcon(item.kind)" :size="15" />{{ item.title }}
-              <span class="starter-kind">{{ KIND_META[item.kind].label }}</span>
+              <AppIcon :name="kindIcon(item.kind)" :size="15" />{{ KIND_META[item.kind].label }}
             </span>
-            <span class="starter-body">{{ item.prompt }}</span>
+            <span class="starter-body">{{ item.blurb }}</span>
           </button>
         </div>
       </div>
     </section>
+
+    <ArtifactWizard v-if="state.wizardOpen" />
   </main>
 </template>
 
@@ -408,6 +419,11 @@ const sessionTitle = (sessionKey) => state.sessions.find((item) => item.sessionK
   font-size: 13px;
 }
 
+.guide-cta {
+  margin-bottom: 22px;
+  padding: 9px 18px;
+}
+
 .starters {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -436,15 +452,6 @@ const sessionTitle = (sessionKey) => state.sessions.find((item) => item.sessionK
   color: var(--foreground);
   font-size: 13.5px;
   font-weight: 600;
-}
-.starter-kind {
-  margin-left: auto;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--foreground) 8%, transparent);
-  color: var(--muted-foreground);
-  font-size: 10.5px;
-  font-weight: 400;
 }
 .starter-body {
   display: -webkit-box;

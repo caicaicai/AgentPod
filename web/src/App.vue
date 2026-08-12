@@ -12,7 +12,7 @@ import LoginOverlay from './components/LoginOverlay.vue'
 import MemoryPanel from './components/MemoryPanel.vue'
 import ProjectPanel from './components/ProjectPanel.vue'
 import SkillsPanel from './components/SkillsPanel.vue'
-import { boot, closeArtifactDetail, closeLibrary, saveDraft, state, stop } from './stores/app.js'
+import { boot, closeArtifactDetail, closeLibrary, closeWizard, saveDraft, state, stop } from './stores/app.js'
 
 onMounted(boot)
 
@@ -22,6 +22,7 @@ onMounted(boot)
  */
 function onKeydown(event) {
   if (event.key !== 'Escape') return
+  if (state.wizardOpen) { closeWizard(); return }
   if (state.lightbox) { state.lightbox = ''; return }
   if (state.panel) { state.panel = ''; return }
   // 作品库里逐层退：详情 → 列表 → 对话。一步退到底会让人丢掉刚翻到的位置
