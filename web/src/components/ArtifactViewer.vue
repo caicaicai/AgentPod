@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import AppIcon from './AppIcon.vue'
+import ShareBox from './ShareBox.vue'
 import { copyToClipboard } from '../lib/debug-bundle.js'
 import {
   PREVIEW_SANDBOX, buildPreviewDoc, downloadText, needsFrame, supportsInspect,
@@ -15,20 +16,39 @@ import { askConfirm } from '../lib/dialog.js'
 /**
  * 一份作品的正文视图：预览 / 源码 / 版本 / 下载 / 删除。
  *
- * 单独抽出来是因为它有**两个宿主**：对话右边的抽屉，和作品库的整页。
- * 各写一份的话，"预览异步、切版本、按文件读源码"这些逻辑就要维护两遍 ——
- * 而它们恰恰是这个功能里最容易出错的部分（见下面那段关于过期结果的说明）。
+ * 单独抽出来是因为它有**三个宿主**：对话右边的抽屉、作品库的整页，
+ * 以及分享出去之后访客看到的那一页。各写一份的话，"预览异步、切版本、
+ * 按文件读源码"这些逻辑就要维护三遍 —— 而它们恰恰是这个功能里最容易出错的部分
+ * （见下面那段关于过期结果的说明）。
+ *
+ * 前两个宿主读全局状态，第三个不能：**访客那一页没有登录态，也就没有 store 里的
+ * 那份 artifactDetail**。所以正文可以由 `detail` 传进来，传了就以它为准。
  */
 const props = defineProps({
   /** 铺满整页时留白更大、预览更高。抽屉里则要紧凑 */
   roomy: { type: Boolean, default: false },
+  /**
+   * 外部传进来的正文（`{ meta, version, files }`）。不传则读全局状态。
+   * 分享页走这一条 —— 它拿的是免登录接口的结果，跟 store 没有关系。
+   */
+  detail: { type: Object, default: null },
+  /**
+   * 只读：藏掉删除、元素拾取、分享这些**作者才有的**动作。
+   *
+   * 不是"藏起来就安全了"——服务端那几条接口本来就只认登录态里的 username。
+   * 藏它是因为给访客画一个点了必然失败的删除按钮，是在骗人。
+   */
+  readonly: { type: Boolean, default: false },
+  /** 只读宿主自己管加载态（store 那份 artifactLoading 与它无关） */
+  loading: { type: Boolean, default: false },
 })
 
 const tab = ref('preview')
 /** 源码页看的是哪个文件。作品是多文件的，这一格才是"读它"的主要入口 */
 const activeFile = ref('')
 
-const detail = computed(() => state.artifactDetail)
+const detail = computed(() => props.detail || state.artifactDetail)
+const busy = computed(() => (props.readonly ? props.loading : state.artifactLoading))
 const meta = computed(() => detail.value?.meta || null)
 const files = computed(() => detail.value?.files || [])
 const current = computed(
@@ -83,6 +103,11 @@ watch(
 )
 
 /* ═══════════════ 动作 ═══════════════ */
+
+/** 分享面板开着没有。作品换了就收起来 —— 那块面板说的是上一份的事 */
+const shareOpen = ref(false)
+const isShared = computed(() => Boolean(meta.value?.share?.token))
+watch(() => meta.value?.id, () => { shareOpen.value = false })
 
 const copied = ref(false)
 async function copySource() {
@@ -145,7 +170,9 @@ const frame = ref(null)
 const note = ref(null)
 /** 悬浮卡里那句"要怎么改" —— 留在组件里，它是一次性的，不值得进全局状态 */
 const pickNote = ref('')
-const canInspect = computed(() => Boolean(meta.value) && supportsInspect(meta.value.kind) && tab.value === 'preview')
+const canInspect = computed(
+  () => !props.readonly && Boolean(meta.value) && supportsInspect(meta.value.kind) && tab.value === 'preview',
+)
 
 function togglePicking() {
   const next = !state.artifactPicking
@@ -165,6 +192,19 @@ function togglePicking() {
  * 截断在 setPick 里，展示走模板插值（Vue 会转义），绝不 innerHTML。
  */
 function onPreviewMessage(event) {
+  /**
+   * ⚠️ 只读宿主（分享页）**整条不接**，而不是"接了但不显示"。
+   *
+   * 分享把威胁模型挪动了一格：以前这份文档只有作者自己会打开，注入是意外；
+   * 现在任何人都能把一条链接发给别人，注入是**故意**的。而拾取器这条通道上，
+   * 沙箱能主动往父页面推一条消息 —— 不拦的话，一份精心写的作品可以让访客那边
+   * 弹出一张**长得像我们自己界面**的卡片，上面的文字由攻击者决定
+   * （内容会被转义，所以不是 XSS，是冒充）。
+   *
+   * 访客那一页本来就没有"让助手改这里"可用，这条通道对他没有任何用处，
+   * 所以最干净的处置是：根本不听。
+   */
+  if (props.readonly) return
   if (!frame.value || event.source !== frame.value.contentWindow) return
   if (event.data?.__ap !== 'picked') return
   setPick(event.data)
@@ -239,11 +279,28 @@ watch(() => [meta.value?.id, detail.value?.version, tab.value].join(':'), clearP
         <button type="button" class="icon-btn" :title="`下载 ${current ? current.path : ''}`" @click="save">
           <AppIcon name="arrow-up" :size="15" class="down" />
         </button>
-        <button type="button" class="icon-btn danger" title="删除这份作品" @click="onDelete">
+        <!--
+          分享按钮**带状态**：已经分享出去的作品，这个图标是亮的。
+          没有这一点，作者过两天再打开就完全不记得自己有没有发过链接出去 ——
+          而"我以为我没分享"是这个功能唯一真正要命的失误。
+        -->
+        <button
+          v-if="!props.readonly && state.features.artifactShare"
+          type="button"
+          class="icon-btn"
+          :class="{ on: isShared }"
+          :title="isShared ? '已生成分享链接，点开可复制或撤销' : '生成一条谁都能打开的链接'"
+          @click="shareOpen = !shareOpen"
+        >
+          <AppIcon name="link" :size="15" />
+        </button>
+        <button v-if="!props.readonly" type="button" class="icon-btn danger" title="删除这份作品" @click="onDelete">
           <AppIcon name="trash" :size="15" />
         </button>
       </div>
     </div>
+
+    <ShareBox v-if="shareOpen && !props.readonly" :meta="meta" @close="shareOpen = false" />
 
     <p v-if="isOldVersion" class="note warn">
       你正在看第 {{ detail.version }} 版，最新的是第 {{ meta.version }} 版。
@@ -260,7 +317,7 @@ watch(() => [meta.value?.id, detail.value?.version, tab.value].join(':'), clearP
       而之后改 srcdoc 不会让它重新导航 —— 表现是"打开一片空白，切到源码再切回来才有"。
       所以拾取相关的浮层都放在 .preview-wrap **里面**，不参与这条链。
     -->
-    <div v-if="state.artifactLoading || (previewing && tab === 'preview')" class="empty">
+    <div v-if="busy || (previewing && tab === 'preview')" class="empty">
       <span class="spinner" />{{ previewing ? '正在渲染…' : '载入中…' }}
     </div>
 

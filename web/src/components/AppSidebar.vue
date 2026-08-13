@@ -6,7 +6,7 @@ import SessionRow from './SessionRow.vue'
 import {
   createProject, deleteSession, getDevUsername, identityName, logout, openSession, patchSession,
   renameSession, scheduleSearch, setDevUsername, startNewSession, state, switchProject,
-  toggleTheme, togglePanel, openLibrary,
+  toggleTheme, togglePanel, openLibrary, openMarket,
 } from '../stores/app.js'
 import { askConfirm, askText } from '../lib/dialog.js'
 
@@ -219,6 +219,21 @@ function onDevUsernameChange(event) {
       >
         <AppIcon name="app-window" :size="16" /><span>作品</span>
         <span class="pill">{{ state.libraryArtifacts.length }}</span>
+      </button>
+      <!--
+        市场紧挨着作品，因为它回答的是同一个问题的另一半：
+        「我做过什么」和「别人做过什么」。中间不插别的东西。
+        不带计数 —— 那个数字是别人发布的结果，跟这个用户没有关系，
+        画在这儿只会让人以为是自己的。
+      -->
+      <button
+        v-if="state.features.artifactMarket"
+        type="button"
+        class="navrow"
+        :class="{ on: state.view === 'market' }"
+        @click="openMarket"
+      >
+        <AppIcon name="store" :size="16" /><span>作品市场</span>
       </button>
 
       <div class="identity">

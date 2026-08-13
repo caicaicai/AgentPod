@@ -181,6 +181,14 @@ function toPublic(record) {
       note: item.note || '',
       pruned: Boolean(item.pruned),
     })),
+    /**
+     * 分享状态：`{ token, market, marketAt, summary, createdAt }`，没分享过是 null。
+     *
+     * 它是「这份作品还分不分享」的**权威**（指针表只是索引），细节见 shares.js 文件头。
+     * 只出现在作者自己看到的这一份形状里 —— 给访客的那份由 shares.js 单独拼，
+     * 刻意不复用这个函数。
+     */
+    share: record.share || null,
     createdAt: record.createdAt || 0,
     updatedAt: record.updatedAt || 0,
   }
@@ -471,6 +479,19 @@ export function createArtifactStore({ config, logger = console }) {
     async get({ username, id }) {
       if (!id) return null
       return toPublic(adaptLegacy(await mapFor(username).get(assertSegment(id, '作品 id'))))
+    },
+
+    /**
+     * 写分享状态。传 null 表示撤销（字段整个删掉，而不是留一个 `{}`）。
+     *
+     * **不产生新版本**：分享是"这份东西给谁看"，不是内容的改动。
+     * 走 merge 而不是 read-modify-write，是为了搭上 file-map 的按 key 串行队列 ——
+     * 作者点"发布到市场"的同一时刻模型可能正在出新版本，两者写的是同一个 JSON。
+     */
+    async setShare({ username, id, share }) {
+      const key = assertSegment(id, '作品 id')
+      const record = await mapFor(username).merge(key, { share: share || undefined })
+      return record ? toPublic(adaptLegacy(record)) : null
     },
 
     remove: removeOne,

@@ -18,6 +18,7 @@ import { createMemoryStore } from './memory/store.js'
 import { createMemoryCapture } from './memory/capture.js'
 import { createProjectStore } from './projects/store.js'
 import { createArtifactStore } from './artifacts/store.js'
+import { createShareStore } from './artifacts/shares.js'
 import { createCronStore } from './cron/store.js'
 import { createCronCredentialVault } from './cron/credentials.js'
 import { createScheduler } from './cron/scheduler.js'
@@ -47,6 +48,8 @@ async function main() {
   const memoryCapture = createMemoryCapture({ memory, config, logger })
   const projects = createProjectStore({ config, logger })
   const artifacts = createArtifactStore({ config, logger })
+  // 分享**依赖**作品而不是反过来：作品不知道自己被分享了也照样成立
+  const shares = createShareStore({ config, logger, artifacts })
   const crons = createCronStore({ config, logger })
   const cronVault = createCronCredentialVault({ config, logger })
 
@@ -95,7 +98,7 @@ async function main() {
   const scheduler = createScheduler({ config, logger, crons, vault: cronVault, runService, sessionStore: store })
   const app = createServer({
     config, logger, identity, broker, runService, store, llmInfoClient, metrics, workspace, skillManager,
-    memory, projects, crons, scheduler, cronVault, artifacts,
+    memory, projects, crons, scheduler, cronVault, artifacts, shares,
   })
 
   await app.listen(config.port)
@@ -119,6 +122,7 @@ async function main() {
     artifacts: artifacts.enabled
       ? `开（预览外部源：${config.artifacts.allowedOrigins.length ? config.artifacts.allowedOrigins.join(' ') : '全部禁止'}）`
       : '关',
+    artifactShare: shares.enabled ? `开（市场${shares.marketEnabled ? '开' : '关'}）` : '关',
     cron: crons.enabled ? `开（调度${scheduler.enabled ? '中' : '未启用'}，凭据 ${cronVault.mode}）` : '关',
     userWorkspace: workspace.enabled ? workspace.root : null,
     sandbox: sandbox.mode,
@@ -143,6 +147,14 @@ async function main() {
     // 不是不能开，是不能在日志里悄悄开。
     logger.warn('ARTIFACT_ALLOWED_ORIGINS 已配置：作品预览可以加载并连接这些外部源', {
       origins: config.artifacts.allowedOrigins,
+    })
+  }
+  if (shares.enabled) {
+    // 这是本服务唯一一条免鉴权的数据通道。它默认开着，所以更要在日志里说一句：
+    // 运维得知道"链接一旦转发出去，拿到的人不需要账号也能看"。
+    logger.info('作品分享已启用：作者生成的 /s/<token> 链接**免登录**即可访问', {
+      市场: shares.marketEnabled ? '开（需作者显式发布）' : '关',
+      关闭方式: 'ARTIFACT_SHARING_ENABLED=0',
     })
   }
   if (store.driver === 'file' || memory.enabled || crons.enabled || artifacts.enabled) {

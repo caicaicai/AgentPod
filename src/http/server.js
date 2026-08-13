@@ -166,7 +166,7 @@ async function serveStatic(res, pathname, { webDir, confineTo = webDir } = {}) {
 export function createServer({
   config, logger, identity, broker, runService, store, llmInfoClient, metrics, workspace = null,
   skillManager = null, memory = null, projects = null, crons = null, scheduler = null, cronVault = null,
-  artifacts = null,
+  artifacts = null, shares = null,
 }) {
   const webDir = config.webDir || DEFAULT_WEB_DIR
 
@@ -186,6 +186,40 @@ export function createServer({
     }
     if (!current) throw Errors.notFound('作品不存在')
     return current
+  }
+
+  /**
+   * 下发作品里的**单个文件的原文**。登录态那条路和分享那条路共用这一份。
+   *
+   * ⚠️ **无论什么后缀，一律 `text/plain`。** 这里躺着的是模型生成的 HTML：
+   * 用 `text/html` 回，这个 URL 就成了一个**同源**的、内容由模型（也就可能由
+   * 一封诱导邮件）决定的页面 —— 它能读走 localStorage 里的登录令牌。
+   * 预览走的是另一条路：文件进 JSON，由前端拼好后塞进不带 allow-same-origin 的
+   * sandbox iframe（见 web/src/lib/artifact-view.js）。
+   * 所以这条不变量很值钱：**本服务从不以 HTML 的身份吐出任何模型生成的内容。**
+   *
+   * 抽成一个函数正是为了守住它：分享功能上线时这段逻辑差点被复制一份，
+   * 而复制出来的那份迟早只改了其中一边 —— 那种漏洞从日志里一点也看不出来。
+   */
+  function sendArtifactFile(res, { current, wanted, download }) {
+    const target = wanted || current.meta.entry
+    const file = current.files.find((item) => item.path === target)
+    if (!file) throw Errors.notFound(`第 ${current.version} 版没有 ${target}`)
+
+    const body = Buffer.from(file.content, 'utf8')
+    res.writeHead(200, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Content-Length': body.length,
+      // 没有它，浏览器会去嗅探内容，一段 HTML 照样能被当页面渲染 ——
+      // 上面那条不变量就白写了
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Disposition': artifactDisposition({
+        fileName: artifactFileName({ title: current.meta.title, entry: file.path }),
+        download: Boolean(download),
+      }),
+      'Cache-Control': 'no-store',
+    })
+    return res.end(body)
   }
 
   const server = http.createServer(async (req, res) => {
@@ -233,6 +267,9 @@ export function createServer({
           cronScheduler: Boolean(scheduler?.enabled),
           cronCredentialMode: config.cron.credentialMode,
           artifacts: Boolean(artifacts?.enabled),
+          // 分开两个开关：能不能生成链接、能不能上广场，是两个决定（见 shares.js）
+          artifactShare: Boolean(shares?.enabled),
+          artifactMarket: Boolean(shares?.marketEnabled),
         },
       })
     }
@@ -285,7 +322,88 @@ export function createServer({
           && (await serveStatic(res, url.pathname, { webDir, confineTo: assetsDir }))) return
         // favicon 这类 Vite 放在产物根目录的静态文件
         if (url.pathname === '/favicon.svg' && (await serveStatic(res, url.pathname, { webDir }))) return
+
+        /**
+         * 分享页与市场页：把**我们自己的** index.html 回过去，由前端按路径决定画什么。
+         *
+         * 注意这里回的始终是同一个 SPA 骨架，**不是**那份作品的 HTML ——
+         * 作品正文只走 /v1/public/shares/:token 的 JSON，再由前端塞进
+         * 不带 allow-same-origin 的沙箱 iframe。同源的那一层永远是我们的代码。
+         *
+         * token 的合法性不在这里查：查了也只是把 404 提前，而"这个 token 存不存在"
+         * 该由前端拿数据接口的结果来说（那样错误提示是一个人看得懂的页面，
+         * 而不是浏览器默认的空白 404）。
+         */
+        if (shares?.enabled && (url.pathname.startsWith('/s/') || url.pathname === '/market')) {
+          if (await serveStatic(res, '/index.html', { webDir })) return
+        }
       }
+    }
+
+    /* ─────────────── 公开分享（**不需要身份**）─────────────── */
+
+    /**
+     * ⚠️ 整个服务里只有这一块在 identity.resolve 之前。加路由到这儿之前先想清楚：
+     * 它回的每一个字节都会被没有账号的人看到。
+     *
+     * 三条约束，任何新增的公开路由都要照做：
+     *   1. **只认 token**，绝不接受 username / artifactId 之类由调用方指定的定位参数 ——
+     *      否则这就成了一个"报上 id 就能读任意人作品"的接口；
+     *   2. 失败一律 404，不区分"没这个链接"和"链接被撤销了"——
+     *      区分开就等于给了一个探测 token 是否存在过的口子；
+     *   3. 正文一律 text/plain（见 sendArtifactFile 上面那段）。
+     */
+    if (url.pathname.startsWith('/v1/public/')) {
+      if (!shares?.enabled) throw Errors.notFound('本部署未启用作品分享（ARTIFACT_SHARING_ENABLED=0）')
+
+      if (req.method === 'GET' && url.pathname === '/v1/public/market') {
+        if (!shares.marketEnabled) throw Errors.notFound('本部署未启用作品市场（ARTIFACT_MARKET_ENABLED=0）')
+        return sendJson(res, 200, {
+          items: await shares.listMarket({
+            q: url.searchParams.get('q') || '',
+            kind: url.searchParams.get('kind') || '',
+          }),
+        })
+      }
+
+      if (req.method === 'GET' && url.pathname.startsWith('/v1/public/shares/')) {
+        let rest = ''
+        try {
+          rest = decodeURIComponent(url.pathname.slice('/v1/public/shares/'.length))
+        } catch {
+          throw Errors.notFound('没有这个接口') // 百分号编码都不合法，当没这条路由
+        }
+        const isRaw = rest.endsWith('/raw')
+        const token = isRaw ? rest.slice(0, -'/raw'.length) : rest
+        if (!token || token.includes('/')) throw Errors.notFound('没有这个接口')
+
+        const current = await shares.open(token)
+        // 撤销了、作品删了、token 是编的 —— 对外都是同一句话，见上面第 2 条
+        if (!current) throw Errors.notFound('这个分享链接不存在或已被取消')
+
+        if (isRaw) {
+          return sendArtifactFile(res, {
+            current,
+            wanted: url.searchParams.get('path'),
+            download: url.searchParams.get('download') === '1',
+          })
+        }
+
+        // 计数放在真的要回内容的这一支里，且不 await：它是"顺便"的东西，
+        // 一次写盘失败不该让访客看不成作品（见 shares.js 的 countView）
+        shares.countView(current.share.token)
+        return sendJson(res, 200, {
+          ...current,
+          // 与登录态那条清单接口同一个理由：前端拿它拼预览 iframe 的 CSP，
+          // 自己硬编一份的话，改了服务端配置而前端没跟上，两边谁也看不出来
+          preview: { allowedOrigins: config.artifacts.allowedOrigins },
+          // 分享页据此决定画不画"去作品市场"那个入口。访客没有 /healthz 那份能力宣告
+          // （他也不该为了看一份作品去打一遍平台的自检接口），所以在这儿一并给
+          features: { market: Boolean(shares.marketEnabled) },
+        })
+      }
+
+      throw Errors.notFound('没有这个接口')
     }
 
     // ---------- 以下都需要服务端校验过的身份 ----------
@@ -500,6 +618,10 @@ export function createServer({
         await workspace?.removeSession?.({ username: subject.username, sessionKey }).catch((error) => {
           reqLogger.warn('会话工作区清理失败', { sessionKey, err: error?.message })
         })
+        // 分享指针要在作品还查得到的时候清 —— 顺序反了就只能等读路径去自愈
+        await shares?.revokeForSession?.({ username: subject.username, sessionKey }).catch((error) => {
+          reqLogger.warn('会话作品分享清理失败', { sessionKey, err: error?.message })
+        })
         // 作品同理：它们只在这条会话的面板里露面，会话没了就再也点不到了
         await artifacts?.removeSession?.({ username: subject.username, sessionKey }).catch((error) => {
           reqLogger.warn('会话作品清理失败', { sessionKey, err: error?.message })
@@ -533,41 +655,70 @@ export function createServer({
 
       const rest = decodeURIComponent(url.pathname.slice('/v1/artifacts/'.length) || '')
       const isRaw = rest.endsWith('/raw')
-      const artifactId = isRaw ? rest.slice(0, -'/raw'.length) : rest
+      const isShare = rest.endsWith('/share')
+      const artifactId = isRaw ? rest.slice(0, -'/raw'.length)
+        : isShare ? rest.slice(0, -'/share'.length)
+          : rest
       if (!artifactId || artifactId.includes('/')) throw Errors.notFound('没有这个接口')
 
       /**
-       * 单个文件的原文。`?path=` 指定哪一个，不传取入口文件。
+       * ── 作者侧的分享开关 ──
        *
-       * ⚠️ **无论什么后缀，一律 `text/plain` 下发。** 这里躺着的是模型生成的 HTML：
-       * 用 `text/html` 回，这个 URL 就成了一个**同源**的、内容由模型（也就可能由
-       * 一封诱导邮件）决定的页面 —— 它能读走 localStorage 里的登录令牌。
-       * 预览走的是另一条路：文件进 JSON，由前端拼好后塞进不带 allow-same-origin 的
-       * sandbox iframe（见 web/src/lib/artifact-view.js）。
-       * 所以这条不变量很值钱：**本服务从不以 HTML 的身份吐出任何模型生成的内容**。
+       * 三个动词分得很开，因为它们是三件不同的事：
+       *   POST   生成分享链接（幂等，已有就回已有的 —— 见 shares.create）
+       *   PATCH  上/下市场、改简介
+       *   DELETE 撤销，链接立刻失效
+       *
+       * 注意 **username 一律取自 subject**，请求体里那个（如果有）看都不看。
+       * 反面教材见下面 PATCH /v1/sessions 那段：`{...body}` 把登录态解析出来的
+       * username 覆盖掉，于是"改自己的东西"变成了"改任何人的东西"。
        */
-      if (req.method === 'GET' && isRaw) {
-        const current = await readArtifactOr404({
-          username: subject.username, id: artifactId, version: url.searchParams.get('v'),
-        })
-        const wanted = url.searchParams.get('path') || current.meta.entry
-        const file = current.files.find((item) => item.path === wanted)
-        if (!file) throw Errors.notFound(`第 ${current.version} 版没有 ${wanted}`)
+      if (isShare) {
+        if (!shares?.enabled) throw Errors.notFound('本部署未启用作品分享（ARTIFACT_SHARING_ENABLED=0）')
 
-        const body = Buffer.from(file.content, 'utf8')
-        res.writeHead(200, {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Content-Length': body.length,
-          // 没有它，浏览器会去嗅探内容，一段 HTML 照样能被当页面渲染 ——
-          // 上面那条不变量就白写了
-          'X-Content-Type-Options': 'nosniff',
-          'Content-Disposition': artifactDisposition({
-            fileName: artifactFileName({ title: current.meta.title, entry: file.path }),
-            download: url.searchParams.get('download') === '1',
+        if (req.method === 'POST') {
+          const meta = await shares.create({ username: subject.username, artifactId })
+          if (!meta) throw Errors.notFound('作品不存在')
+          reqLogger.info('生成作品分享链接', { username: subject.username, id: artifactId })
+          return sendJson(res, 200, { ok: true, artifact: meta })
+        }
+
+        if (req.method === 'PATCH') {
+          const body = await readJsonBody(req, config.limits.bodyLimitBytes)
+          let meta
+          try {
+            meta = await shares.setMarket({
+              username: subject.username,
+              artifactId,
+              market: body.market,
+              summary: body.summary,
+            })
+          } catch (error) {
+            throw Errors.badRequest(error.message)
+          }
+          if (!meta) throw Errors.notFound('作品不存在')
+          return sendJson(res, 200, { ok: true, artifact: meta })
+        }
+
+        if (req.method === 'DELETE') {
+          const revoked = await shares.revoke({ username: subject.username, artifactId })
+          if (!revoked) throw Errors.notFound('这份作品没有在分享')
+          reqLogger.info('撤销作品分享', { username: subject.username, id: artifactId })
+          return sendJson(res, 200, { ok: true })
+        }
+
+        throw Errors.notFound('没有这个接口')
+      }
+
+      /** 单个文件的原文。`?path=` 指定哪一个，不传取入口文件。头的讲究见 sendArtifactFile */
+      if (req.method === 'GET' && isRaw) {
+        return sendArtifactFile(res, {
+          current: await readArtifactOr404({
+            username: subject.username, id: artifactId, version: url.searchParams.get('v'),
           }),
-          'Cache-Control': 'no-store',
+          wanted: url.searchParams.get('path'),
+          download: url.searchParams.get('download') === '1',
         })
-        return res.end(body)
       }
 
       if (req.method === 'GET') {
@@ -578,6 +729,11 @@ export function createServer({
       }
 
       if (req.method === 'DELETE') {
+        // 分享指针在**删之前**清掉 —— 删完就查不到 share.token 了。
+        // 漏了也不会漏数据（公开读那一关会核对作品还在不在），只是盘上多一个孤儿
+        await shares?.revokeForArtifact?.({ username: subject.username, artifactId }).catch((error) => {
+          reqLogger.warn('作品分享指针清理失败', { id: artifactId, err: error?.message })
+        })
         const removed = await artifacts.remove({ username: subject.username, id: artifactId })
         if (!removed) throw Errors.notFound('作品不存在')
         return sendJson(res, 200, { ok: true })

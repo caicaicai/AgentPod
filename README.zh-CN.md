@@ -26,6 +26,7 @@ AgentPod 是一个**服务端多租户 AI Agent 服务**，基于 [pi](https://g
 - **沙盒代码执行** — 命令运行在隔离的 Linux 命名空间中（PID/mount/network/uts/ipc），每个槽位独立 cgroup，租户间零共享。
 - **对话界面** — 内置 Vue 3 聊天界面，支持 SSE 流式输出、项目管理、会话历史、斜杠命令。
 - **作品（Artifact）** — 助手产出的成品**作为一组文件**单独存，不贴在对话里：多文件网页、Vue 3 单文件组件项目、Markdown 文档（支持 mermaid 图）、SVG、代码。**独立的作品库**（跨会话、可搜索筛选、带创建指引）+ 对话内的侧栏抽屉，实时预览、按文件读源码、切版本、下载；改一行走定点替换，不必整份重发。Vue 在浏览器里现编译、mermaid 自托管，**预览默认完全离线**，跑在不带 `allow-same-origin` 的沙箱 iframe + `default-src 'none'` 的 CSP 里 —— 模型生成的脚本既读不到登录态也出不了网。
+- **分享与作品市场** — 一份作品可以变成一条 `/s/<token>` 的链接，**拿到的人不需要账号**就能打开，看到的始终是最新版；随时可撤销，撤了立刻失效。再点一次「发布到市场」才会出现在公开的广场 `/market` 上 —— 私发一条链接和"我愿意让所有人看见"是两个决定，不合成一个开关。访客那一页仍然只经手 JSON，作品跑在同一套沙箱 iframe 里：**服务端从不以 HTML 的身份吐出模型生成的内容**。整套可用 `ARTIFACT_SHARING_ENABLED=0` 关掉。
 - **长期记忆** — 跨会话事实存储为人类可读的 `MEMORY.md`，用户和模型均可编辑。
 - **项目管理** — 按项目分组会话，支持持久化的项目级指令和项目专属记忆。
 - **定时任务** — 5 段 cron 表达式 + IANA 时区。模型可以在对话中直接创建定时任务。
@@ -196,6 +197,8 @@ sandbox-worker/bin/check-namespace-caps.sh
 | `ARTIFACTS_ENABLED` | `1` | 作品：带版本的成品，独立于对话正文 |
 | `ARTIFACT_ALLOWED_ORIGINS` | 空 | 作品预览允许加载的外部源（逗号分隔）。**默认完全离线**（Vue / mermaid 运行时自带，无需 CDN） |
 | `ARTIFACT_MAX_FILES` | `40` | 一份作品最多几个文件 |
+| `ARTIFACT_SHARING_ENABLED` | `1` | 作品分享链接（`/s/<token>`，**免登录可访问**）。这是唯一一条不要求身份的数据通道 |
+| `ARTIFACT_MARKET_ENABLED` | `1` | 公开的作品市场（`/market`）。只收录作者**显式发布**的作品 |
 | `CRON_ENABLED` | `1` | 定时任务 |
 | `WEB_UI` | `1` | 在 `/` 提供内置对话界面 |
 | `DEV_CONSOLE` | `0` | 调试端点（生产环境必须为 `0`） |
@@ -284,6 +287,22 @@ sandbox-worker/bin/check-namespace-caps.sh
 | GET | `/v1/artifacts/:id?v=` | 详情，含该版**全部文件的内容**。不传 `v` 取最新版 |
 | GET | `/v1/artifacts/:id/raw?path=&v=&download=1` | 单个文件的原文（`path` 不传取入口文件）。**一律 `text/plain` + `nosniff`** —— 本服务从不以 HTML 的身份吐出模型生成的内容 |
 | DELETE | `/v1/artifacts/:id` | 删除作品（所有版本一起删） |
+| POST | `/v1/artifacts/:id/share` | 生成分享链接。**幂等** —— 已分享过就回原来那条，不会把已发出去的作废 |
+| PATCH | `/v1/artifacts/:id/share` | `{ market, summary }`：上/下作品市场、改那句简介 |
+| DELETE | `/v1/artifacts/:id/share` | 撤销分享，链接立刻失效 |
+
+### 公开分享（**不需要身份**）
+
+整个服务里只有这一组接口在鉴权之前。三条约束：**只认 token**（没有任何"报上 id 就能读"的入口）；
+失败一律 404（不区分"没这个链接"和"被撤销了"，否则就成了探测 token 是否存在的口子）；
+正文一律 `text/plain`。分享**始终跟随最新版**，作者出新版本，访客刷新就能看到。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/v1/public/shares/:token` | 元信息 + **最新版全部文件的内容**。不含 `sessionKey` / `projectId` / 版本全表 |
+| GET | `/v1/public/shares/:token/raw?path=&download=1` | 单个文件的原文。与登录态那条共用同一个下发函数，一样是 `text/plain` + `nosniff` |
+| GET | `/v1/public/market?q=&kind=` | 作品市场清单（**不含正文**），按发布时间倒序 |
+| GET | `/s/:token`、`/market` | 页面本身。回的是**本服务自己的** SPA 骨架，不是那份作品的 HTML |
 
 写入只能由模型经 `artifact` 工具完成，没有对外的写接口。
 

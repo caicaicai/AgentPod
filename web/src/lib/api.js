@@ -206,6 +206,46 @@ async function request(path, { method = 'GET', body } = {}) {
   return payload
 }
 
+/**
+ * 公开接口（`/v1/public/*`）。与上面那个 `request` **刻意不共用**。
+ *
+ * 差别不在少发几个头，而在两条不能混的行为：
+ *
+ *   1. **不带任何身份**。分享页要能在无痕窗口里打开 —— 这是它存在的全部意义。
+ *      顺手带上 Authorization 的话，"忘了登录会怎样"这件事在开发机上永远试不出来
+ *      （开发者自己总是登着的），于是分享链接发出去才发现对方打不开。
+ *   2. **401 不弹登录框**。公开接口本来就不该回 401；万一回了（比如反向代理
+ *      在前面加了一层网关认证），正确的反应是把错误如实显示出来，
+ *      而不是弹一个登录框 —— 访客根本没有这个平台的账号，弹了也没用。
+ */
+async function publicRequest(path) {
+  const response = await fetch(path, { headers: { Accept: 'application/json' } })
+  const text = await response.text()
+  let payload = null
+  try {
+    payload = text ? JSON.parse(text) : null
+  } catch {
+    // 不是 JSON（网关的错误页之类），把原文当消息
+  }
+  if (!response.ok) {
+    recordEvent({
+      method: 'GET',
+      path,
+      status: response.status,
+      code: payload?.code || '',
+      message: payload?.message || String(text || '').slice(0, 200),
+      requestId: payload?.requestId || response.headers.get('x-request-id') || '',
+      traceId: response.headers.get('x-trace-id') || '',
+    })
+    throw new ApiError(payload?.message || text || `HTTP ${response.status}`, {
+      code: payload?.code || '',
+      status: response.status,
+      requestId: payload?.requestId || response.headers.get('x-request-id') || '',
+    })
+  }
+  return payload
+}
+
 const q = (params) => {
   const search = new URLSearchParams()
   for (const [key, value] of Object.entries(params)) {
@@ -252,6 +292,14 @@ export const api = {
   getArtifact: (id, version = 0) => request(`/v1/artifacts/${encodeURIComponent(id)}${q({ v: version || undefined })}`),
   deleteArtifact: (id) => request(`/v1/artifacts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
+  /**
+   * 分享（作者侧，要登录）。三个动词分得很开，因为是三件事：
+   * 生成链接（幂等）／上下市场与改简介／撤销。
+   */
+  shareArtifact: (id) => request(`/v1/artifacts/${encodeURIComponent(id)}/share`, { method: 'POST' }),
+  updateShare: (id, body) => request(`/v1/artifacts/${encodeURIComponent(id)}/share`, { method: 'PATCH', body }),
+  unshareArtifact: (id) => request(`/v1/artifacts/${encodeURIComponent(id)}/share`, { method: 'DELETE' }),
+
   listCrons: () => request('/v1/crons'),
   createCron: (body) => request('/v1/crons', { method: 'POST', body }),
   updateCron: (id, body) => request(`/v1/crons/${encodeURIComponent(id)}`, { method: 'PATCH', body }),
@@ -259,6 +307,12 @@ export const api = {
   runCron: (id) => request(`/v1/crons/${encodeURIComponent(id)}/run`, { method: 'POST' }),
 
   abort: (runId) => request(`/v1/runs/${encodeURIComponent(runId)}/abort`, { method: 'POST' }),
+}
+
+/** 免登录的那几条。单独一个对象，免得哪天有人顺手把它们挪进上面那个带身份的封装里 */
+export const publicApi = {
+  getShare: (token) => publicRequest(`/v1/public/shares/${encodeURIComponent(token)}`),
+  market: (params = {}) => publicRequest(`/v1/public/market${q(params)}`),
 }
 
 /**

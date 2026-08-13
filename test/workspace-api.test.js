@@ -114,6 +114,11 @@ describe('能力宣告', () => {
       cronScheduler: true,
       cronCredentialMode: 'none',
       artifacts: true,
+      // 这个 harness 没接 share store（分享有自己那套用例，见 artifact-share.test.js）。
+      // 两个字段仍然要在这儿露面：界面靠它们决定画不画分享按钮和市场入口，
+      // 少一个的表现是"功能开着但没有入口"
+      artifactShare: false,
+      artifactMarket: false,
     })
   })
 

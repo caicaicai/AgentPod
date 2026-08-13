@@ -10,13 +10,32 @@ import CronPanel from './components/CronPanel.vue'
 import DebugPanel from './components/DebugPanel.vue'
 import ImageLightbox from './components/ImageLightbox.vue'
 import LoginOverlay from './components/LoginOverlay.vue'
+import MarketPage from './components/MarketPage.vue'
 import MemoryPanel from './components/MemoryPanel.vue'
 import ProjectPanel from './components/ProjectPanel.vue'
+import SharePage from './components/SharePage.vue'
 import SkillsPanel from './components/SkillsPanel.vue'
-import { boot, closeArtifactDetail, closeLibrary, closeWizard, saveDraft, state, stop } from './stores/app.js'
+import {
+  boot, closeArtifactDetail, closeLibrary, closeMarket, closeWizard, saveDraft, state, stop,
+} from './stores/app.js'
 import { dialog } from './lib/dialog.js'
+import { publicRoute } from './lib/route.js'
 
-onMounted(boot)
+/**
+ * 公开路径（`/s/<token>`、`/market`）走另一套外壳。
+ *
+ * **只在启动时判一次**，理由见 lib/route.js：访客落在分享页上就一直在分享页，
+ * 不会在应用内部导航过去。
+ *
+ * 关键在于这时候**不调 boot()** —— 那一串接口（会话、模型、技能、记忆）
+ * 对没有账号的访客全是 401，结果是一个弹着登录框的分享页。
+ * 而这一页存在的全部意义，就是不需要账号也能看。
+ */
+const route = publicRoute()
+
+onMounted(() => {
+  if (!route) boot()
+})
 
 /**
  * Esc 是全局的：手已经在键盘上了，不该逼人去够那个按钮。
@@ -35,6 +54,7 @@ function onKeydown(event) {
     else closeLibrary()
     return
   }
+  if (state.view === 'market') { closeMarket(); return }
   if (state.live) stop()
 }
 
@@ -44,6 +64,8 @@ function onBeforeUnload() {
 }
 
 onMounted(() => {
+  // 公开页上这两个都没有意义：没有面板可关、没有草稿可存
+  if (route) return
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('beforeunload', onBeforeUnload)
 })
@@ -54,7 +76,14 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <LoginOverlay v-if="state.needLogin" />
+  <!--
+    公开页排在最前面，连登录框都不参与：访客没有账号，
+    给他弹一个登录框等于告诉他"你不配看这份别人分享给你的东西"。
+  -->
+  <SharePage v-if="route?.name === 'share'" :token="route.token" />
+  <MarketPage v-else-if="route?.name === 'market'" standalone />
+
+  <LoginOverlay v-else-if="state.needLogin" />
   <div v-else class="layout" :class="{ 'sidebar-collapsed': state.sidebarCollapsed }">
     <AppSidebar />
     <!--
@@ -62,6 +91,7 @@ onBeforeUnmount(() => {
       不是对话的一个弹层。会话列表留着，方便从库里跳回某条对话。
     -->
     <ArtifactLibrary v-if="state.view === 'artifacts'" />
+    <MarketPage v-else-if="state.view === 'market'" />
     <ChatThread v-else />
 
     <SkillsPanel v-if="state.panel === 'skills'" />

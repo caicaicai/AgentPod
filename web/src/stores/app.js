@@ -12,7 +12,7 @@
 import { reactive, watch } from 'vue'
 
 import {
-  api, streamChat, getDevUsername, setDevUsername, getAuthToken, setAuthToken, ApiError,
+  api, publicApi, streamChat, getDevUsername, setDevUsername, getAuthToken, setAuthToken, ApiError,
   isRedirectingToLogin, clearSsoRetryMarker, onNeedLogin,
 } from '../lib/api.js'
 import { formatTurnStats } from '../lib/format.js'
@@ -96,11 +96,11 @@ export const state = reactive({
 
   // ── 作品 ──
   /**
-   * 主视图。`chat` = 对话，`artifacts` = 作品库。
+   * 主视图。`chat` = 对话，`artifacts` = 作品库，`market` = 作品市场。
    *
    * 作品库是**独立入口**而不是又一个抽屉：抽屉是"边聊边看这一轮的产出"，
    * 而"上周做的那个报表在哪"是另一件事 —— 它跟当前聊到哪儿没有关系，
-   * 挤在对话右边那条缝里也翻不动。
+   * 挤在对话右边那条缝里也翻不动。市场同理，而且它连"我的"都不是。
    */
   view: 'chat',
   /** 当前会话的作品清单（不含正文） */
@@ -145,6 +145,20 @@ export const state = reactive({
   artifactFull: false,
   /** 用户拖出来的面板宽度（像素）。0 = 用默认档位。同样记盘，理由同上 */
   artifactWidth: Number(localStorage.getItem(ARTIFACT_WIDTH_KEY)) || 0,
+
+  // ── 分享 ──
+  /** 三个分享动作共用一个在途标记：同一时刻只可能在做其中一件 */
+  shareBusy: false,
+  shareNote: '',
+  /**
+   * 作品市场。**它是公开数据**，走的是免登录那条接口 —— 应用内看到的和
+   * 访客在 /market 上看到的是同一份，不会出现"登录后才发现少了几条"。
+   */
+  marketItems: [],
+  marketSearch: '',
+  marketKind: '',
+  marketLoading: false,
+  marketNote: '',
 
   // ── 界面开关 ──
   sidebarCollapsed: false,
@@ -934,6 +948,95 @@ export async function deleteArtifact(id) {
   if (state.artifactDetail?.meta?.id === id) state.artifactDetail = null
   // 只有一份清单，刷一次两处都跟上（侧栏计数、库、抽屉列表）
   await refreshArtifacts()
+}
+
+/* ═══════════════ 分享 ═══════════════ */
+
+/**
+ * 服务端回的是**整份作品的新元信息**，所以三处一起换掉：正在看的那一份、
+ * 库里那一条、当前会话那一条。
+ *
+ * 只改 artifactDetail 的话，退回列表会看到一张还标着"未分享"的卡片 ——
+ * 而用户刚刚亲手分享过它。这类"改了但别处没跟上"的不一致，
+ * 在这个 store 里一律用"拿服务端回的那份覆盖所有副本"来解决，不做局部打补丁。
+ */
+function applyArtifactMeta(meta) {
+  if (!meta) return
+  const swap = (item) => (item.id === meta.id ? meta : item)
+  state.libraryArtifacts = state.libraryArtifacts.map(swap)
+  state.artifacts = state.artifacts.map(swap)
+  if (state.artifactDetail?.meta?.id === meta.id) {
+    state.artifactDetail = { ...state.artifactDetail, meta }
+  }
+}
+
+/** 包一层：三个分享动作的错误出口和"更新所有副本"是同一套，别写三遍 */
+async function runShareAction(call) {
+  state.shareBusy = true
+  state.shareNote = ''
+  try {
+    const data = await call()
+    if (data?.artifact) applyArtifactMeta(data.artifact)
+    return true
+  } catch (error) {
+    state.shareNote = error.message
+    return false
+  } finally {
+    state.shareBusy = false
+  }
+}
+
+/** 生成分享链接。幂等 —— 已经分享过的作品再点一次，拿回的还是原来那条 */
+export function shareArtifact(id) {
+  return runShareAction(() => api.shareArtifact(id))
+}
+
+export function setArtifactMarket(id, body) {
+  return runShareAction(() => api.updateShare(id, body))
+}
+
+/**
+ * 撤销。DELETE 不回作品，所以这里自己把 share 抹掉 ——
+ * 不然界面上那个链接会一直挂到下次刷新清单为止，而它其实已经打不开了。
+ */
+export async function unshareArtifact(id) {
+  const ok = await runShareAction(async () => {
+    await api.unshareArtifact(id)
+    const current = state.libraryArtifacts.find((item) => item.id === id)
+    return { artifact: current ? { ...current, share: null } : null }
+  })
+  return ok
+}
+
+/* ── 作品市场 ── */
+
+/**
+ * 刷市场。**这里不判 features** —— 独立的 /market 页面根本没跑过 boot()，
+ * 那份能力宣告是空的，判了就等于访客永远看到一个空广场。
+ * "该不该显示这个入口"由调用方决定，接口关掉时这里如实报错。
+ */
+export async function refreshMarket() {
+  state.marketLoading = true
+  try {
+    const data = await publicApi.market({ q: state.marketSearch || undefined, kind: state.marketKind || undefined })
+    state.marketItems = data.items || []
+    state.marketNote = ''
+  } catch (error) {
+    state.marketNote = `市场加载失败：${error.message}`
+  } finally {
+    state.marketLoading = false
+  }
+}
+
+export async function openMarket() {
+  state.view = 'market'
+  state.panel = ''
+  state.artifactDetail = null
+  await refreshMarket()
+}
+
+export function closeMarket() {
+  state.view = 'chat'
 }
 
 /* ═══════════════ 模型 / 技能 / 身份 ═══════════════ */

@@ -435,6 +435,26 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
        * 列的同时也就知道自己开了什么。
        */
       allowedOrigins: csvExact(env.ARTIFACT_ALLOWED_ORIGINS),
+      /**
+       * 分享链接：作者可以为某份作品生成 `/s/<token>`，**免登录**即可打开。
+       *
+       * ⚠️ 这是本服务唯一一条不要求身份的数据通道，所以把它单独做成一个开关：
+       * 内网部署里"任何人凭链接可看"可能恰恰是不能接受的（链接会被转发、
+       * 会进聊天记录、会被搜索引擎抓到）。关掉之后 `/s/*` 与 `/v1/public/*`
+       * 整块 404，已经生成的链接一并失效。
+       *
+       * 开着也不违反那条核心不变量：分享页是**本服务自己的**页面，
+       * 作品正文仍然只走 JSON，由前端塞进不带 allow-same-origin 的 sandbox iframe。
+       * 服务端从不以 HTML 的身份吐出模型生成的内容。见 src/artifacts/shares.js。
+       */
+      sharing: bool(env.ARTIFACT_SHARING_ENABLED, true),
+      /**
+       * 作品市场：公开的广场，列出所有**显式发布**到市场的作品。
+       *
+       * 与上面那个是两回事：生成分享链接 ≠ 上广场。关掉它之后分享链接照常，
+       * 只是没有那个"所有人都能翻到"的入口。
+       */
+      market: bool(env.ARTIFACT_MARKET_ENABLED, true),
     },
 
     /** 联网搜索（`web_search` 工具）。 */

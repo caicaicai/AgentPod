@@ -26,6 +26,7 @@ AgentPod is a **server-side, multi-tenant AI agent service** powered by the [pi]
 - **Sandboxed code execution** — Commands run in isolated Linux namespaces (PID/mount/network/uts/ipc) with independent cgroups per slot. No shared state between tenants.
 - **Conversational UI** — Built-in Vue 3 chat interface with SSE streaming, project management, session history, and slash commands.
 - **Artifacts** — Substantial output is stored as a standalone versioned **set of files** instead of being pasted into the chat: multi-file web pages, Vue 3 SFC projects, Markdown documents (with mermaid diagrams), SVG and code. A **standalone artifact library** (cross-session, searchable, with creation guidance) plus an in-chat side panel: live preview, per-file source view, version switching, download; edits are surgical string replacements rather than full rewrites. Vue is compiled in the browser and mermaid is self-hosted, so **previews are fully offline by default**, running inside a sandboxed iframe without `allow-same-origin` under a `default-src 'none'` CSP — model-generated scripts can neither read your session token nor reach the network.
+- **Sharing and the artifact market** — Any artifact can become a `/s/<token>` link that **needs no account** to open and always shows the latest version; revoke it and it dies instantly. Publishing to the public market at `/market` is a second, separate click — sending one colleague a link and "I want everyone to see this" are two different decisions, so they are two different switches. The visitor's page still only handles JSON, and the artifact runs in the same sandboxed iframe: **the server never serves model-generated content as HTML**. Turn the whole thing off with `ARTIFACT_SHARING_ENABLED=0`.
 - **Long-term memory** — Cross-session facts stored as human-readable `MEMORY.md`, editable by both users and the model.
 - **Projects** — Group sessions under projects with persistent instructions and project-scoped memory.
 - **Scheduled tasks** — 5-field cron expressions with IANA timezone support. The model can create tasks directly from conversation.
@@ -196,6 +197,8 @@ See [`.env.example`](.env.example) for the complete annotated reference.
 | `ARTIFACTS_ENABLED` | `1` | Versioned artifacts kept outside the transcript |
 | `ARTIFACT_ALLOWED_ORIGINS` | empty | External origins the artifact preview may load (comma-separated). **Fully offline by default** (Vue / mermaid runtimes ship with the app) |
 | `ARTIFACT_MAX_FILES` | `40` | Maximum files per artifact |
+| `ARTIFACT_SHARING_ENABLED` | `1` | Share links (`/s/<token>`, **readable without logging in**) — the only unauthenticated data path in the service |
+| `ARTIFACT_MARKET_ENABLED` | `1` | Public artifact market (`/market`). Only carries artifacts the author **explicitly publishes** |
 | `CRON_ENABLED` | `1` | Scheduled task support |
 | `WEB_UI` | `1` | Serve the built-in chat UI at `/` |
 | `DEV_CONSOLE` | `0` | Debug endpoints (must be `0` in production) |
@@ -284,6 +287,23 @@ For local development with real models (without a platform backend):
 | GET | `/v1/artifacts/:id?v=` | Details including **every file's content** for that version. Latest version when `v` is omitted |
 | GET | `/v1/artifacts/:id/raw?path=&v=&download=1` | Raw content of a single file (`path` defaults to the entry file). **Always `text/plain` + `nosniff`** — this service never serves model-generated content as HTML |
 | DELETE | `/v1/artifacts/:id` | Delete an artifact and all of its versions |
+| POST | `/v1/artifacts/:id/share` | Create a share link. **Idempotent** — an already-shared artifact returns its existing link rather than invalidating the one you sent out |
+| PATCH | `/v1/artifacts/:id/share` | `{ market, summary }`: list/delist on the artifact market, edit the blurb |
+| DELETE | `/v1/artifacts/:id/share` | Revoke — the link stops working immediately |
+
+### Public sharing (**no authentication**)
+
+The only routes in the service that sit before authentication. Three rules: **token-only** (there is no
+"name an id and read it" entry point); every failure is a 404 (never distinguish "no such link" from
+"revoked" — that would be a probe for whether a token exists); content is always `text/plain`.
+A share **always follows the latest version** — the author ships a new one, visitors see it on refresh.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/v1/public/shares/:token` | Metadata plus **every file of the latest version**. No `sessionKey` / `projectId` / version history |
+| GET | `/v1/public/shares/:token/raw?path=&download=1` | Raw content of a single file. Shares the same send function as the authenticated route — `text/plain` + `nosniff` |
+| GET | `/v1/public/market?q=&kind=` | Artifact market listing (**no content**), newest publications first |
+| GET | `/s/:token`, `/market` | The pages themselves. These return **our own** SPA shell, never the artifact's HTML |
 
 Writes happen only through the model's `artifact` tool; there is no public write endpoint.
 

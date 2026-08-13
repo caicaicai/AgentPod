@@ -134,6 +134,15 @@ const sessionTitle = (sessionKey) => state.sessions.find((item) => item.sessionK
             第 {{ item.version }} 版 · {{ fileCount(item) }} 个文件
             <template v-if="sessionTitle(item.sessionKey)"> · 来自「{{ sessionTitle(item.sessionKey) }}」</template>
           </p>
+          <!--
+            分享状态画在卡片上，而不是只藏在详情页里。
+            "我以为我没分享"是这个功能唯一真正要命的失误 —— 而作者最可能
+            重新审视这件事的时刻，就是他翻这个列表的时候。
+          -->
+          <p v-if="item.share" class="card-share">
+            <AppIcon :name="item.share.market ? 'store' : 'link'" :size="11" />
+            {{ item.share.market ? '已发布到市场' : '已生成分享链接' }}
+          </p>
         </article>
 
         <p v-if="!shown.length" class="empty">没有匹配的作品。</p>
@@ -364,6 +373,16 @@ const sessionTitle = (sessionKey) => state.sessions.find((item) => item.sessionK
   font-size: 11.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 它是一句提醒，不是主信息 —— 认得出来就够，不该跟标题抢 */
+.card-share {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  color: var(--brand-accent);
+  font-size: 11px;
 }
 
 .empty {
