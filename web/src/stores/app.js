@@ -160,6 +160,24 @@ export const state = reactive({
   marketLoading: false,
   marketNote: '',
 
+  // ── 账号 ──
+  /**
+   * 我自己那条账号记录（`{ username, role, disabled, createdAt }`）。
+   * 没接账号存储时是 null —— 界面据此不画「我的账号」和管理员入口。
+   */
+  account: null,
+  accountBusy: false,
+  accountNote: '',
+  accountNoteWarn: false,
+
+  /** 管理员控制台 */
+  adminUsers: [],
+  adminSearch: '',
+  adminLoading: false,
+  adminBusy: false,
+  adminNote: '',
+  adminNoteWarn: false,
+
   // ── 界面开关 ──
   sidebarCollapsed: false,
   panel: '', // '' | 'skills' | 'memory' | 'cron' | 'project' | 'debug' | 'artifact'
@@ -1097,6 +1115,118 @@ export function identityName() {
   return state.user?.fullname || state.user?.username || ''
 }
 
+/* ═══════════════ 账号 ═══════════════ */
+
+/** 我是谁、什么角色。失败不弹横幅 —— 拿不到角色只是不画管理员入口，别的照常用 */
+export async function loadAccount() {
+  try {
+    state.account = (await api.me()).account || null
+  } catch {
+    state.account = null
+  }
+}
+
+export const isAdmin = () => state.account?.role === 'admin'
+
+/** 改自己的密码。**要旧密码** —— 服务端也这么要求，这里只是提前把话说清楚 */
+export async function changePassword(oldPassword, newPassword) {
+  state.accountBusy = true
+  state.accountNote = ''
+  state.accountNoteWarn = false
+  try {
+    await api.changePassword(oldPassword, newPassword)
+    /**
+     * 已签发的令牌**不会失效**（签名密钥没变）。如实说出来 ——
+     * 不说的话，用户会以为改完密码就把别处的登录踢掉了，而那是两件事。
+     */
+    state.accountNote = '密码已更新。已经登录的其它设备不会被踢下线（令牌到期前仍然有效）'
+    return true
+  } catch (error) {
+    state.accountNote = error.message
+    state.accountNoteWarn = true
+    return false
+  } finally {
+    state.accountBusy = false
+  }
+}
+
+/* ── 管理员控制台 ── */
+
+export async function refreshUsers() {
+  if (!state.features.accounts) return
+  state.adminLoading = true
+  try {
+    state.adminUsers = (await api.adminListUsers()).users || []
+    state.adminNote = ''
+    state.adminNoteWarn = false
+  } catch (error) {
+    state.adminNote = `账号清单加载失败：${error.message}`
+    state.adminNoteWarn = true
+  } finally {
+    state.adminLoading = false
+  }
+}
+
+export async function openAdmin() {
+  state.view = 'admin'
+  state.panel = ''
+  await refreshUsers()
+}
+
+export function closeAdmin() {
+  state.view = 'chat'
+}
+
+/**
+ * 三个管理动作的公共出口：跑完都要刷新清单。
+ *
+ * 不在本地改一份状态而是重取，是因为服务端有它自己的规则（不许禁用自己、
+ * 不许撤销自己的管理员身份）—— 本地猜一遍就等于把那套规则抄两份，迟早对不上。
+ */
+async function runAdminAction(call, okNote) {
+  state.adminBusy = true
+  state.adminNote = ''
+  state.adminNoteWarn = false
+  try {
+    await call()
+    await refreshUsers()
+    state.adminNote = okNote
+    state.adminNoteWarn = false
+    return true
+  } catch (error) {
+    state.adminNote = error.message
+    state.adminNoteWarn = true
+    return false
+  } finally {
+    state.adminBusy = false
+  }
+}
+
+export function createUser({ username, password, role }) {
+  return runAdminAction(() => api.adminCreateUser({ username, password, role }), `已创建账号 ${username}`)
+}
+
+export function setUserDisabled(username, disabled) {
+  return runAdminAction(
+    () => api.adminPatchUser(username, { disabled }),
+    disabled ? `${username} 已禁用（数据保留，随时可以启用）` : `${username} 已启用`,
+  )
+}
+
+export function setUserRole(username, role) {
+  return runAdminAction(
+    () => api.adminPatchUser(username, { role }),
+    role === 'admin' ? `${username} 已设为管理员` : `${username} 已改回普通用户`,
+  )
+}
+
+export function resetUserPassword(username, newPassword) {
+  return runAdminAction(
+    () => api.adminPatchUser(username, { newPassword }),
+    `${username} 的密码已重置 —— 请通过可靠渠道告诉他，并让他登录后自行修改`,
+  )
+}
+
 export async function login(username, password) {
   state.loginError = ''
   try {
@@ -1114,6 +1244,10 @@ export function logout() {
   setAuthToken('')
   state.needLogin = true
   state.user = null
+  // 角色跟着清：不清的话，换个人登录进来会先看到上一个人的管理员入口
+  state.account = null
+  state.adminUsers = []
+  state.view = 'chat'
   state.sessions = []
   state.turns = []
   state.models = []
@@ -1384,6 +1518,9 @@ async function bootAfterLogin() {
     loadModels(),
     loadSkills(),
     refreshSessions(),
+    // 拿自己的角色。管理员入口画不画靠它 —— 而**判定在服务端**，
+    // 这里少判一次只是界面难看，服务端少判一次是越权
+    state.features.accounts ? loadAccount() : null,
     state.features.memory ? loadMemory() : null,
     state.features.cron ? refreshCrons() : null,
     // 不拉的话，侧栏「作品」后面那个数字要等用户点进作品库才变准

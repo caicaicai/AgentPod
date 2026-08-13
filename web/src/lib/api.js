@@ -260,6 +260,20 @@ const q = (params) => {
 export const api = {
   health: () => request('/healthz'),
   login: (username, password) => request('/v1/auth/login', { method: 'POST', body: { username, password } }),
+  register: (username, password) => request('/v1/auth/register', { method: 'POST', body: { username, password } }),
+  /** 改自己的密码。**必须带旧密码** —— 只凭令牌就能改密等于把"临时借用"变成"永久接管" */
+  changePassword: (oldPassword, newPassword) =>
+    request('/v1/auth/password', { method: 'POST', body: { oldPassword, newPassword } }),
+  me: () => request('/v1/auth/me'),
+
+  /**
+   * 管理员接口。前端画不画入口由 `/v1/auth/me` 回的 `account.role` 决定，
+   * 但**真正的判定在服务端** —— 这里少判一次只是界面难看，服务端少判一次是越权。
+   */
+  adminListUsers: () => request('/v1/admin/users'),
+  adminCreateUser: (body) => request('/v1/admin/users', { method: 'POST', body }),
+  adminPatchUser: (username, body) =>
+    request(`/v1/admin/users/${encodeURIComponent(username)}`, { method: 'PATCH', body }),
   models: (refresh = false) => request(`/v1/models${refresh ? '?refresh=1' : ''}`),
   skills: () => request('/v1/skills'),
 

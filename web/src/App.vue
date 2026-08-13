@@ -1,6 +1,8 @@
 <script setup>
 import { onMounted, onBeforeUnmount } from 'vue'
 
+import AccountPanel from './components/AccountPanel.vue'
+import AdminConsole from './components/AdminConsole.vue'
 import AppDialog from './components/AppDialog.vue'
 import AppSidebar from './components/AppSidebar.vue'
 import ArtifactLibrary from './components/ArtifactLibrary.vue'
@@ -16,7 +18,7 @@ import ProjectPanel from './components/ProjectPanel.vue'
 import SharePage from './components/SharePage.vue'
 import SkillsPanel from './components/SkillsPanel.vue'
 import {
-  boot, closeArtifactDetail, closeLibrary, closeMarket, closeWizard, saveDraft, state, stop,
+  boot, closeAdmin, closeArtifactDetail, closeLibrary, closeMarket, closeWizard, saveDraft, state, stop,
 } from './stores/app.js'
 import { dialog } from './lib/dialog.js'
 import { publicRoute } from './lib/route.js'
@@ -55,6 +57,7 @@ function onKeydown(event) {
     return
   }
   if (state.view === 'market') { closeMarket(); return }
+  if (state.view === 'admin') { closeAdmin(); return }
   if (state.live) stop()
 }
 
@@ -92,12 +95,14 @@ onBeforeUnmount(() => {
     -->
     <ArtifactLibrary v-if="state.view === 'artifacts'" />
     <MarketPage v-else-if="state.view === 'market'" />
+    <AdminConsole v-else-if="state.view === 'admin'" />
     <ChatThread v-else />
 
     <SkillsPanel v-if="state.panel === 'skills'" />
     <MemoryPanel v-else-if="state.panel === 'memory'" />
     <CronPanel v-else-if="state.panel === 'cron'" />
     <ProjectPanel v-else-if="state.panel === 'project'" />
+    <AccountPanel v-else-if="state.panel === 'account'" />
     <ArtifactPanel v-else-if="state.panel === 'artifact'" />
     <DebugPanel v-else-if="state.panel === 'debug'" />
 

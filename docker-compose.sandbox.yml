@@ -1,7 +1,7 @@
-# 仅启动沙盒基础设施（manager + worker + redis）
+# 仅启动沙盒基础设施（manager + worker + redis + mysql）
 #
 # 适用于本地开发：agent 在宿主机以 `node src/index.js` 直接运行，
-# 沙盒集群由容器提供。
+# 沙盒集群与数据库由容器提供。
 #
 # 启动：
 #   docker compose -f docker-compose.sandbox.yml up -d
@@ -80,6 +80,36 @@ services:
       - redis-data:/data
     command: redis-server --appendonly yes
 
+  # ── MySQL（结构化存储）──────────────────────────────────────────────
+  #
+  # 宿主机上运行的 agent 通过 localhost:3306 连接此数据库。
+  # 表结构由 agent 启动时自动建（CREATE TABLE IF NOT EXISTS），
+  # 不需要先手工导 schema。一份可审阅的真相在 src/persistence/schema.sql。
+  mysql:
+    image: mysql:8.0
+    container_name: agentpod-mysql
+    restart: unless-stopped
+    ports:
+      - "${MYSQL_BIND:-127.0.0.1}:${MYSQL_PORT:-3306}:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-agentpod-root}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-agentpod}
+      - MYSQL_USER=${MYSQL_USER:-agentpod}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-agentpod}
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --default-time-zone=+00:00
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-agentpod-root}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
 volumes:
   worker-data:
   redis-data:
+  mysql-data:

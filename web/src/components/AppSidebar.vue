@@ -6,7 +6,7 @@ import SessionRow from './SessionRow.vue'
 import {
   createProject, deleteSession, getDevUsername, identityName, logout, openSession, patchSession,
   renameSession, scheduleSearch, setDevUsername, startNewSession, state, switchProject,
-  toggleTheme, togglePanel, openLibrary, openMarket,
+  toggleTheme, togglePanel, openLibrary, openMarket, openAdmin, isAdmin,
 } from '../stores/app.js'
 import { askConfirm, askText } from '../lib/dialog.js'
 
@@ -235,6 +235,20 @@ function onDevUsernameChange(event) {
       >
         <AppIcon name="store" :size="16" /><span>作品市场</span>
       </button>
+      <!--
+        管理员控制台。**只有管理员看得见** —— 但这只是别给人一个点了必然失败的入口，
+        真正的判定在服务端（/v1/admin/* 会自己查一次角色）。
+      -->
+      <button
+        v-if="isAdmin()"
+        type="button"
+        class="navrow"
+        :class="{ on: state.view === 'admin' }"
+        @click="openAdmin"
+      >
+        <AppIcon name="shield" :size="16" /><span>管理员控制台</span>
+        <span class="pill">{{ state.adminUsers.length || '' }}</span>
+      </button>
 
       <div class="identity">
         <!--
@@ -252,9 +266,21 @@ function onDevUsernameChange(event) {
           />
         </template>
         <template v-else-if="passwordMode">
-          <span v-if="identityName()" class="identity-name">
+          <!--
+            用户名本身就是「我的账号」的入口：那一行原本只是个静态标签，
+            而"我想改密码"时第一眼看的就是它。
+          -->
+          <button
+            v-if="identityName()"
+            type="button"
+            class="identity-name as-button"
+            :class="{ on: state.panel === 'account' }"
+            title="我的账号 / 修改密码"
+            @click="togglePanel('account')"
+          >
             <AppIcon name="user" :size="14" />{{ identityName() }}
-          </span>
+            <span v-if="isAdmin()" class="admin-dot" title="管理员" />
+          </button>
           <button type="button" class="icon-btn" title="退出登录" @click="logout">
             <AppIcon name="log-out" :size="16" />
           </button>
@@ -559,6 +585,31 @@ function onDevUsernameChange(event) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 用户名那一行在 password 模式下是可点的（我的账号），要看得出来能点 */
+.identity-name.as-button {
+  padding: 4px 7px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.identity-name.as-button:hover {
+  background: color-mix(in srgb, var(--foreground) 7%, transparent);
+}
+.identity-name.as-button.on {
+  background: color-mix(in srgb, var(--brand-accent) 14%, transparent);
+  color: var(--foreground);
+}
+/* 管理员的一个小圆点。不写"管理员"三个字是因为这一行本来就窄，名字要优先 */
+.admin-dot {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--brand-accent);
 }
 .identity-tag {
   flex: 0 0 auto;

@@ -283,7 +283,18 @@ export function createServer({
     }
 
     // ---------- 账号密码登录（AUTH_MODE=password 时生效）----------
-    if (url.pathname.startsWith('/v1/auth/') && url.pathname !== '/v1/auth/me') {
+    /**
+     * ⚠️ 这里必须是**明确列出的两条**，不能写成 `startsWith('/v1/auth/')` 加例外。
+     *
+     * 第一版就是那么写的（前缀匹配 + 排除 `/v1/auth/me`），于是后来加的
+     * `/v1/auth/password`（改密码，**需要登录**）被这一块提前吃掉、回了一句
+     * "没有这个接口" —— 它在鉴权之前，而改密码的处理器在鉴权之后，根本走不到。
+     * 现象是接口 404，而路由代码看起来完全正常。
+     *
+     * 前缀 + 例外清单的问题在于：新增一条同前缀的路由时，**没有任何东西提醒你
+     * 去补例外**。列举法反过来 —— 忘了加就是压根匹配不上，而不是被静默劫走。
+     */
+    if (url.pathname === '/v1/auth/login' || url.pathname === '/v1/auth/register') {
       if (config.auth.mode !== 'password') {
         return sendJson(res, 404, { error: 'NOT_FOUND', message: '当前 AUTH_MODE 不支持密码登录' })
       }
