@@ -7,7 +7,7 @@
  */
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -51,6 +51,29 @@ function copyPairs(file) {
   return pairs
 }
 
+/**
+ * 源路径存不存在。**要认通配符**。
+ *
+ * `COPY package.json package-lock.json* ./` 是 Dockerfile 里的固定写法：
+ * 尾巴上那个 `*` 让 lock 文件"有就拷、没有也不炸"。拿它当字面文件名去
+ * existsSync，永远是 false —— 于是这条用例把一个完全正确的 Dockerfile 判红，
+ * 而报错说的是"仓库根下找不到 package-lock.json*"，看着像文件真的丢了。
+ *
+ * 带通配符时改成"这个模式至少匹配到一个文件"：拼错的路径
+ * （`packge-lock.json*`）照样一个都匹配不上，该抓的还是抓得住。
+ */
+function sourceExists(src) {
+  if (!/[*?[]/.test(src)) return existsSync(path.join(REPO_ROOT, src))
+
+  const dir = path.join(REPO_ROOT, path.dirname(src))
+  if (!existsSync(dir)) return false
+  const pattern = new RegExp(`^${path.basename(src)
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.')}$`)
+  return readdirSync(dir).some((name) => pattern.test(name))
+}
+
 describe('Agent Dockerfile 构建上下文（仓库根）', () => {
   test('Dockerfile 存在', () => {
     assert.ok(existsSync(DOCKERFILE), '仓库根下找不到 Dockerfile')
@@ -60,7 +83,7 @@ describe('Agent Dockerfile 构建上下文（仓库根）', () => {
     const missing = []
     for (const { src, instruction } of copyPairs(DOCKERFILE)) {
       if (src.includes('${')) continue
-      if (!existsSync(path.join(REPO_ROOT, src))) missing.push(`${instruction} ${src}`)
+      if (!sourceExists(src)) missing.push(`${instruction} ${src}`)
     }
     assert.deepEqual(missing, [], `这些源路径在仓库根下找不到：\n  ${missing.join('\n  ')}`)
   })

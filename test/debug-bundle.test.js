@@ -79,9 +79,9 @@ describe('自动挑疑点', () => {
     assert.match(suspicionsOf({ health: { ...HEALTH_OK, sandbox: 'none' } }), /没有执行端/)
   })
 
-  test('桥没启用要被点出来', () => {
-    assert.match(suspicionsOf({ health: { ...HEALTH_OK, bridge: null } }), /Cloud Bridge 没启用/)
-  })
+  // 这里曾经还有一条"桥没启用要被点出来"。Cloud Bridge 已经从这个服务里移除
+  // （见 src/tools/http.js 开头），健康信息里再没有 bridge 这一项，
+  // 疑点生成器自然也不会去说它 —— 那条断言测的是一个不存在的功能。
 
   test('技能清单为空要被点出来', () => {
     assert.match(suspicionsOf({ skills: [] }), /技能清单是空的/)

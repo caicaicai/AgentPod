@@ -139,7 +139,9 @@ describe('重试的次数与间隔可配置', () => {
   })
 
   // 只求校验能过：这一组测的是 retry，不是沙盒
-  const BASE = { SANDBOX_MODE: 'none' }
+  // AUTH_MODE / LLM_MODE 的默认值（password / platform）各自还有必填项，
+  // 不显式给一对就会在读到重试配置之前被校验拦下
+  const BASE = { SANDBOX_MODE: 'none', AUTH_MODE: 'dev', LLM_MODE: 'faux' }
 
   test('config 默认值：开、3 次、2 秒起步', () => {
     const config = loadConfig({ env: { ...BASE }, cwd: '/nonexistent' })

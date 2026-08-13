@@ -17,7 +17,7 @@
  */
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -87,7 +87,24 @@ const AP_TOOL_RE = /(?<![/\w])(joyme_[a-z_]+|artifact_[a-z_]+|workstation_browse
 describe('builtin-skills 装得进来', () => {
   test('每个技能的 frontmatter 都有 name 和 description', () => {
     const { skills } = loadSkills({ dirs: [BUILTIN_DIR], logger: silentLogger })
-    assert.ok(skills.length >= 4, `只装到 ${skills.length} 个技能`)
+
+    /**
+     * 断言的是"**每个技能目录都装进来了**"，不是一个写死的数目。
+     *
+     * 从前写的是 `>= 4`，而开源出来的 builtin-skills/ 只有两个 —— 于是这条用例
+     * 一直红着，报的还是"只装到 2 个技能"，看起来像装载器坏了。数目是会变的，
+     * 而"有目录却没装进来"才是真正要抓的那件事：pi 在 frontmatter 缺字段时
+     * **静默跳过**，下一轮表现成"模型不知道有这个技能"，没有任何报错可查。
+     */
+    const dirs = readdirSync(BUILTIN_DIR, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && existsSync(path.join(BUILTIN_DIR, entry.name, 'SKILL.md')))
+      .map((entry) => entry.name)
+    assert.ok(dirs.length >= 1, 'builtin-skills/ 下一个带 SKILL.md 的目录都没有')
+    assert.deepEqual(
+      skills.map((skill) => skill.name).sort(),
+      dirs.sort(),
+      '有技能目录没被装进来（多半是 frontmatter 缺字段，pi 会静默跳过）',
+    )
     for (const skill of skills) {
       // 缺任何一个，pi 装载时会**静默跳过** —— 下一轮表现成"模型不知道有这个技能"，
       // 没有任何报错可查。所以在这里顶回来。
@@ -112,7 +129,10 @@ describe('技能不许宣告不存在的工具', () => {
     const registered = allRegisteredToolNames()
     const { skills } = loadSkills({ dirs: [BUILTIN_DIR], logger: silentLogger })
     const files = collectSkillDocs(skills)
-    assert.ok(files.length >= 4, `只扫到 ${files.length} 个文件，收集逻辑可能失效了`)
+    // 同样别写死数目（理由见上一条）：真正要防的是"收集逻辑回了个空数组，
+    // 于是下面那个循环一次都没跑，用例却绿着"。每个技能至少要有自己那份 SKILL.md。
+    assert.ok(skills.length >= 1, '一个技能都没装到')
+    assert.ok(files.length >= skills.length, `${skills.length} 个技能只扫到 ${files.length} 个文件，收集逻辑可能失效了`)
     const offenders = []
 
     for (const file of files) {

@@ -21,7 +21,18 @@ function withDir(fn) {
   }
 }
 
-const BASE = { SANDBOX_MODE: 'none', BRIDGE_ENABLED: '0' }
+/**
+ * 最小的**可用**配置。
+ *
+ * 这组用例测的是"文件里的值有没有被读进来"，所以夹具本身必须先过 validate() ——
+ * 过不去的话，每条用例都会在读到那个值之前就抛，而报错说的是
+ * "CONSOLE_USERS 没配"，跟被测的东西一点关系都没有。
+ *
+ * 于是这里必须显式给出 AUTH_MODE / LLM_MODE：两者的**默认值**分别是
+ * password 和 platform，各自还要求 CONSOLE_USERS 和 SPEED_API_BASE。
+ * dev + faux 是最省事的一对，而且与这组用例要测的东西完全无关。
+ */
+const BASE = { SANDBOX_MODE: 'none', AUTH_MODE: 'dev', LLM_MODE: 'faux' }
 
 describe('从文件读配置', () => {
   test('默认读 <cwd>/.env', () => {
@@ -77,14 +88,17 @@ describe('从文件读配置', () => {
     })
   })
 
-  test('值两侧的引号要去掉', () => {
-    // `SSO_RETURN_BASE="http://x"` 不去引号的话会拼出 `"http://x"/?a=1` 这种地址，
+  test('值两侧的引号要去掉，单双引号都算', () => {
+    // `SPEED_API_BASE="http://x"` 不去引号的话会拼出 `"http://x"/v1/...` 这种地址，
     // 而写引号是从 shell 带过来的肌肉记忆，报错完全指不到引号上。
+    //
+    // （原来用的是 SSO_RETURN_BASE。SSO 那套登录已经不在了 —— 现在只有
+    // password|dev，见 src/identity/index.js。换个还在的键，测的东西不变。）
     withDir((dir) => {
-      writeFileSync(path.join(dir, '.env'), 'SSO_RETURN_BASE="http://ap.xiaocaicai.com"\nPLATFORM_REFERER=\'http://5.xiaocaicai.com/\'\n')
+      writeFileSync(path.join(dir, '.env'), 'SPEED_API_BASE="http://speed.example/api"\nPLATFORM_REFERER=\'http://portal.example/\'\n')
       const config = loadConfig({ cwd: dir, env: { ...BASE } })
-      assert.equal(config.auth.password.returnBase, 'http://ap.xiaocaicai.com')
-      assert.equal(config.platform.referer, 'http://5.xiaocaicai.com/')
+      assert.equal(config.platform.speedApiBase, 'http://speed.example/api')
+      assert.equal(config.platform.referer, 'http://portal.example/')
     })
   })
 
@@ -97,11 +111,17 @@ describe('从文件读配置', () => {
     })
   })
 
-  test('注释和空行跳过，值里的 = 保留', () => {
+  test('注释和空行跳过，逗号分隔的值切开，值里的 = 保留', () => {
+    // 载体从 BRIDGE_ALLOW_HOSTS 换成了 ARTIFACT_ALLOWED_ORIGINS：Cloud Bridge
+    // 已经不在这个服务里了（见 src/tools/http.js 开头），而这条用例真正要钉的是
+    // 解析器的三个行为，跟具体哪个键无关。
     withDir((dir) => {
-      writeFileSync(path.join(dir, '.env'), '# 注释\n\nBRIDGE_ALLOW_HOSTS=*.xiaocaicai.com,*.jdl.cn\nMYSQL_PASSWORD=a=b=c\n')
+      writeFileSync(
+        path.join(dir, '.env'),
+        '# 注释\n\nARTIFACT_ALLOWED_ORIGINS=https://cdn.example.com,https://esm.example.com\nMYSQL_PASSWORD=a=b=c\n',
+      )
       const config = loadConfig({ cwd: dir, env: { ...BASE, SESSION_STORE: 'mysql', MYSQL_HOST: 'h', MYSQL_USER: 'u', MYSQL_DATABASE: 'd' } })
-      assert.deepEqual(config.bridge.allowHosts, ['*.xiaocaicai.com', '*.jdl.cn'])
+      assert.deepEqual(config.artifacts.allowedOrigins, ['https://cdn.example.com', 'https://esm.example.com'])
       assert.equal(config.sessions.mysql.password, 'a=b=c', '值里的等号被截断了')
     })
   })

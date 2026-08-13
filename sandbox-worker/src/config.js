@@ -248,7 +248,18 @@ export function loadConfig(env = process.env) {
        * 生产环境禁止在这里写 `open`：关掉一个集群的出站拦截是控制面的决定，
        * 逐台机器改环境变量既不可审计、也没有单一答案说得清"到底哪几台还开着"。
        */
-      egressMode: str(env.SANDBOX_EGRESS_MODE, 'open'),
+      /**
+       * ⚠️ 默认值是 `allowlist`，不是 `open`。
+       *
+       * 这里曾经写的是 `'open'` —— 与上面那三段说明（"默认拦"、"管理端不可达时
+       * 停在收紧的一侧"）正好相反。后果不是报错，而是**一台没配这个变量的节点
+       * 直接不拦出站**：沙盒里的技能拿得到用户登录态，能连出去就能把凭据带走，
+       * 而整套凭据边界正是靠"带不走"这条结构性保证撑着的。
+       *
+       * 失败方向必须朝收紧那一侧：漏配一个环境变量的代价应该是"某些请求出不去
+       * （看得见、查得出）"，而不是"什么都出得去（没有任何现象）"。
+       */
+      egressMode: str(env.SANDBOX_EGRESS_MODE, 'allowlist'),
 
       /**
        * 额外放行的出站目标，逗号分隔的 `host` 或 `host:port`，不写端口则放行 80 和 443。
@@ -392,6 +403,16 @@ export function validate(config) {
     if (!config.token) errors.push('生产环境必须配置 SANDBOX_TOKEN：没有它，任何能连到本端口的人都能在沙盒里执行命令')
     if (config.allowAnonymous) errors.push('生产环境禁止 ALLOW_ANONYMOUS=1')
     if (!config.advertiseBase) errors.push('生产环境必须能确定 SANDBOX_ADVERTISE_BASE：自动探测没找到非回环 IPv4，请显式配置（租约要靠它把后续请求引回本副本）')
+    /**
+     * 这一条 egressMode 上面的说明里写了、却一直没实现。
+     *
+     * 关掉一个集群的出站拦截是**控制面的决定**：逐台机器改环境变量既不可审计，
+     * 也没有单一答案说得清"到底哪几台还开着"。真要关，从管理端下发
+     * （下发会整体覆盖本地 env，见 src/egress-policy.js）。
+     */
+    if (config.namespace.egressMode === 'open') {
+      errors.push('生产环境禁止 SANDBOX_EGRESS_MODE=open：关掉出站拦截是控制面的决定，请从管理端下发，逐台改环境变量既不可审计也说不清哪几台还开着')
+    }
   }
 
   // 接管理端是"要么整套配齐、要么完全不配"。半配是最难排查的状态：

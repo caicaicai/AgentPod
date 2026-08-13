@@ -148,7 +148,8 @@ describe('补错了自己换一次', () => {
     })
     const out = await run(tool, { action: 'open', url: 'gone.xiaocaicai.com' })
     assert.equal(out.details.status, 'error')
-    assert.match(out.details.hint, /http:\/\/gone\.jd\.com/)
+    // 开源时把示例域名整体换成了 xiaocaicai.com，这一处正则漏改了
+    assert.match(out.details.hint, /http:\/\/gone\.xiaocaicai\.com/)
   })
 })
 

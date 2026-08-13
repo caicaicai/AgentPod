@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, symlinkSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const loaderSource = path.join(here, '..', 'src', 'browser', 'load-playwright.js')
@@ -79,7 +79,7 @@ describe('playwright 加载', () => {
     const t = makeTree({ withGlobalPlaywright: true })
     try {
       const out = runNode(
-        `const { loadPlaywright } = await import(${JSON.stringify(t.loader)});\n` +
+        `const { loadPlaywright } = await import(${JSON.stringify(pathToFileURL(t.loader).href)});\n` +
         'const pw = await loadPlaywright();\n' +
         'console.log(JSON.stringify({ chromium: Boolean(pw.chromium), core: pw.coreMarker }));',
         { cwd: t.browserDir, nodePath: t.globalDir },
@@ -113,13 +113,19 @@ describe('playwright 加载', () => {
     }
   })
 
-  test('放进 node_modules 后 ESM 直接可解析（底包软链走的就是这条）', () => {
+  test('放进 node_modules 后 ESM 直接可解析（底包软链走的就是这条）', (t0) => {
     const t = makeTree({ withGlobalPlaywright: true })
     try {
       // 模拟 Dockerfile 里的 /node_modules/playwright 软链
       const nm = path.join(t.root, 'node_modules')
       mkdirSync(nm, { recursive: true })
-      symlinkSync(path.join(t.globalDir, 'playwright'), path.join(nm, 'playwright'))
+      try {
+        symlinkSync(path.join(t.globalDir, 'playwright'), path.join(nm, 'playwright'))
+      } catch (error) {
+        // 整条用例就是在验证那条软链的效果，建不出来就没什么可测的。
+        // Windows 非管理员且未开开发者模式时 EPERM；镜像是 linux，那边验得了
+        return t0.skip(`本机建不了软链接（${error.code}）——这条只在 linux 上验得了`)
+      }
 
       const out = runNode(
         'const pw = await import("playwright");\n' +
@@ -140,7 +146,7 @@ describe('playwright 加载', () => {
     const t = makeTree({ withGlobalPlaywright: false })
     try {
       const out = runNode(
-        `const { loadPlaywright } = await import(${JSON.stringify(t.loader)});\n` +
+        `const { loadPlaywright } = await import(${JSON.stringify(pathToFileURL(t.loader).href)});\n` +
         'try { await loadPlaywright(); console.log("UNEXPECTED_OK") }\n' +
         'catch (e) { console.log(JSON.stringify(e.message)) }',
         { cwd: t.browserDir, nodePath: '' },
@@ -150,7 +156,10 @@ describe('playwright 加载', () => {
       const message = JSON.parse(raw)
       assert.match(message, /ESM import 失败/, '要说明 ESM 那条路怎么失败的')
       assert.match(message, /CJS require 失败/, '也要说明 CJS 那条路怎么失败的')
-      assert.match(message, /docker\/base\/Dockerfile/, '要指向该去哪儿修')
+      // 指的是仓库里**真实存在**的那个文件：docker/base/Dockerfile 是老仓库的布局，
+      // 这边只有 sandbox-worker/Dockerfile。断言里写一个不存在的路径，
+      // 等于把"提示指错地方"这件事本身钉成了正确行为
+      assert.match(message, /sandbox-worker\/Dockerfile/, '要指向该去哪儿修')
     } finally {
       rmSync(t.root, { recursive: true, force: true })
     }

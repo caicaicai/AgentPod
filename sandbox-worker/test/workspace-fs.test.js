@@ -32,6 +32,33 @@ import {
   PINNED_WALK,
 } from '../src/workspace-fs.js'
 
+/**
+ * 能不能建软链接。
+ *
+ * 下面两块用例**整块**建立在"手里有一个软链接"上 —— 那正是它们要防的攻击手法。
+ * 而 Windows 上非管理员、又没开开发者模式时 symlink 直接 EPERM：那不是被测代码
+ * 有问题，是本机造不出这个攻击场景。
+ *
+ * 探一次、整块跳过，而不是让每条用例各自抛一个 EPERM 栈 ——
+ * 后者看起来像十几个真实失败，得逐条读完才发现是同一件事。
+ * 与本文件里 sandbox.test.js 的 probeNamespaceSupport 同一个路子。
+ *
+ * ⚠️ 跳过 ≠ 通过：worker 只跑 linux，这些性质在真实部署上必须被验证。
+ * 在 Windows 上开发时请以 CI（linux）的结果为准。
+ */
+const symlinkSupport = await (async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ln-probe-'))
+  try {
+    await symlink(dir, path.join(dir, 'link'))
+    return { ok: true, reason: '' }
+  } catch (error) {
+    return { ok: false, reason: `本机建不了软链接（${error.code}）——Windows 非管理员且未开开发者模式时如此；这些性质只在 linux 上验得了` }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})()
+const skipSymlink = symlinkSupport.ok ? false : symlinkSupport.reason
+
 /** 攻击者的工作区、受害者的工作区，外加一个"worker 自己的秘密" */
 let workRoot
 let attacker
@@ -57,15 +84,18 @@ const BIG = { maxBytes: 1024 * 1024 }
 
 describe('词法那一道（保持原有行为）', () => {
   test('../ 与绝对路径被挡住，正常相对路径放行', () => {
-    const root = '/tmp/ws'
+    // 根先 resolve 一次：resolveInWorkspace 用的是本平台的 path（worker 只跑 linux，
+    // 这是对的），拿字面量 '/tmp/ws' 当根时，Windows 上会解析成 C:\tmp\ws\… 而与根对不上，
+    // 于是一条正常的相对路径被判成"逃出工作区"——被测逻辑没问题，是夹具写死了 posix 路径
+    const root = path.resolve('/tmp/ws')
     assert.throws(() => resolveInWorkspace(root, '../../etc/passwd'), /逃出/)
-    assert.throws(() => resolveInWorkspace(root, '/etc/passwd'), /相对/)
+    assert.throws(() => resolveInWorkspace(root, path.resolve('/etc/passwd')), /相对/)
     assert.throws(() => resolveInWorkspace(root, ''), /必填/)
-    assert.equal(resolveInWorkspace(root, 'a/b.txt'), '/tmp/ws/a/b.txt')
+    assert.equal(resolveInWorkspace(root, 'a/b.txt'), path.join(root, 'a', 'b.txt'))
   })
 })
 
-describe('软链接逃逸（原漏洞）', () => {
+describe('软链接逃逸（原漏洞）', { skip: skipSymlink }, () => {
   test('经软链接读别人的工作区：拒绝', async () => {
     await symlink(workRoot, path.join(attacker, 'esc'))
 
@@ -177,7 +207,7 @@ describe('正常用法不受影响', () => {
  * 逐段 O_NOFOLLOW 没有这个窗口：要么这一段不是软链接、正常打开，要么是软链接、
  * 内核直接 ELOOP。所以断言是"一次都不许读到"。
  */
-describe('竞态：目录被反复换成软链接', () => {
+describe('竞态：目录被反复换成软链接', { skip: skipSymlink }, () => {
   /**
    * 两条循环都**必须有硬性上界**（时间 + 次数），而且摇的那条每轮显式让出事件循环。
    *

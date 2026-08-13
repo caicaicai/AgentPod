@@ -66,33 +66,19 @@ describe('纯函数 / 配置校验（任何机器都能跑，不需要真的建 
     broken.isProduction = true
     broken.allowAnonymous = false
     broken.token = 'x'
-    broken.bridge.host = 'agent.internal'
     broken.advertiseBase = ''
     assert.throws(() => validate(broken), /SANDBOX_ADVERTISE_BASE/)
   })
 
-  test('生产环境缺 AP_BRIDGE_HOST 拒绝启动 —— 否则 slot 出站白名单里只剩 DNS', () => {
-    // 这一条守的是"锁上了但没用"：出站白名单照样会挂上去、worker 照样起得来、
-    // /healthz 照样全绿，但白名单里一个业务放行目标都没有，每个技能的网络请求
-    // 都会失败。这种失效没有任何显式报错，只能在启动时挡掉。
-    assert.throws(
-      () => loadConfig({
-        NODE_ENV: 'production',
-        SANDBOX_TOKEN: 'x',
-        SANDBOX_ADVERTISE_BASE: 'http://10.0.0.1:8080',
-      }),
-      /AP_BRIDGE_HOST/,
-    )
-  })
-
-  test('AP_BRIDGE_HOST 走 config，不再由 netns.js 直接读 process.env', () => {
-    const config = loadConfig({
-      NODE_ENV: 'test', ALLOW_ANONYMOUS: '1',
-      AP_BRIDGE_HOST: 'agent.internal', AP_BRIDGE_PORT: '9999',
-    })
-    assert.equal(config.bridge.host, 'agent.internal')
-    assert.equal(config.bridge.port, 9999)
-  })
+  /**
+   * 这里曾经还有两条 AP_BRIDGE_HOST 的用例（生产环境缺它就拒绝启动、它要走 config
+   * 而不是让 netns.js 直接读 process.env）。Cloud Bridge 已经从这套服务里移除
+   * （见 src/tools/http.js 开头：出站改走 Node 原生 fetch），worker 的 config 里
+   * 再没有 bridge 这一节，那两条测的是不存在的字段。
+   *
+   * 它们守的那个意思没有丢：slot 的出站白名单该不该默认拦，现在由
+   * SANDBOX_EGRESS_MODE 回答，见 test/egress-policy.test.js。
+   */
 
   test('生产环境禁止匿名', () => {
     assert.throws(
@@ -326,11 +312,20 @@ describe('纯函数 / 配置校验（任何机器都能跑，不需要真的建 
   })
 
   test('路径逃逸被挡住', () => {
-    const root = '/tmp/ws'
+    /**
+     * 根要先 `path.resolve` 一次。
+     *
+     * resolveInWorkspace 用的是**本平台**的 path（worker 只跑 linux，这是对的），
+     * 而它拿 `path.resolve(root, rel)` 的结果去比 `root` 前缀。直接写死 `'/tmp/ws'`
+     * 时，Windows 上会解析成 `C:\tmp\ws\a\b.txt`，跟字面量 `/tmp/ws` 一比就成了"逃逸" ——
+     * 于是一条完全正常的相对路径把用例判红，报的还是"path 逃出了工作区"。
+     * 被测的逻辑没问题，是夹具把 posix 路径写死了。
+     */
+    const root = path.resolve('/tmp/ws')
     assert.throws(() => resolveInWorkspace(root, '../../etc/passwd'), /逃出/)
-    assert.throws(() => resolveInWorkspace(root, '/etc/passwd'), /相对/)
+    assert.throws(() => resolveInWorkspace(root, path.resolve('/etc/passwd')), /相对/)
     assert.throws(() => resolveInWorkspace(root, ''), /必填/)
-    assert.equal(resolveInWorkspace(root, 'a/b.txt'), '/tmp/ws/a/b.txt')
+    assert.equal(resolveInWorkspace(root, 'a/b.txt'), path.join(root, 'a', 'b.txt'))
   })
 })
 

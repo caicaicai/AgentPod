@@ -20,6 +20,9 @@ const BASE = {
   LLM_DIRECT_API_KEY: 'sk-test',
   LLM_DIRECT_MODEL: 'Qwen/Qwen2.5-72B-Instruct, gpt-4o-mini',
   SANDBOX_MODE: 'none',
+  // AUTH_MODE 的默认值是 password，而它要求 CONSOLE_USERS —— 不显式给一个，
+  // 每条用例都会在读到 llm.direct.* 之前就被配置校验拦下
+  AUTH_MODE: 'dev',
 }
 const cfg = (extra = {}) => loadConfig({ cwd: '/nonexistent', env: { ...BASE, ...extra } })
 

@@ -30,6 +30,8 @@ const silentLogger = { info() {}, warn() {}, error() {}, debug() {}, child() { r
 let faux
 let model
 let skillsRoot
+/** 非空 = 本机建不了软链接，那条依赖软链接的断言要降级（见 setup 里的说明） */
+let symlinkNote = ''
 
 before(async () => {
   faux = registerFauxProvider({
@@ -70,7 +72,22 @@ before(async () => {
   await writeFile(path.join(demo, 'node_modules', 'junk.js'), 'x')
   await mkdir(path.join(demo, '__pycache__'), { recursive: true })
   await writeFile(path.join(demo, '__pycache__', 'lib.pyc'), 'x')
-  await symlink('/etc/passwd', path.join(demo, 'escape.txt'))
+  /**
+   * ⚠️ 建软链接**必须是尽力而为**。
+   *
+   * Windows 上非管理员、又没开开发者模式时，symlink 直接 EPERM。而这一句
+   * 待在共用的 setup 里 —— 它一抛，这个文件里全部 24 条用例会以
+   * "test did not finish before its parent and was cancelled" 一起消失，
+   * 报错还指向 setup，看不出跟软链接有任何关系。
+   *
+   * 这个夹具只服务下面**一条**断言。建不了就记下来，那一条降级，其余照跑。
+   */
+  try {
+    await symlink('/etc/passwd', path.join(demo, 'escape.txt'))
+    symlinkNote = ''
+  } catch (error) {
+    symlinkNote = `本机建不了软链接（${error.code}）——Windows 非管理员且未开开发者模式时如此`
+  }
 })
 
 after(async () => {
@@ -182,14 +199,16 @@ describe('技能铺进沙盒', () => {
     assert.equal(sandbox.files.get('skills/demo-skill/scripts/lib.py').toString(), 'VALUE = 1\n')
   })
 
-  test('node_modules / __pycache__ / 软链接都不搬', async () => {
+  test('node_modules / __pycache__ / 软链接都不搬', async (t) => {
     await session.exec({ command: 'true' })
 
     const paths = [...sandbox.files.keys()]
     assert.ok(!paths.some((p) => p.includes('node_modules')), 'node_modules 被搬进沙盒了')
     assert.ok(!paths.some((p) => p.includes('__pycache__')), '__pycache__ 被搬进沙盒了')
-    // 软链接尤其要紧：跟着走等于把 agent 主机上任意路径的文件搬进沙盒
-    assert.ok(!paths.some((p) => p.endsWith('escape.txt')), '技能目录里的软链接被跟进去了')
+    // 软链接尤其要紧：跟着走等于把 agent 主机上任意路径的文件搬进沙盒。
+    // 这一条要有软链接才测得了；建不了就**说出来**，而不是静悄悄地当它通过了
+    if (symlinkNote) t.diagnostic(`跳过软链接那一项：${symlinkNote}`)
+    else assert.ok(!paths.some((p) => p.endsWith('escape.txt')), '技能目录里的软链接被跟进去了')
   })
 
   test('只搬一次 —— 后续命令不重复推', async () => {

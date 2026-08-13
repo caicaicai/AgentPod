@@ -91,7 +91,7 @@ export function createMemoryCapture({ memory, config, logger = console }) {
   const maxTurns = Number.isFinite(settings.captureMaxTurns) ? settings.captureMaxTurns : 10
 
   /**
-   * 攒批缓冲：`erp + projectId` → 这段时间里累积的几轮对话。
+   * 攒批缓冲：`username + projectId` → 这段时间里累积的几轮对话。
    *
    * 为什么要攒：一轮一次抓取，用户连着问五个来回就是五次额外的模型调用，
    * 而这五轮往往只沉淀出同一条事实。攒起来一次抓，调用次数降一个数量级，
@@ -105,7 +105,7 @@ export function createMemoryCapture({ memory, config, logger = console }) {
    * 缓冲里存着这个用户的 apiKey，最长活到 quietMs（默认 3 分钟）。
    *
    * 这**不违反隔离契约 #1** —— 那条约束的是"绝不进 process.env"（并发用户会互相
-   * 覆盖），而这里是一个按 erp 分键的 Map，任何一条都取不到别人的 key。
+   * 覆盖），而这里是一个按 username 分键的 Map，任何一条都取不到别人的 key。
    * 代价是两个，都可接受：
    *   1. 凭据在内存里比一个 run 活得久；
    *   2. llmToken 可能在攒批期间过期 → 那次抓取失败并记日志。抓记忆是尽力而为，
@@ -125,7 +125,7 @@ export function createMemoryCapture({ memory, config, logger = console }) {
       return pending
     }
     const burst = {
-      erp: ctx.erp,
+      username: ctx.username,
       projectId: ctx.projectId,
       model: ctx.model,
       apiKey: ctx.apiKey,
@@ -138,13 +138,13 @@ export function createMemoryCapture({ memory, config, logger = console }) {
 
   /** 真正去抓。**不抛异常** —— 它跑在请求之外，没人接得住 */
   async function flush(burst) {
-    const { erp, projectId, model, apiKey, turns } = burst
+    const { username, projectId, model, apiKey, turns } = burst
     const transcript = clip(
       turns.map(({ input, reply }) => `用户说：\n${input}\n\n助手回答：\n${reply || '（无正文回复）'}`)
         .join('\n\n---\n\n'),
       TRANSCRIPT_MAX_CHARS,
     )
-    return runExtraction({ erp, projectId, transcript, model, apiKey, turns: turns.length })
+    return runExtraction({ username, projectId, transcript, model, apiKey, turns: turns.length })
   }
 
   return {
@@ -159,25 +159,25 @@ export function createMemoryCapture({ memory, config, logger = console }) {
      * 还白占着这个用户的并发名额。
      *
      * @param {object} ctx
-     * @param {string} ctx.erp
+     * @param {string} ctx.username
      * @param {string} [ctx.projectId]  有项目就记进项目作用域，否则记个人
      * @param {string} ctx.input        用户这轮说的话
      * @param {string} ctx.reply        助手这轮的最终回答
      * @param {object} ctx.model        pi Model（复用本 run 已经构造好的那个）
      * @param {string} ctx.apiKey
      */
-    onTurnEnd({ erp, projectId = '', input, reply, model, apiKey }) {
-      if (!enabled || !erp || !model) return { queued: false, skipped: 'disabled' }
+    onTurnEnd({ username, projectId = '', input, reply, model, apiKey }) {
+      if (!enabled || !username || !model) return { queued: false, skipped: 'disabled' }
       if (String(input || '').trim().length < MIN_INPUT_CHARS) return { queued: false, skipped: 'too-short' }
 
-      const key = `${erp} ${projectId}`
-      const burst = remember(key, { erp, projectId, input, reply, model, apiKey })
+      const key = `${username}\u0000${projectId}`
+      const burst = remember(key, { username, projectId, input, reply, model, apiKey })
 
       // 不攒批（quietMs<=0）或者已经攒够了 —— 立刻抓，但仍然不等它
       if (quietMs <= 0 || burst.turns.length >= maxTurns) {
         clearTimeout(burst.timer)
         bursts.delete(key)
-        flush(burst).catch((error) => logger.debug?.('记忆抓取异常', { erp, err: error?.message }))
+        flush(burst).catch((error) => logger.debug?.('记忆抓取异常', { username, err: error?.message }))
         return { queued: true, flushed: true, turns: burst.turns.length }
       }
 
@@ -188,7 +188,7 @@ export function createMemoryCapture({ memory, config, logger = console }) {
        */
       burst.timer = setTimeout(() => {
         bursts.delete(key)
-        flush(burst).catch((error) => logger.debug?.('记忆抓取异常', { erp, err: error?.message }))
+        flush(burst).catch((error) => logger.debug?.('记忆抓取异常', { username, err: error?.message }))
       }, quietMs)
       burst.timer.unref?.()
       return { queued: true, flushed: false, turns: burst.turns.length }
@@ -204,7 +204,7 @@ export function createMemoryCapture({ memory, config, logger = console }) {
     },
   }
 
-  async function runExtraction({ erp, projectId, transcript, model, apiKey, turns }) {
+  async function runExtraction({ username, projectId, transcript, model, apiKey, turns }) {
     let facts = []
     try {
       const message = await completeSimple(
@@ -221,7 +221,7 @@ export function createMemoryCapture({ memory, config, logger = console }) {
        */
       if (message?.stopReason === 'error') {
         logger.warn?.('记忆抓取的模型调用失败，跳过这一批', {
-          erp,
+          username,
           err: String(message.errorMessage || '').slice(0, 200),
         })
         return { added: 0, skipped: 'model-error' }
@@ -229,18 +229,18 @@ export function createMemoryCapture({ memory, config, logger = console }) {
       facts = parseFacts(textOf(message))
     } catch (error) {
       // 抓取是锦上添花。它失败时用户那些轮早就答完了，不该冒泡到任何地方。
-      logger.debug?.('记忆抓取异常，跳过这一批', { erp, err: error?.message })
+      logger.debug?.('记忆抓取异常，跳过这一批', { username, err: error?.message })
       return { added: 0, skipped: 'error' }
     }
 
     if (!facts.length) return { added: 0 }
 
     try {
-      const added = await memory.capture({ erp, projectId }, facts)
-      if (added) logger.info?.('已写入长期记忆', { erp, projectId: projectId || null, added, turns })
+      const added = await memory.capture({ username, projectId }, facts)
+      if (added) logger.info?.('已写入长期记忆', { username, projectId: projectId || null, added, turns })
       return { added }
     } catch (error) {
-      logger.warn?.('记忆写入失败', { erp, err: error?.message })
+      logger.warn?.('记忆写入失败', { username, err: error?.message })
       return { added: 0, skipped: 'write-error' }
     }
   }

@@ -298,7 +298,12 @@ describe('凭据留存', () => {
     assert.equal(await vault.resolve({ username: 'zhangsan' }), '')
   })
 
-  test('落盘权限必须是 0600', async () => {
+  /**
+   * Windows 不实现 POSIX 权限位：同一份文件 Node 一律报 0666，`chmod` 也改不动它。
+   * 这条守的是真实部署（linux 容器）上的性质，在 Windows 上**无从观测** ——
+   * 所以跳过，而不是把它改成一个在哪儿都成立、也就什么都不保证的断言。
+   */
+  test('落盘权限必须是 0600', { skip: process.platform === 'win32' ? 'Windows 没有 POSIX 权限位，此性质只在 linux 上可观测' : false }, async () => {
     const { stat } = await import('node:fs/promises')
     const vault = createCronCredentialVault({
       config: { dataDir: root, cron: { credentialMode: 'stored' } }, logger: silentLogger,

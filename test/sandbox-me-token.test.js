@@ -60,7 +60,9 @@ describe('注入开关', () => {
 })
 
 describe('config 默认值', () => {
-  const BASE = { SANDBOX_MODE: 'none' }
+  // AUTH_MODE / LLM_MODE 的默认值（password / platform）各自还有必填项，
+  // 不显式给一对就会在读到注入开关之前被校验拦下
+  const BASE = { SANDBOX_MODE: 'none', AUTH_MODE: 'dev', LLM_MODE: 'faux' }
   // **不要用仓库根当 cwd**：loadConfig 会读那里的 .env，
   // 于是这组用例的结果会取决于开发机上那份私有配置。
   const CWD = tmpdir()
@@ -113,35 +115,43 @@ describe('exec 时真的带上了', () => {
     return { calls, ops: createSandboxBashOperations({ sandbox, runContext }) }
   }
 
-  const base = { runId: 'r1', username: 'me', bridgeUrl: 'http://b/r/t', ticket: 't', skillLibsDir: '/libs' }
+  /**
+   * ⚠️ 这一组曾经还断言 `AP_NATIVE_BRIDGE_URL` 与 `AP_RUN_TICKET`。
+   * 那两个变量随 Cloud Bridge 一起从这个服务里去掉了（见 src/tools/http.js 开头：
+   * 出网改走 Node 原生 fetch），现在注入的只有 AP_RUN_ID 与 AP_SKILL_LIBS_DIR，
+   * 见 src/agent/tools.js。断言跟着改，但**要守的性质一个没少**（见第三条）。
+   */
+  const base = { runId: 'r1', username: 'me', skillLibsDir: '/libs' }
 
   test('credentialEnv 会随每条命令下发', async () => {
     const { calls, ops } = spy({ ...base, credentialEnv: { ME_TOKEN: ME } })
     await ops.exec('ls', '/w', { onData() {}, signal: null })
     assert.equal(calls[0].env.ME_TOKEN, ME)
-    assert.equal(calls[0].env.AP_NATIVE_BRIDGE_URL, 'http://b/r/t', '原有的 AP_* 被挤掉了')
+    assert.equal(calls[0].env.AP_RUN_ID, 'r1', '原有的 AP_* 被挤掉了')
   })
 
   test('没有 credentialEnv 时行为与从前完全一致', async () => {
     const { calls, ops } = spy(base)
     await ops.exec('ls', '/w', { onData() {}, signal: null })
     assert.ok(!('ME_TOKEN' in calls[0].env))
-    assert.deepEqual(
-      Object.keys(calls[0].env).sort(),
-      ['AP_NATIVE_BRIDGE_URL', 'AP_RUN_ID', 'AP_RUN_TICKET', 'AP_SKILL_LIBS_DIR'],
-    )
+    assert.deepEqual(Object.keys(calls[0].env).sort(), ['AP_RUN_ID', 'AP_SKILL_LIBS_DIR'])
   })
 
   /**
-   * credentialEnv 是外部算出来的对象，万一哪天它里面出现同名 key，
-   * 也不能把票据/桥地址顶掉 —— 那会让沙盒连回一个攻击者指定的地址。
+   * credentialEnv 是外部算出来的对象，万一哪天它里面出现同名 key，也不能把
+   * AP_* 顶掉 —— 那些值是服务端说了算的运行时身份，被调用方改写就等于让沙盒
+   * 里的东西自称是另一次 run。
+   *
+   * 守住它的是 src/agent/tools.js 里**展开顺序**：credentialEnv 在前、AP_* 在后。
+   * 这种"顺序即安全"的写法最容易在某次重构里被顺手调过来，所以值得钉一条。
    */
-  test('credentialEnv 覆盖不掉 AP_* ', async () => {
+  test('credentialEnv 覆盖不掉 AP_*', async () => {
     const { calls, ops } = spy({
       ...base,
-      credentialEnv: { ME_TOKEN: ME, AP_NATIVE_BRIDGE_URL: 'http://evil/' },
+      credentialEnv: { ME_TOKEN: ME, AP_RUN_ID: 'r-evil', AP_SKILL_LIBS_DIR: '/evil' },
     })
     await ops.exec('ls', '/w', { onData() {}, signal: null })
-    assert.equal(calls[0].env.AP_NATIVE_BRIDGE_URL, 'http://b/r/t')
+    assert.equal(calls[0].env.AP_RUN_ID, 'r1')
+    assert.equal(calls[0].env.AP_SKILL_LIBS_DIR, '/libs')
   })
 })

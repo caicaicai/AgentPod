@@ -72,7 +72,23 @@ export function toWorkspaceRelative(absolutePath, cwd) {
   }
 
   for (const relative of candidates) {
-    if (!relative.startsWith('..') && !path.isAbsolute(relative)) return relative
+    if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
+      /**
+       * ⚠️ 出口必须转成 posix 分隔符。
+       *
+       * 这个返回值是**发给沙盒**的，而沙盒只跑 linux。上面那句
+       * `path.relative(cwd, ...)` 在 Windows 上回的是 `skills\demo-skill\SKILL.md` ——
+       * 原样发过去，worker 那边看到的不是三层目录，而是**一个名字里带反斜杠的文件**。
+       *
+       * 现象很难往这儿想：模型照着系统提示给的 `skills/demo-skill/SKILL.md` 去读，
+       * 得到一句"沙盒里没有 skills\demo-skill\SKILL.md" —— 路径明明是它刚抄下来的。
+       * 写文件更糟：不报错，只是在工作区根上多出一个怪名字的文件。
+       *
+       * 只影响 Windows 上跑 agent 的开发机（生产是 linux 容器），
+       * 但"只在某些机器上失败"恰恰是最费时间的一类问题。
+       */
+      return relative.split(path.sep).join('/')
+    }
   }
   throw new Error(
     `路径超出沙盒工作区：${absolutePath}`

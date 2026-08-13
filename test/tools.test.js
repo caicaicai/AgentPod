@@ -5,26 +5,27 @@
  * 桌面端的工具靠 process.env / 模块级变量拿凭据，一用户一进程时没问题，
  * 搬进共享进程就是串号。所以这里花最多篇幅测的是凭据边界：
  *   - 工具上下文里根本没有 credential 字段（取不到就不可能泄）
- *   - 并发两个用户，各自的出站请求带各自的凭据
- *   - 工具自己设的 Cookie 头会被丢掉，冒充不了别人
+ *   - 凭据不会被带进工具的出站请求（目标地址是模型说了算的）
+ *
+ * ⚠️ 从前这里还测"各自的出站请求带各自的凭据"和"工具自设的 Cookie 会被丢掉"——
+ * 那是 Cloud Bridge 的 egress 引擎注入凭据时的契约。Bridge 已经移除
+ * （见 src/tools/http.js 开头），出站改走 Node 原生 fetch 且**不带凭据**，
+ * 于是那两条说的事情不存在了。详见下面那段说明。
  */
 import { test, describe, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 
-import { createEgress } from '../src/bridge/egress.js'
 import { createToolContext, describeCredential } from '../src/tools/context.js'
 import { createPluginApi, normalizeToolResult, jsonResult } from '../src/tools/plugin-api.js'
 import { buildApTools } from '../src/tools/index.js'
 import { registerTaskPlanTool } from '../src/tools/task-plan.js'
-import { registerConferenceRoomTool, ensureValidQueryDateTime, formatTimeFromInteger, localDateString } from '../src/tools/joyme/conference-room.js'
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {}, child() { return silentLogger } }
 
 let upstream
 let upstreamPort
 const hits = []
-let egress
 
 /** 会议室网关的假实现：回显收到的 cookie，并按 functionId 给出对应响应 */
 before(async () => {
@@ -35,7 +36,7 @@ before(async () => {
       const url = new URL(req.url, 'http://upstream.local')
       const body = Buffer.concat(chunks).toString('utf8')
       const functionId = url.searchParams.get('functionId') || ''
-      hits.push({ functionId, cookie: req.headers.cookie || null, loginType: req.headers.logintype || null, body, query: Object.fromEntries(url.searchParams) })
+      hits.push({ functionId, cookie: req.headers.cookie || null, loginType: req.headers.logintype || null, headers: req.headers, body, query: Object.fromEntries(url.searchParams) })
 
       const reply = (data) => {
         res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -82,15 +83,6 @@ before(async () => {
   await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve))
   upstreamPort = upstream.address().port
 
-  egress = createEgress({
-    config: {
-      bridge: {
-        egressMode: 'allowlist', allowHosts: ['127.0.0.1'], allowPrivateNetwork: true,
-        maxRedirects: 3, timeoutMs: 5000, maxResponseBytes: 1024 * 1024,
-      },
-    },
-    logger: silentLogger,
-  })
 })
 
 after(async () => {
@@ -102,14 +94,7 @@ beforeEach(() => {
 })
 
 function makeCtx({ username = 'zhangsan', credential = 'sso.xiaocaicai.com=COOKIE_A' } = {}) {
-  return createToolContext({ runId: 'run_1', username, credential, egress, logger: silentLogger })
-}
-
-/** 会议室工具默认打 api.m.xiaocaicai.com，测试里用配置把网关指到本地上游 */
-function makeConferenceTool(ctx) {
-  const { api, collect } = createPluginApi({ ctx, config: { joyme: { colorHost: `http://127.0.0.1:${upstreamPort}` } } })
-  registerConferenceRoomTool(api)
-  return collect()[0]
+  return createToolContext({ runId: 'run_1', username, credential, logger: silentLogger })
 }
 
 describe('工具上下文 / 凭据边界', () => {
@@ -121,41 +106,51 @@ describe('工具上下文 / 凭据边界', () => {
   })
 
   test('credentialFacts 只回布尔值，不回内容', () => {
-    assert.deepEqual(describeCredential('me_token=abc; other=1'), { present: true, hasMeToken: true, hasSsoToken: false })
-    assert.deepEqual(describeCredential('sso.xiaocaicai.com=xyz'), { present: true, hasMeToken: false, hasSsoToken: true })
-    assert.deepEqual(describeCredential(''), { present: false, hasMeToken: false, hasSsoToken: false })
+    // 曾经还有一个 hasSsoToken。SSO 那套登录随 AUTH_MODE 一起去掉了
+    // （现在只有 password|dev，见 src/identity/index.js），这个字段也就没了。
+    // deepEqual 是有意的：**多出**一个字段同样该判红 —— 这里的规矩是
+    // "只回关于凭据的非机密事实"，多一个字段就是多一条可能泄的内容。
+    assert.deepEqual(describeCredential('me_token=abc; other=1'), { present: true, hasMeToken: true })
+    assert.deepEqual(describeCredential('sso.xiaocaicai.com=xyz'), { present: true, hasMeToken: false })
+    assert.deepEqual(describeCredential(''), { present: false, hasMeToken: false })
   })
 
   test('缺 username 直接抛错（隔离契约 #4）', () => {
-    assert.throws(() => createToolContext({ runId: 'r', username: '', egress, logger: silentLogger }), /username/)
+    assert.throws(() => createToolContext({ runId: 'r', username: '', logger: silentLogger }), /username/)
   })
 
-  test('工具出站由 egress 注入凭据；工具自设的 Cookie 会被丢掉', async () => {
+  /**
+   * ── 这三条随 Cloud Bridge 一起变了，说明留在这儿 ────────────────────────
+   *
+   * 从前工具出站要过 egress 引擎，由它**注入用户凭据**并按白名单放行，所以原来钉的是：
+   *   1. 凭据由服务端注入，工具自设的 Cookie 会被丢掉；
+   *   2. 并发两个用户各带各的凭据（不串号）；
+   *   3. 白名单外的域名出不去。
+   *
+   * 现在 `ctx.http` 直接用 Node 原生 fetch（见 src/tools/http.js 开头），
+   * `createToolHttp({ logger, runId, username })` **根本不接收 credential** ——
+   * 于是 1 和 2 说的那件事不存在了（没有可串的东西），3 也不再成立。
+   *
+   * 保留一条断言，钉的是**现在这个契约**：出站请求里不带用户凭据。
+   * 它防的是有人哪天"顺手"把凭据加回注入路径 —— 那等于把用户的 SSO Cookie
+   * 发给模型指定的任意地址。
+   *
+   * ⚠️ 白名单没有了：进程内工具现在能连任意主机。这是当初移除 Bridge 时
+   * 一并去掉的能力，不是这里漏测的东西。要收回来得在 http.js 上做，
+   * 而不是在这个文件里断言一个不存在的行为。
+   */
+  test('出站请求不带用户凭据 —— 凭据只进闭包，不上网', async () => {
     const ctx = makeCtx({ credential: 'sso.xiaocaicai.com=REAL_COOKIE' })
     await ctx.http.request({
       url: `http://127.0.0.1:${upstreamPort}/api?functionId=jmrs.district.list`,
       method: 'GET',
-      headers: { Cookie: 'sso.xiaocaicai.com=FORGED', 'x-custom': 'kept' },
+      headers: { 'x-custom': 'kept' },
     })
-    assert.equal(hits[0].cookie, 'sso.xiaocaicai.com=REAL_COOKIE', '工具伪造的 Cookie 覆盖了服务端注入的凭据')
-  })
-
-  test('并发两个用户：各自的出站请求带各自的凭据', async () => {
-    const a = makeCtx({ username: 'userA', credential: 'sso.xiaocaicai.com=CRED_A' })
-    const b = makeCtx({ username: 'userB', credential: 'sso.xiaocaicai.com=CRED_B' })
-    await Promise.all([
-      a.http.get(`http://127.0.0.1:${upstreamPort}/api?functionId=jmrs.district.list&who=a`),
-      b.http.get(`http://127.0.0.1:${upstreamPort}/api?functionId=jmrs.district.list&who=b`),
-    ])
-    const hitA = hits.find((h) => h.query.who === 'a')
-    const hitB = hits.find((h) => h.query.who === 'b')
-    assert.equal(hitA.cookie, 'sso.xiaocaicai.com=CRED_A')
-    assert.equal(hitB.cookie, 'sso.xiaocaicai.com=CRED_B', '并发下工具凭据串号')
-  })
-
-  test('白名单外的域名，工具也出不去', async () => {
-    const ctx = makeCtx()
-    await assert.rejects(() => ctx.http.get('http://evil.example.com/'), /白名单/)
+    assert.ok(
+      !String(hits[0].cookie || '').includes('REAL_COOKIE'),
+      '用户凭据被带到了工具的出站请求里 —— 目标地址是模型说了算的',
+    )
+    assert.equal(hits[0].headers['x-custom'], 'kept', '调用方自己的头没透传过去')
   })
 })
 
@@ -237,131 +232,47 @@ describe('task_plan（移植自 ap-skills）', () => {
   })
 })
 
-describe('joyme_conference_room（移植自 joyme 扩展）', () => {
-  test('loginType 由 credentialFacts 决定，不读 process.env', async () => {
-    const meCtx = makeCtx({ credential: 'me_token=X' })
-    const tool = makeConferenceTool(meCtx)
-    await tool.execute('c', { action: 'query_district_list' })
-    assert.equal(hits[0].loginType, '15', '有 me_token 时 loginType 应为 15')
-
-    hits.length = 0
-    const ssoTool = makeConferenceTool(makeCtx({ credential: 'sso.xiaocaicai.com=Y' }))
-    await ssoTool.execute('c', { action: 'query_district_list' })
-    assert.equal(hits[0].loginType, '7', '只有 sso 时 loginType 应为 7')
-  })
-
-  test('四步管道：档案 / 地区 / 楼宇 / 会议室', async () => {
-    const tool = makeConferenceTool(makeCtx())
-
-    const profile = JSON.parse((await tool.execute('c', { action: 'query_user_conference_profile' })).content[0].text)
-    assert.equal(profile.ok, true)
-    assert.equal(profile.data.headers.jmsRealName, '张三', 'URL-encoded 的姓名没有解码')
-
-    const districts = JSON.parse((await tool.execute('c', { action: 'query_district_list' })).content[0].text)
-    assert.deepEqual(districts.data, [{ districtCode: '13', districtName: '北京' }])
-
-    const workplaces = JSON.parse((await tool.execute('c', { action: 'query_workplace_list', districtCode: '13' })).content[0].text)
-    assert.equal(workplaces.data[0].workplaceCode, '1001000052')
-
-    const rooms = JSON.parse((await tool.execute('c', {
-      action: 'query_meeting_list',
-      districtCode: '13',
-      workplaceCode: '1001000052',
-      floorNo: '3',
-      meetingEstimateDate: '2099-01-01',
-      meetingEstimateStime: 900,
-      meetingEstimateEtime: 1800,
-    })).content[0].text)
-    assert.equal(rooms.data.rooms[0].meetingName, '会议室 A')
-    assert.deepEqual(rooms.data.rooms[0].booked, [{ start: '09:00', end: '10:30', subject: '周会' }])
-  })
-
-  test('缺前置参数时报错指路，而不是发一个必然失败的请求', async () => {
-    const tool = makeConferenceTool(makeCtx())
-    const out = JSON.parse((await tool.execute('c', { action: 'query_meeting_list', floorNo: '3' })).content[0].text)
-    assert.equal(out.ok, false)
-    assert.match(out.error, /districtCode/)
-    assert.match(out.error, /四步管道/)
-    assert.equal(hits.length, 0, '参数不全就不该打上游')
-  })
-
-  test('上游业务失败（resultCode≠1）转成可读错误，不抛栈', async () => {
-    const tool = makeConferenceTool(makeCtx())
-    const out = JSON.parse((await tool.execute('c', { action: 'query_workplace_list', districtCode: 'BAD_DISTRICT' })).content[0].text)
-    assert.equal(out.ok, false)
-    assert.equal(out.error, '地区代码不存在', '没有把上游的失败原因透出来')
-  })
-
-  test('网关层错误（code+echo）保留错误码', async () => {
-    const ctx = makeCtx()
-    const { createColorGateway } = await import('../src/tools/joyme/color-gateway.js')
-    const gateway = createColorGateway({ ctx, host: `http://127.0.0.1:${upstreamPort}` })
-    const [data, error] = await gateway.request({ functionId: 'gateway.error.probe', contentType: 'application/json' })
-    assert.equal(data, null)
-    assert.equal(error.code, 'B1001')
-    assert.match(error.message, /登录态已失效/)
-  })
-})
-
-describe('查询时间自动纠正（修了桌面端的跨时区 bug）', () => {
-  test('过去的日期前移到今天', () => {
-    const now = new Date(2026, 6, 30, 14, 30) // 本地时间 2026-07-30 14:30
-    const result = ensureValidQueryDateTime('2026-07-01', 900, now)
-    assert.equal(result.wasAdjusted, true)
-    assert.equal(result.adjustedDate, '2026-07-30')
-    assert.equal(result.adjustedTime, 1430)
-  })
-
-  test('今天但时间已过 → 前移到当前时刻', () => {
-    const now = new Date(2026, 6, 30, 14, 30)
-    const result = ensureValidQueryDateTime('2026-07-30', 900, now)
-    assert.equal(result.wasAdjusted, true)
-    assert.equal(result.adjustedTime, 1430)
-  })
-
-  test('将来的时间不动', () => {
-    const now = new Date(2026, 6, 30, 14, 30)
-    const result = ensureValidQueryDateTime('2026-08-01', 900, now)
-    assert.equal(result.wasAdjusted, false)
-    assert.equal(result.adjustedDate, '2026-08-01')
-  })
-
-  test('东八区凌晨不会把今天误判成过去 —— 桌面端用 UTC 日期比本地小时，这里修掉了', () => {
-    // 本地 2026-07-30 01:00；若按 UTC 取日期会得到 2026-07-29，从而误判"今天"是过去
-    const now = new Date(2026, 6, 30, 1, 0)
-    assert.equal(localDateString(now), '2026-07-30')
-    const result = ensureValidQueryDateTime('2026-07-30', 2000, now)
-    assert.equal(result.wasAdjusted, false, '把用户查询的今天误判成了过去的日期')
-  })
-
-  test('HHMM 格式化', () => {
-    assert.equal(formatTimeFromInteger(900), '09:00')
-    assert.equal(formatTimeFromInteger(1530), '15:30')
-    assert.equal(formatTimeFromInteger(undefined), '')
-    assert.equal(formatTimeFromInteger(9999), '')
-  })
-})
+/**
+ * 这里曾经有两块用例：joyme_conference_room 工具本身（四步管道、错误分支、loginType
+ * 由 credentialFacts 决定），以及它导出的时间纠正纯函数。
+ *
+ * src/tools/joyme/ 整个目录在开源时移除了，那两块测的是不存在的模块 ——
+ * 表现是**整个文件 ERR_MODULE_NOT_FOUND**，连带上面那 15 条也一起跑不了。
+ * 要接回内部工具时，从 git 历史里取回这两块即可。
+ */
 
 describe('工具装配的能力闸门', () => {
   const names = (result) => result.tools.map((t) => t.name).sort()
   /** 按插件 id 找，别按下标 —— 注册表里加一个新插件就会把下标全挪位 */
   const missingFor = (result, pluginId) => result.skipped.find((entry) => entry.plugin === pluginId)?.missing
 
-  test('没有凭据时，需要凭据的工具不注册（而不是注册了每次必失败）', () => {
-    const withCred = buildApTools({ runId: 'r', username: 'e', credential: 'sso.xiaocaicai.com=X', egress, logger: silentLogger })
-    const noCred = buildApTools({ runId: 'r', username: 'e', credential: '', egress, logger: silentLogger })
+  /**
+   * 这条原来用的样本是 joyme_conference_room（`requires: ['credential']`）。
+   * 那个插件随内部工具一起移除了，而**现在没有任何插件依赖 credential** ——
+   * 也就是说 `credential` 这个能力位当下没有使用者。
+   *
+   * 换成 memory 作样本：闸门机制本身没变，"缺依赖就不注册、并在 skipped 里
+   * 说清缺什么"才是要守的东西。注册了却每次必失败，对模型来说是最难办的一种
+   * 工具 —— 它看得见、调得动、永远拿不到结果。
+   */
+  test('缺依赖的工具不注册，而不是注册了每次必失败', () => {
+    const withMemory = buildApTools({
+      runId: 'r', username: 'e', logger: silentLogger, memory: { enabled: true },
+    })
+    const without = buildApTools({ runId: 'r', username: 'e', logger: silentLogger })
 
-    assert.ok(names(withCred).includes('joyme_conference_room'))
-    assert.ok(!names(noCred).includes('joyme_conference_room'))
+    assert.ok(names(withMemory).includes('memory'))
+    assert.ok(!names(without).includes('memory'))
     // task_plan 无依赖，两种情况都在
-    assert.ok(names(withCred).includes('task_plan'))
-    assert.ok(names(noCred).includes('task_plan'))
-    assert.deepEqual(missingFor(noCred, 'joyme-conference-room'), ['credential'])
+    assert.ok(names(withMemory).includes('task_plan'))
+    assert.ok(names(without).includes('task_plan'))
+    // 缺什么要说得出来，否则排查时只知道"工具没了"
+    assert.deepEqual(missingFor(without, 'ap-memory'), ['memory'])
   })
 
   test('没有用户工作空间时不给 skill_save —— 沙盒里写的东西根本存不下来', () => {
     const sandboxSession = { async listFiles() { return { items: [] } }, async getFiles() { return [] } }
-    const off = buildApTools({ runId: 'r', username: 'e', credential: '', egress, logger: silentLogger, sandboxSession })
+    const off = buildApTools({ runId: 'r', username: 'e', credential: '', logger: silentLogger, sandboxSession })
     assert.ok(!names(off).includes('skill_save'))
     assert.deepEqual(missingFor(off, 'ap-skill-save'), ['skills'])
 
@@ -369,7 +280,7 @@ describe('工具装配的能力闸门', () => {
       runId: 'r',
       username: 'e',
       credential: '',
-      egress,
+      
       logger: silentLogger,
       sandboxSession,
       workspace: { enabled: true, async writeSkillFiles() {} },
@@ -382,7 +293,7 @@ describe('工具装配的能力闸门', () => {
       runId: 'r',
       username: 'e',
       credential: '',
-      egress,
+      
       logger: silentLogger,
       workspace: { enabled: true, async writeSkillFiles() {} },
     })

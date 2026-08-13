@@ -67,16 +67,21 @@ const previewing = ref(false)
  * 预览是**异步**的：Vue 作品要现编译，mermaid 要现渲染，两者的依赖都是按需加载的
  * （加起来好几 MB，不该让没用到的人也付这个首屏成本）。
  *
- * `token` 是为了丢掉过期的结果：编译一份大点的 Vue 作品要几百毫秒，
+ * `previewSeq` 是为了丢掉过期的结果：编译一份大点的 Vue 作品要几百毫秒，
  * 这期间用户完全可能已经切到另一份作品上了 —— 不判一下就会看到上一份的画面。
+ *
+ * 它原来叫 `token`，被隔离契约的静态检查当成"模块级凭据缓存"一直告警
+ * （规则按变量名匹配 token/cookie/credential）。那是误报，但**改名比加豁免好**：
+ * 在一个满是鉴权 token 的代码库里，管一个自增计数器叫 token 本来就会让人读错。
+ * 而一条长期红着的告警会把真正的新违规盖掉。
  */
-let token = 0
+let previewSeq = 0
 async function rebuildPreview() {
   if (!meta.value || !needsFrame(meta.value.kind)) {
     previewHtml.value = ''
     return
   }
-  const mine = ++token
+  const mine = ++previewSeq
   previewing.value = true
   const result = await buildPreviewDoc({
     kind: meta.value.kind,
@@ -84,7 +89,7 @@ async function rebuildPreview() {
     entry: meta.value.entry,
     allowedOrigins: state.artifactPreview.allowedOrigins || [],
   })
-  if (mine !== token) return
+  if (mine !== previewSeq) return
   previewHtml.value = result.html
   previewError.value = result.error
   previewing.value = false

@@ -93,11 +93,20 @@ describe('stage：工作区 → 沙盒', () => {
     assert.deepEqual(await store.stageFiles({ username: 'newbie', sessionKey: 's1' }), [])
   })
 
-  test('软链接不跟着走 —— 否则等于让沙盒里的代码指定我们读共享盘的哪一块', async () => {
+  test('软链接不跟着走 —— 否则等于让沙盒里的代码指定我们读共享盘的哪一块', async (t) => {
     const dir = path.join(root, 'users', 'u1', 'sessions', 's1', WORKSPACE_DIR)
     await mkdir(dir, { recursive: true })
     await writeFile(path.join(dir, 'real.txt'), 'ok')
-    await symlink('/etc/passwd', path.join(dir, 'sneaky.txt'))
+    /**
+     * 整条用例都建立在"有一个软链接"上，建不出来就没什么可测的 —— 但要**说出来**。
+     * Windows 上非管理员、又没开开发者模式时 symlink 直接 EPERM；
+     * 让它抛出去的话，这里报的是一条 EPERM 栈，看不出跟"跳过"有任何关系。
+     */
+    try {
+      await symlink('/etc/passwd', path.join(dir, 'sneaky.txt'))
+    } catch (error) {
+      return t.skip(`本机建不了软链接（${error.code}）——Windows 非管理员且未开开发者模式时如此`)
+    }
 
     const staged = await store.stageFiles({ username: 'u1', sessionKey: 's1' })
     assert.deepEqual(staged.map((file) => file.path), ['workspace/real.txt'])

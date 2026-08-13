@@ -45,16 +45,27 @@ const RULES = [
     pattern: /console\.(log|info|warn|error)\([^)]*\b(cookie|credential|apiKey|llmToken)\b[^)]*\)/i,
     hint: '只允许打印长度或 fingerprint()',
   },
-  {
-    id: '出站必须走 egress',
-    // fetch 会自动跟重定向，跳转后的目标不再经过我们的白名单与 IP 校验；
-    // 而且它不给 DNS 注入点，解析到内网的域名可以直接绕过 SSRF 防护。
-    // 沙盒技能（bridge）和进程内工具（tools）都必须走同一条出站路径，
-    // 否则白名单会变成「两份都得记得改」的东西，迟早漏一份。
-    scope: ['src/bridge/', 'src/tools/'],
-    pattern: /(^|[^.\w])fetch\s*\(/,
-    hint: '出站一律用 egress.request() / ctx.http：逐跳校验白名单、逐跳决定要不要带凭据，并在 net 层校验真实 IP',
-  },
+  /**
+   * ── 这里曾经有一条「出站必须走 egress」──────────────────────────────────
+   *
+   * 它要求 `src/bridge/` 与 `src/tools/` 下不许直接 `fetch(`，理由是：fetch 自动跟
+   * 重定向，跳转后的目标不再过白名单与 IP 校验；而且它不给 DNS 注入点，
+   * 解析到内网的域名可以绕过 SSRF 防护。
+   *
+   * Cloud Bridge 连同 egress 引擎已经从这个服务里移除（`src/bridge/` 不存在了，
+   * 出站改走 Node 原生 fetch，见 src/tools/http.js 开头）。于是这条规则**只剩下
+   * 一个必然触发的告警**：它指着 src/tools/http.js 说"你该用 egress"，
+   * 而 egress 已经没有了。
+   *
+   * 一条永远红着、又没人修得了的规则，代价不是它自己 —— 是它让
+   * `npm run check:isolation` 的输出从"零告警 = 干净"退化成"有几条是老样子"，
+   * 于是**真正的新违规会混在里面没人看见**。所以移除它。
+   *
+   * ⚠️ 它守的那件事并没有随之解决：进程内工具现在能连任意主机，
+   * 出站白名单与 SSRF 防护在 agent 侧是空的（沙盒侧另有一套，
+   * 见 sandbox-worker 的 SANDBOX_EGRESS_MODE）。要把这个能力收回来，
+   * 是在 src/tools/http.js 上重新实现，然后再把这条规则加回来。
+   */
   {
     id: '前端禁止读 document.cookie',
     // 「复制调试信息」把界面上的状态整包交出去给人分析。SSO 票就在 cookie 里，

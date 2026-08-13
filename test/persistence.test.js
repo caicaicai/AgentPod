@@ -29,9 +29,18 @@ describe('路径收口', () => {
   })
 
   test('safeJoin 在解析之后判边界 —— 编码与多重分隔符都摊平了才算数', () => {
-    assert.throws(() => safeJoin('/data', '..', 'other'), /路径越界/)
-    assert.throws(() => safeJoin('/data', 'a/../../b'), /路径越界/)
-    assert.equal(safeJoin('/data', 'a', 'b'), path.resolve('/data/a/b'))
+    /**
+     * 根要先 `resolve` 一次。
+     *
+     * safeJoin 内部拿 `path.resolve(root, ...)` 的结果去比 `root` 前缀，所以传进去的
+     * root 必须已经是**本平台的绝对路径**。直接写 `'/data'` 在 Windows 上会解析成
+     * `C:\data\a\b`，而前缀比的是字面量 `/data` —— 于是一次完全正常的拼接被判成越界，
+     * 报错还是"路径越界：a/b"，看着像被测代码有 bug。
+     */
+    const ROOT = path.resolve('/data')
+    assert.throws(() => safeJoin(ROOT, '..', 'other'), /路径越界/)
+    assert.throws(() => safeJoin(ROOT, 'a/../../b'), /路径越界/)
+    assert.equal(safeJoin(ROOT, 'a', 'b'), path.join(ROOT, 'a', 'b'))
   })
 })
 

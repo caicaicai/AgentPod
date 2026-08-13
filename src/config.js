@@ -7,24 +7,7 @@
  */
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
-import { networkInterfaces, homedir } from 'node:os'
-
-/**
- * 探测本容器的对外 IP。
- *
- * K8s 上这件事由 `fieldRef: status.podIP` 注入；没有 K8s 时
- * 退而求其次挑第一个非回环 IPv4。容器一般只有一张业务网卡，够用；
- * 多网卡场景请显式配置，别赌探测结果。
- */
-export function detectHostBase(port) {
-  for (const [name, addresses] of Object.entries(networkInterfaces())) {
-    if (name === 'lo' || name.startsWith('docker') || name.startsWith('veth')) continue
-    for (const address of addresses || []) {
-      if (address.family === 'IPv4' && !address.internal) return `http://${address.address}:${port}`
-    }
-  }
-  return ''
-}
+import { homedir } from 'node:os'
 
 /**
  * 从文件里补齐环境变量。
