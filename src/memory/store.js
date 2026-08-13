@@ -9,8 +9,12 @@
  *
  * memory 就是这份"跨会话仍然成立的事实"。它有两个作用域：
  *
- *   个人  <dataDir>/users/<username>/memory/MEMORY.md          —— 这个人的所有会话都带
- *   项目  <dataDir>/users/<username>/projects/<id>/MEMORY.md   —— 只有该项目下的会话带
+ *   个人  scope=''         —— 这个人的所有会话都带
+ *   项目  scope=<projectId> —— 只有该项目下的会话带
+ *
+ * 落在哪由 STORAGE_DRIVER 决定，本文件不关心（见 src/persistence/storage.js）：
+ *   file   <dataDir>/users/<username>/memory/MEMORY.md 与 …/projects/<id>/MEMORY.md
+ *   mysql  ap_doc 表的一行
  *
  * 分两层不是为了好看：个人层放"我是谁、我怎么工作"，项目层放"这个项目的现状"。
  * 混在一起的话，一个项目的临时状态会跟着你去所有别的对话里。
@@ -23,12 +27,11 @@
  * 那种丢了不会有人立刻发现的数据。
  */
 import { createHash } from 'node:crypto'
-import { readFile, rm } from 'node:fs/promises'
 
-import { assertSegment, safeJoin, writeAtomic, userRoot } from '../persistence/paths.js'
+import { assertSegment } from '../persistence/paths.js'
 import { RECALL_MAX_CHARS, bullets, capTail, dateStr, isBullet, normalize } from './notebook.js'
+import { requireStorage } from '../persistence/storage.js'
 
-const MEMORY_FILE = 'MEMORY.md'
 const MEMORY_HEADER = '# Memory'
 
 /**
@@ -99,30 +102,23 @@ function normalizeReplace(content) {
  * @param {object} params
  * @param {object} params.config  需要 config.memory.enabled / config.dataDir
  */
-export function createMemoryStore({ config, logger = console }) {
-  const dataDir = config.dataDir
+export function createMemoryStore({ config, storage, logger = console }) {
+  requireStorage(storage, 'createMemoryStore')
   const enabled = config.memory?.enabled !== false
 
   /**
-   * 作用域 → 文件路径。
+   * 调用方的 `{ username, projectId }` → 后端的 `{ username, scope }`。
    *
-   * `projectId` 为空就是个人作用域。刻意不让调用方自己拼路径：越界检查只在这里做一次，
-   * 多一个拼路径的地方就多一处要记得校验的地方。
+   * `projectId` 为空就是个人作用域。刻意只在这一处转换：越界检查（文件驱动下是
+   * 路径拼接，mysql 下是列值）只做一次，多一个拼的地方就多一处要记得校验的地方。
    */
-  function fileFor({ username, projectId = '' }) {
-    const base = userRoot(dataDir, username)
-    if (!projectId) return safeJoin(base, 'memory', MEMORY_FILE)
-    return safeJoin(base, 'projects', assertSegment(projectId, 'projectId'), MEMORY_FILE)
+  function scopeOf({ username, projectId = '' }) {
+    return { username, scope: projectId ? assertSegment(projectId, 'projectId') : '' }
   }
 
-  async function readRaw(scope) {
-    try {
-      return await readFile(fileFor(scope), 'utf8')
-    } catch (error) {
-      if (error.code === 'ENOENT') return ''
-      throw error
-    }
-  }
+  const readRaw = (scope) => storage.docs.read(scopeOf(scope))
+  const writeRaw = (scope, content) => storage.docs.write(scopeOf(scope), content)
+  const removeRaw = (scope) => storage.docs.remove(scopeOf(scope))
 
   return {
     enabled,
@@ -145,7 +141,7 @@ export function createMemoryStore({ config, logger = console }) {
       const existing = await readRaw(scope)
       const { body, added } = foldCapture(existing, facts, at)
       if (!added) return 0
-      await writeAtomic(fileFor(scope), `${body}\n`, 'mem')
+      await writeRaw(scope, `${body}\n`)
       return added
     },
 
@@ -170,10 +166,10 @@ export function createMemoryStore({ config, logger = console }) {
       if (revision !== undefined && revisionOf(current) !== revision) return false
       const next = normalizeReplace(content)
       if (!next) {
-        await rm(fileFor(scope), { force: true })
+        await removeRaw(scope)
         return true
       }
-      await writeAtomic(fileFor(scope), next, 'mem')
+      await writeRaw(scope, next)
       return true
     },
 
@@ -197,15 +193,10 @@ export function createMemoryStore({ config, logger = console }) {
       }
       if (!removed) return 0
       const body = normalizeReplace(kept.join('\n'))
-      if (!body || !bullets(body).length) await rm(fileFor(scope), { force: true })
-      else await writeAtomic(fileFor(scope), body, 'mem')
+      if (!body || !bullets(body).length) await removeRaw(scope)
+      else await writeRaw(scope, body)
       return removed
     },
 
-    /**
-     * 这个作用域的 memory 文件在哪。
-     * 给项目存储用：删项目时要把它那棵目录整个删掉，得知道自己写在哪儿。
-     */
-    fileFor,
   }
 }

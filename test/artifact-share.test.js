@@ -15,9 +15,20 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import { createServer } from '../src/http/server.js'
-import { createFileStore } from '../src/sessions/file-store.js'
+import { createMemorySessionStore } from './helpers/memory-session-store.js'
 import { createArtifactStore } from '../src/artifacts/store.js'
 import { createShareStore, assertShareToken, newShareToken } from '../src/artifacts/shares.js'
+import { createMemoryStorage } from './helpers/memory-storage.js'
+
+/** 存储后端的测试替身。生产只有 MySQL，见 test/helpers/memory-storage.js */
+const testStorage = createMemoryStorage()
+
+/**
+ * 替身是这个文件共用的一个实例，每条用例前清干净。
+ * 不清的话，上一条留下的记录会让"列出全部"这类断言得到一个跟自己无关的数字，
+ * 而报错看起来像是被测代码有问题。
+ */
+beforeEach(() => testStorage.reset())
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {}, child() { return silentLogger } }
 
@@ -41,9 +52,9 @@ function buildConfig(dataDir, artifactOverrides = {}) {
 }
 
 async function startServer(dataDir, config = buildConfig(dataDir)) {
-  const store = createFileStore({ config, logger: silentLogger })
-  const artifacts = createArtifactStore({ config, logger: silentLogger })
-  const shares = createShareStore({ config, logger: silentLogger, artifacts })
+  const store = createMemorySessionStore()
+  const artifacts = createArtifactStore({ storage: testStorage, config, logger: silentLogger })
+  const shares = createShareStore({ storage: testStorage, config, logger: silentLogger, artifacts })
 
   const app = createServer({
     config,
@@ -415,7 +426,7 @@ describe('能力闸门', () => {
 
   test('作品功能本身关掉时，分享不会变成一个"开着但永远 404"的开关', async () => {
     const config = buildConfig(dataDir, { enabled: false })
-    const artifacts = createArtifactStore({ config, logger: silentLogger })
-    assert.equal(createShareStore({ config, logger: silentLogger, artifacts }).enabled, false)
+    const artifacts = createArtifactStore({ storage: testStorage, config, logger: silentLogger })
+    assert.equal(createShareStore({ storage: testStorage, config, logger: silentLogger, artifacts }).enabled, false)
   })
 })

@@ -19,6 +19,17 @@ import { createToolContext } from '../src/tools/context.js'
 import { createPluginApi } from '../src/tools/plugin-api.js'
 import { artifactPlugin } from '../src/tools/artifact.js'
 import { buildApTools } from '../src/tools/index.js'
+import { createMemoryStorage } from './helpers/memory-storage.js'
+
+/** 存储后端的测试替身。生产只有 MySQL，见 test/helpers/memory-storage.js */
+const testStorage = createMemoryStorage()
+
+/**
+ * 替身是这个文件共用的一个实例，每条用例前清干净。
+ * 不清的话，上一条留下的记录会让"列出全部"这类断言得到一个跟自己无关的数字，
+ * 而报错看起来像是被测代码有问题。
+ */
+beforeEach(() => testStorage.reset())
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {}, child() { return silentLogger } }
 
@@ -26,7 +37,7 @@ let root
 let artifacts
 beforeEach(async () => {
   root = await mkdtemp(path.join(tmpdir(), 'ap-artifact-'))
-  artifacts = createArtifactStore({ config: { dataDir: root, artifacts: { enabled: true } }, logger: silentLogger })
+  artifacts = createArtifactStore({ storage: testStorage, config: { dataDir: root, artifacts: { enabled: true } }, logger: silentLogger })
 })
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
@@ -72,8 +83,10 @@ describe('增删改查', () => {
       await artifacts.listOnDisk({ username: 'zhangsan', id: meta.id, version: 1 }),
       ['App.vue', 'components/Chart.vue', 'utils/format.js'],
     )
-    const onDisk = await readFile(path.join(artifacts.dirFor('zhangsan', meta.id), 'v1', 'components', 'Chart.vue'), 'utf8')
-    assert.equal(onDisk, '<template><i /></template>')
+    // 正文按原样的路径存着。断言走 store 自己的接口 —— 从前这里是拼一条真实路径
+    // 再 readFile，那把用例绑死在"作品一定是磁盘上的目录树"上，而现在它是库里的行
+    const current = await artifacts.read({ username: 'zhangsan', id: meta.id })
+    assert.equal(current.files.find((file) => file.path === 'components/Chart.vue').content, '<template><i /></template>')
   })
 
   test('entry 可以显式指定，指到不存在的文件当场报错', async () => {
@@ -107,14 +120,21 @@ describe('增删改查', () => {
     assert.equal((await artifacts.read({ username: 'zhangsan', id: meta.id })).files[0].content, 'a\nb\n')
   })
 
-  test('删了作品，文件目录跟着走，不留孤儿', async () => {
+  test('删了作品，正文跟着走，不留孤儿', async () => {
     const meta = await make()
-    const dir = artifacts.dirFor('zhangsan', meta.id)
-    assert.ok(await stat(dir))
+    assert.deepEqual(
+      await artifacts.listOnDisk({ username: 'zhangsan', id: meta.id, version: 1 }),
+      ['app.js', 'index.html'],
+      '前提：正文确实存进去了',
+    )
 
     assert.equal(await artifacts.remove({ username: 'zhangsan', id: meta.id }), true)
-    await assert.rejects(() => stat(dir), /ENOENT/)
     assert.equal(await artifacts.read({ username: 'zhangsan', id: meta.id }), null)
+    assert.deepEqual(
+      await artifacts.listOnDisk({ username: 'zhangsan', id: meta.id, version: 1 }),
+      [],
+      '元信息删了但正文还在 —— 那就是一份谁也访问不到、却还占着地方的孤儿',
+    )
   })
 
   test('会话删了，它名下的作品跟着删，别的会话不受影响', async () => {
@@ -139,8 +159,7 @@ describe('增删改查', () => {
   })
 
   test('文件数与总体积有上限', async () => {
-    const store = createArtifactStore({
-      config: { dataDir: root, artifacts: { enabled: true, maxFiles: 2, maxBytes: 100 } },
+    const store = createArtifactStore({ storage: testStorage, config: { dataDir: root, artifacts: { enabled: true, maxFiles: 2, maxBytes: 100 } },
       logger: silentLogger,
     })
     const seed = (files) => store.create({ username: 'lisi', kind: 'code', title: 't', files })
@@ -260,8 +279,7 @@ describe('版本', () => {
    * 但**元信息要留**：不然"第 1 版是什么时候生成的、有哪些文件"这条线索会直接断掉。
    */
   test('超出保留窗口的旧版本删目录、留元信息', async () => {
-    const store = createArtifactStore({
-      config: { dataDir: root, artifacts: { enabled: true, maxVersions: 2 } },
+    const store = createArtifactStore({ storage: testStorage, config: { dataDir: root, artifacts: { enabled: true, maxVersions: 2 } },
       logger: silentLogger,
     })
     const meta = await store.create({ username: 'lisi', kind: 'code', title: 't', files: [{ path: 'a.js', content: 'v1' }] })
@@ -429,7 +447,7 @@ describe('artifact 工具', () => {
   })
 
   test('ARTIFACTS_ENABLED=0 时也不注册', () => {
-    const off = createArtifactStore({ config: { dataDir: root, artifacts: { enabled: false } }, logger: silentLogger })
+    const off = createArtifactStore({ storage: testStorage, config: { dataDir: root, artifacts: { enabled: false } }, logger: silentLogger })
     const { tools } = buildApTools({ runId: 'r1', username: 'zhangsan', logger: silentLogger, artifacts: off })
     assert.equal(tools.some((tool) => tool.name === 'artifact'), false)
   })

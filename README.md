@@ -37,9 +37,17 @@ AgentPod is a **server-side, multi-tenant AI agent service** powered by the [pi]
 
 ## Quick Start
 
-### Local Development (No External Dependencies)
+### Local Development
+
+**You need a MySQL 8.** Structured data lives only in the database — there is no file mode
+(see [MySQL](#mysql-required) for why).
 
 ```bash
+# A throwaway MySQL for development
+docker run -d --name agentpod-dev-mysql -p 3306:3306 \
+  -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=agentpod \
+  -e MYSQL_USER=agentpod -e MYSQL_PASSWORD=agentpod mysql:8.0
+
 # Install and build the web UI (only needed once, or after changing web/)
 npm run web:install
 npm run web:build
@@ -50,7 +58,14 @@ npm run dev
 # Open http://127.0.0.1:8787
 ```
 
-This starts with `LLM_MODE=faux` (mock model), `AUTH_MODE=dev` (trusts `X-Username` header), and `SANDBOX_MODE=local` (executes in-process). No API keys, databases, or network access required.
+This starts with `LLM_MODE=faux` (mock model), `AUTH_MODE=dev` (trusts `X-Username` header), and
+`SANDBOX_MODE=local` (executes in-process) — no API keys or network access needed, but the database
+connection is required. Tables are created on first start.
+
+`npm test` does **not** need a database: the store tests run against an in-memory double
+(`test/helpers/memory-storage.js`). Point `AP_TEST_MYSQL_URL` at a scratch database to additionally
+run the storage contract against real MySQL — CI should do that, since it is what catches the double
+drifting from the real backend.
 
 ### Local Development with Sandbox Cluster
 
@@ -184,8 +199,7 @@ See [`.env.example`](.env.example) for the complete annotated reference.
 | `AUTH_MODE` | `password` \| `dev` | `password`: built-in username/password + JWT sessions. `dev`: trusts `X-Username` header (local only) |
 | `LLM_MODE` | `platform` \| `direct` \| `faux` | Model provider. `platform`: fetch from backend. `direct`: connect to any OpenAI-compatible endpoint. `faux`: mock model |
 | `SANDBOX_MODE` | `manager` \| `http` \| `local` \| `none` | Execution backend. `manager`: cluster with ticket-based auth (recommended). `http`: direct worker connection. `local`: in-process (dev only) |
-| `SESSION_STORE` | `memory` \| `file` \| `mysql` | Session persistence. `file` writes to `DATA_DIR`. `mysql` for multi-replica deployments |
-| `DATA_DIR` | Path | Storage root for sessions, memory, projects, cron. Default: `~/.agentpod` |
+| `MYSQL_HOST` etc. | — | **Required.** Sessions, projects, long-term memory, artifacts, shares/market, cron and accounts all live in the database — see the MySQL section below |
 
 ### Feature Toggles
 
@@ -207,9 +221,49 @@ See [`.env.example`](.env.example) for the complete annotated reference.
 
 | Variable | Description |
 |----------|-------------|
-| `CONSOLE_USERS` | `user1:pass1,user2:pass2` — comma-separated credentials |
+| `CONSOLE_USERS` | `user1:pass1,…` — **seeding only**: accounts are copied into the account store at startup (existing ones are left alone). After that, add users and change passwords through the UI or the API; only a scrypt derivation is stored. On a fresh deployment the first entry becomes the admin |
+| `AUTH_ALLOW_REGISTER` | Open self-service registration, **default `0`**. An account here means "can run models, can open sandboxes", so this has to be turned on deliberately. Once on, the first person to register becomes the admin |
 | `SESSION_SECRET` | JWT signing key (auto-generated if omitted; sessions invalidate on restart) |
 | `SESSION_TTL_HOURS` | Session token lifetime (default: 24) |
+
+### MySQL (required)
+
+**Structured data lives only in the database — there is no file mode.** Sessions, projects,
+long-term memory, artifacts, shares/market, cron, accounts and cron credentials are all in MySQL.
+
+Tables are created at startup (`CREATE TABLE IF NOT EXISTS`, safe to re-run) — no manual import
+step. The reviewable source of truth is [`src/persistence/schema.sql`](src/persistence/schema.sql).
+
+```bash
+docker compose up -d      # ships a mysql service; agent waits for its healthcheck
+```
+
+The container port binds to loopback only (`MYSQL_BIND`): a database shouldn't become reachable
+from the LAN just because someone ran a compose file.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MYSQL_HOST` / `MYSQL_PORT` | — / `3306` | |
+| `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | — | |
+| `MYSQL_CONNECTION_LIMIT` | `10` | The whole process **shares one pool** (separate pools per store would make this number meaningless, and multiply out to saturate the database across replicas) |
+
+**Why the file mode was dropped**: supporting two backends costs something at *every* change — each
+storage operation has to be written twice, plus a contract test to pin them together, and the
+semantic differences between them only surface in production. On top of that the file backend could
+only ever be "fine on a single replica": its read-modify-write serialises within one process, with no
+cross-replica lock, so two replicas editing the same record have the later write clobber the earlier
+one; and being local disk, the same person hitting a different replica sees different history. MySQL
+does read-modify-write in a transaction with row locks, which holds across replicas. The long form is
+in the header of [`src/persistence/storage.js`](src/persistence/storage.js).
+
+⚠️ **No automatic migration.** Upgrading from a version that stored data under `DATA_DIR` will *not*
+move those sessions, projects, memories or artifacts into the database — they stay where they are and
+the service no longer reads them. Import them yourself if you need them, or keep the old version
+around to export.
+
+⚠️ One thing stays out of the database: session workspaces and user skills
+(`USER_WORKSPACE_ROOT`). Those get staged into sandboxes as whole directories with no size ceiling —
+that is a shared-filesystem job.
 
 ### Direct LLM Mode
 
@@ -247,7 +301,22 @@ For local development with real models (without a platform backend):
 |--------|------|-------------|
 | GET | `/healthz` | Liveness probe + concurrency stats + enabled features |
 | GET | `/metrics.json` | Run duration percentiles, failure distribution, token usage |
-| GET | `/v1/auth/me` | Current authenticated identity (401 if not logged in) |
+| GET | `/v1/auth/me` | Current authenticated identity (401 if not logged in), including `account` (role, disabled) |
+
+### Accounts (`AUTH_MODE=password`)
+
+Passwords are stored as a **scrypt derivation plus a per-user salt** — no plaintext anywhere.
+Verification is constant-time and **runs a full derivation even when the user doesn't exist**,
+otherwise "does this username exist" leaks through response timing, which is step one of credential stuffing.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v1/auth/login` | Username + password → JWT. Every failure returns the same message (the real reason goes to the log only) |
+| POST | `/v1/auth/register` | Self-service registration. Requires `AUTH_ALLOW_REGISTER=1`, otherwise 403 |
+| POST | `/v1/auth/password` | Change your own password. **Requires the old password** — letting a token alone change it turns "borrowed for a minute" into permanent takeover |
+| GET | `/v1/admin/users` | List accounts (admin only) |
+| POST | `/v1/admin/users` | Admin creates an account |
+| PATCH | `/v1/admin/users/:name` | `{ disabled, role, newPassword }`. Disabling **keeps the data**; you cannot disable yourself or drop your own admin role (nobody might be left who can undo it) |
 
 ### Chat
 

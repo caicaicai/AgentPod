@@ -37,9 +37,16 @@ AgentPod 是一个**服务端多租户 AI Agent 服务**，基于 [pi](https://g
 
 ## 快速开始
 
-### 本地开发（零外部依赖）
+### 本地开发
+
+**需要一个 MySQL 8。** 结构化数据只存数据库，没有文件模式（理由见 [MySQL 一节](#mysql必需)）。
 
 ```bash
+# 开发用的一次性 MySQL
+docker run -d --name agentpod-dev-mysql -p 3306:3306 \
+  -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=agentpod \
+  -e MYSQL_USER=agentpod -e MYSQL_PASSWORD=agentpod mysql:8.0
+
 # 安装并构建前端（只需执行一次，修改 web/ 后需要重新构建）
 npm run web:install
 npm run web:build
@@ -50,7 +57,14 @@ npm run dev
 # 打开 http://127.0.0.1:8787
 ```
 
-此模式使用 `LLM_MODE=faux`（假模型）、`AUTH_MODE=dev`（信任 `X-Username` 请求头）、`SANDBOX_MODE=local`（进程内执行）。无需 API 密钥、数据库或网络访问。
+此模式使用 `LLM_MODE=faux`（假模型）、`AUTH_MODE=dev`（信任 `X-Username` 请求头）、
+`SANDBOX_MODE=local`（进程内执行）—— 不需要 API 密钥和网络访问，但数据库连接是必需的。
+表在首次启动时自动建好。
+
+`npm test` **不需要数据库**：存储相关的用例跑在内存替身上
+（`test/helpers/memory-storage.js`）。把 `AP_TEST_MYSQL_URL` 指到一个测试库，
+存储契约会**额外**对真 MySQL 再跑一遍 —— CI 上应当这么做，那正是能抓出
+"替身与真后端漂移"的地方。
 
 ### 本地开发 + 沙盒集群
 
@@ -184,8 +198,7 @@ sandbox-worker/bin/check-namespace-caps.sh
 | `AUTH_MODE` | `password` \| `dev` | `password`：内置账号密码 + JWT 会话。`dev`：信任 `X-Username` 头（仅本地开发） |
 | `LLM_MODE` | `platform` \| `direct` \| `faux` | 模型提供方式。`platform`：从平台后端获取。`direct`：直连 OpenAI 兼容端点。`faux`：假模型 |
 | `SANDBOX_MODE` | `manager` \| `http` \| `local` \| `none` | 执行后端。`manager`：集群模式 + 票据鉴权（推荐）。`http`：直连 Worker。`local`：进程内执行（仅开发） |
-| `SESSION_STORE` | `memory` \| `file` \| `mysql` | 会话持久化。`file` 落盘到 `DATA_DIR`。`mysql` 适合多副本部署 |
-| `DATA_DIR` | 路径 | 会话、记忆、项目、定时任务的存储根目录。默认：`~/.agentpod` |
+| `MYSQL_HOST` 等 | — | **必填**。会话、项目、长期记忆、作品、分享/市场、定时任务、账号全存数据库，见下面「MySQL」一节 |
 
 ### 功能开关
 
@@ -207,9 +220,43 @@ sandbox-worker/bin/check-namespace-caps.sh
 
 | 变量 | 说明 |
 |------|------|
-| `CONSOLE_USERS` | `用户名:密码,用户名:密码` — 逗号分隔的凭据列表 |
+| `CONSOLE_USERS` | `用户名:密码,…` — **只用于首次播种**：启动时把这些账号补进账号存储（已存在的不动）。之后加人改密走界面或接口，密码只以 scrypt 派生结果落库。全新部署时这里的第一个账号是管理员 |
+| `AUTH_ALLOW_REGISTER` | 开放自助注册，**默认 `0`**。账号在这里等于"能跑模型、能开沙盒"，所以必须显式打开。打开后第一个注册的人是管理员 |
 | `SESSION_SECRET` | JWT 签名密钥（不配则自动生成，进程重启后所有会话失效） |
 | `SESSION_TTL_HOURS` | 会话令牌有效期，默认 24 小时 |
+
+### MySQL（必需）
+
+**本服务的结构化数据只存数据库，没有文件模式。** 会话、项目、长期记忆、作品、
+分享/市场、定时任务、账号、定时任务凭据 —— 全在库里。
+
+表结构由 agent 启动时自动建（`CREATE TABLE IF NOT EXISTS`，可反复执行），
+不需要先手工导表；一份可审阅的真相在 [`src/persistence/schema.sql`](src/persistence/schema.sql)。
+
+```bash
+docker compose up -d      # 自带 mysql 服务，agent 等它健康检查通过再启动
+```
+
+容器端口默认只监听回环（`MYSQL_BIND`）：数据库不该因为跑了一条 compose 就暴露在局域网上。
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `MYSQL_HOST` / `MYSQL_PORT` | — / `3306` | |
+| `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | — | |
+| `MYSQL_CONNECTION_LIMIT` | `10` | 整个进程**共用一个连接池**（各建各的池会让这个数字失去意义，多副本一乘就把数据库打满） |
+
+**为什么去掉了文件模式**：同时维护两套后端的成本落在**每一处**改动上 —— 每加一个存储动作都要
+实现两遍、再写一条契约用例钉住它们一致，而两边的语义差异只在生产上现形。何况文件那套永远只能是
+"单副本时能用"：它的读改写只在进程内串行，跨副本没有锁，两个副本同时改同一条记录时后写的会盖掉
+先写的；而且它是本机磁盘，同一个人落到不同副本会看到不同的历史。MySQL 的读改写走事务 + 行锁，
+跨副本成立。展开的理由写在 [`src/persistence/storage.js`](src/persistence/storage.js) 的文件头。
+
+⚠️ **没有自动迁移。** 从旧版本（数据落在 `DATA_DIR` 的文件里）升上来时，那些会话、项目、
+记忆、作品**不会**被搬进数据库 —— 它们仍在原目录里，但服务不再读它。需要的话请自行导入，
+或把旧版本留着做数据导出。
+
+⚠️ 有一样**不进库**：会话工作区与用户技能（`USER_WORKSPACE_ROOT`）。
+它们要被整目录 stage 进沙盒、大小没有上限，属于共享文件系统的活。
 
 ### 直连模型（Direct 模式）
 
@@ -247,7 +294,22 @@ sandbox-worker/bin/check-namespace-caps.sh
 |------|------|------|
 | GET | `/healthz` | 存活探针 + 并发水位 + 已开启的功能 |
 | GET | `/metrics.json` | 运行时长分位、失败分布、token 用量 |
-| GET | `/v1/auth/me` | 当前认定的身份（未登录返回 401） |
+| GET | `/v1/auth/me` | 当前认定的身份（未登录返回 401），含 `account`（角色、是否禁用） |
+
+### 账号（`AUTH_MODE=password`）
+
+密码只以 **scrypt 派生结果 + 每人独立的盐**落库，明文一个字都不存。
+校验走恒时比对，且**用户不存在时也跑一遍完整派生** —— 否则"这个用户名存不存在"
+会从响应时间上露出来，而那正是撞库的第一步。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/v1/auth/login` | 用户名 + 密码 → JWT。失败一律回同一句"用户名或密码错误"（日志里才记真实原因） |
+| POST | `/v1/auth/register` | 自助注册。需要 `AUTH_ALLOW_REGISTER=1`，否则 403 |
+| POST | `/v1/auth/password` | 改自己的密码。**必须带旧密码** —— 只凭令牌就能改密，等于把"临时借用"变成"永久接管" |
+| GET | `/v1/admin/users` | 列出全部账号（要管理员） |
+| POST | `/v1/admin/users` | 管理员建号 |
+| PATCH | `/v1/admin/users/:name` | `{ disabled, role, newPassword }`。禁用**不删数据**；不许禁用自己或撤销自己的管理员身份（否则可能没人再进得来） |
 
 ### 对话
 

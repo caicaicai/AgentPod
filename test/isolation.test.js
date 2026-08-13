@@ -14,7 +14,7 @@ import assert from 'node:assert/strict'
 import { registerFauxProvider, fauxAssistantMessage, fauxToolCall } from '@mariozechner/pi-ai'
 
 import { runTurn } from '../src/agent/run-turn.js'
-import { createMemoryStore } from '../src/sessions/store.js'
+import { createMemorySessionStore as createMemoryStore } from './helpers/memory-session-store.js'
 import { buildModel } from '../src/models/model-factory.js'
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {}, child() { return silentLogger } }

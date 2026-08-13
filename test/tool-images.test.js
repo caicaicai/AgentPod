@@ -17,7 +17,7 @@ import http from 'node:http'
 import { toolResultPreview } from '../src/agent/events.js'
 import { buildModel } from '../src/models/model-factory.js'
 import { runTurn } from '../src/agent/run-turn.js'
-import { createMemoryStore } from '../src/sessions/store.js'
+import { createMemorySessionStore as createMemoryStore } from './helpers/memory-session-store.js'
 import { parseTranscript } from '../src/sessions/transcript.js'
 
 /** 一张 1x1 的 PNG */

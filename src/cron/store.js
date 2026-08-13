@@ -20,8 +20,8 @@
  */
 import { randomUUID } from 'node:crypto'
 
-import { createScopedMaps } from '../persistence/file-map.js'
 import { advanceNextFireAt, isCalendarSchedule, normalizeSchedule, recoverNextFireAt } from './schedule.js'
+import { requireStorage } from '../persistence/storage.js'
 
 const TITLE_MAX = 60
 const TASK_MAX = 4000
@@ -45,8 +45,19 @@ function newCronId() {
   return `c_${randomUUID().replace(/-/g, '').slice(0, 12)}`
 }
 
-export function createCronStore({ config, logger = console }) {
-  const maps = createScopedMaps({ dataDir: config.dataDir, collection: 'cron', logger })
+export function createCronStore({ config, storage, logger = console }) {
+  requireStorage(storage, 'createCronStore')
+  /**
+   * 与 createScopedMaps 同形状的两个方法。
+   *
+   * `usernames()` 是这里唯一一处**跨用户**的入口，而且只给调度用 ——
+   * 它必须扫遍所有人才能找出到期的任务。除它之外仍然只能拿到"某个人的表"
+   * （隔离契约 #4）。
+   */
+  const maps = {
+    for: (username) => storage.mapFor('cron', username),
+    usernames: () => storage.usernames('cron'),
+  }
   const enabled = config.cron?.enabled !== false
 
   return {

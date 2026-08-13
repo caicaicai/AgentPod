@@ -121,9 +121,25 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
        * 实现在 src/identity/password-auth.js。
        */
       password: {
+        /**
+         * `user1:pass1,user2:pass2`。
+         *
+         * ⚠️ 接了账号存储之后（STORAGE_DRIVER 无论哪种，账号都进存储），
+         * 这个变量退化成**首次播种** —— 启动时把里面的账号补进去，已存在的不动。
+         * 于是用户改过的密码不会被一次重启打回原样，而明文密码也不必长期留在
+         * 环境变量里。见 src/identity/user-store.js。
+         */
         users: str(env.CONSOLE_USERS),
         sessionSecret: str(env.SESSION_SECRET),
         sessionTtlHours: num(env.SESSION_TTL_HOURS, 24),
+        /**
+         * 开放自助注册。**默认关**。
+         *
+         * 账号在这里等于"能跑模型、能开沙盒"，所以让陌生人自己开号必须是一个
+         * 显式打开的开关，而不是默认能力。打开之后**第一个注册的人是管理员** ——
+         * 全新部署里总得有人能管别人，而那时还没有任何管理员可以来授权。
+         */
+        allowRegister: bool(env.AUTH_ALLOW_REGISTER, false),
       },
     },
 
@@ -213,19 +229,44 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
       },
     },
 
-    /**
-     * 本地数据目录 —— 不接数据库时，会话、长期记忆、项目、定时任务的落地处。
+    /*
+     * 这里曾经有一个 `dataDir`（DATA_DIR）—— 不接数据库时会话、记忆、项目、
+     * 定时任务的落地处。结构化数据只存 MySQL 之后它没有任何消费者了，删掉。
      *
-     * 默认落在**用户目录**下（`~/.ap-cloud-agent`）而不是 cwd。
-     * 容器部署时建议挂载为持久卷。
-     *
-     * ⚠️ 这是**本机磁盘**。多副本部署要么把它指到共享盘，要么改用 mysql 驱动，
-     * 否则同一个人落到不同副本上会看到不同的历史。见 src/persistence/file-map.js。
+     * 仍然写盘的只剩**会话工作区与用户技能**，那套走 USER_WORKSPACE_ROOT
+     * （见下面 userWorkspace），与这个变量无关。
      */
-    dataDir: str(env.DATA_DIR) || path.join(homedir(), '.ap-cloud-agent'),
+
+    /**
+     * MySQL 连接。**必填** —— 本服务的结构化数据只存数据库。
+     *
+     * 会话、项目、长期记忆、作品、分享/市场、定时任务、账号、定时任务凭据，
+     * 全在库里。曾经有过一个 `file` 驱动和一个 `STORAGE_DRIVER` 开关，去掉了：
+     * 同时维护两套后端的成本落在**每一处**改动上，而文件那套永远只能是
+     * "单副本时能用"。理由展开见 src/persistence/storage.js 的文件头。
+     *
+     * ⚠️ 不进库的只有一样：**会话工作区与用户技能**（USER_WORKSPACE_ROOT）。
+     * 那些要被整目录 stage 进沙盒、大小没有上限，属于共享文件系统的活，
+     * 塞进数据库只会把连接池卡死。见 src/workspace/store.js。
+     *
+     * 整个进程**共用一个连接池**（见 src/persistence/mysql.js）：各建各的池会让
+     * connectionLimit 变成一个没人算得清的数字，多副本一乘就把数据库打满。
+     */
+    mysql: {
+      host: str(env.MYSQL_HOST),
+      port: num(env.MYSQL_PORT, 3306),
+      user: str(env.MYSQL_USER),
+      password: str(env.MYSQL_PASSWORD),
+      database: str(env.MYSQL_DATABASE),
+      connectionLimit: num(env.MYSQL_CONNECTION_LIMIT, 10),
+    },
 
     sessions: {
-      driver: str(env.SESSION_STORE, 'memory'), // memory | file | mysql
+      /**
+       * 只剩这一个值，留着是因为 `/healthz` 与调试信息里都在报它。
+       * SESSION_STORE 那个环境变量已经取消 —— 配了也不再有任何效果。
+       */
+      driver: 'mysql',
 
       /**
        * 会话第一轮时，让模型看着用户那句话起个标题。
@@ -238,13 +279,6 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
        * 假模型回的是一段固定的自我介绍，拿它当标题只会让侧栏变成一排一样的字。
        */
       autoTitle: bool(env.SESSION_AUTO_TITLE, true),
-      mysql: {
-        host: str(env.MYSQL_HOST),
-        port: num(env.MYSQL_PORT, 3306),
-        user: str(env.MYSQL_USER),
-        password: str(env.MYSQL_PASSWORD),
-        database: str(env.MYSQL_DATABASE),
-      },
     },
 
     /**
@@ -507,8 +541,6 @@ function validate(config) {
 
   if (!['password', 'dev'].includes(config.auth.mode)) errors.push(`AUTH_MODE 只能是 password|dev，当前 ${config.auth.mode}`)
   if (!['platform', 'direct', 'faux'].includes(config.llm.mode)) errors.push(`LLM_MODE 只能是 platform|direct|faux，当前 ${config.llm.mode}`)
-  if (!['memory', 'file', 'mysql'].includes(config.sessions.driver)) errors.push(`SESSION_STORE 只能是 memory|file|mysql，当前 ${config.sessions.driver}`)
-  if (!path.isAbsolute(config.dataDir)) errors.push(`DATA_DIR 必须是绝对路径，当前 ${config.dataDir}`)
   if (!['none', 'stored'].includes(config.cron.credentialMode)) {
     errors.push(`CRON_CREDENTIAL_MODE 只能是 none|stored，当前 ${config.cron.credentialMode}`)
   }
@@ -558,9 +590,18 @@ function validate(config) {
   if (config.userWorkspace.root && !path.isAbsolute(config.userWorkspace.root)) {
     errors.push(`USER_WORKSPACE_ROOT 必须是绝对路径，当前 ${config.userWorkspace.root}`)
   }
-  if (config.sessions.driver === 'mysql') {
-    const { host, user, database } = config.sessions.mysql
-    if (!host || !user || !database) errors.push('SESSION_STORE=mysql 时必须配置 MYSQL_HOST / MYSQL_USER / MYSQL_DATABASE')
+  /**
+   * 连接参数**永远必填** —— 本服务的结构化数据只存数据库，没有"不接库"这条路。
+   *
+   * 在启动时拦掉，而不是等第一次写数据才报错：后者的表现是服务起来了、
+   * /healthz 全绿、用户发第一条消息时炸，而运维在部署日志里什么都没看到。
+   */
+  const { host, user, database } = config.mysql
+  if (!host || !user || !database) {
+    errors.push('必须配置 MYSQL_HOST / MYSQL_USER / MYSQL_DATABASE：本服务的会话、项目、记忆、作品、账号都存在数据库里')
+  }
+  if (config.mysql.connectionLimit < 1) {
+    errors.push(`MYSQL_CONNECTION_LIMIT 至少为 1，当前 ${config.mysql.connectionLimit}`)
   }
 
   // 生产环境的死线

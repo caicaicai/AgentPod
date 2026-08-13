@@ -16,6 +16,17 @@ import path from 'node:path'
 import { createMemoryStore, foldCapture, queryBullets } from '../src/memory/store.js'
 import { createMemoryCapture, parseFacts, memoryPrompt, EXTRACTION_PROMPT } from '../src/memory/capture.js'
 import { bullets, normalize } from '../src/memory/notebook.js'
+import { createMemoryStorage } from './helpers/memory-storage.js'
+
+/** 存储后端的测试替身。生产只有 MySQL，见 test/helpers/memory-storage.js */
+const testStorage = createMemoryStorage()
+
+/**
+ * 替身是这个文件共用的一个实例，每条用例前清干净。
+ * 不清的话，上一条留下的记录会让"列出全部"这类断言得到一个跟自己无关的数字，
+ * 而报错看起来像是被测代码有问题。
+ */
+beforeEach(() => testStorage.reset())
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {} }
 const AT = Date.parse('2026-08-06T10:00:00+08:00')
@@ -24,7 +35,7 @@ let root
 let memory
 beforeEach(async () => {
   root = await mkdtemp(path.join(tmpdir(), 'ap-mem-'))
-  memory = createMemoryStore({ config: { dataDir: root, memory: { enabled: true } }, logger: silentLogger })
+  memory = createMemoryStore({ storage: testStorage, config: { dataDir: root, memory: { enabled: true } }, logger: silentLogger })
 })
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
@@ -95,7 +106,7 @@ describe('读写与作用域', () => {
   })
 
   test('MEMORY_ENABLED=0 时整体是空操作', async () => {
-    const off = createMemoryStore({ config: { dataDir: root, memory: { enabled: false } }, logger: silentLogger })
+    const off = createMemoryStore({ storage: testStorage, config: { dataDir: root, memory: { enabled: false } }, logger: silentLogger })
     assert.equal(off.enabled, false)
     assert.equal(await off.capture({ username: 'zhangsan' }, ['x'], AT), 0)
     assert.equal(await off.recall({ username: 'zhangsan' }), '')

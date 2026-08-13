@@ -19,6 +19,8 @@ import { createMemoryCapture } from './memory/capture.js'
 import { createProjectStore } from './projects/store.js'
 import { createArtifactStore } from './artifacts/store.js'
 import { createShareStore } from './artifacts/shares.js'
+import { createStorage } from './persistence/storage.js'
+import { createUserStore } from './identity/user-store.js'
 import { createCronStore } from './cron/store.js'
 import { createCronCredentialVault } from './cron/credentials.js'
 import { createScheduler } from './cron/scheduler.js'
@@ -28,8 +30,27 @@ async function main() {
   const logger = createLogger({ level: config.logLevel })
 
   const platform = createPlatformClient({ config, logger })
-  const identity = createIdentityResolver({ config, logger })
-  const store = await createSessionStore({ config, logger })
+
+  /**
+   * 结构化存储的后端。**先于所有 store 建起来**，因为它们全都从它拿能力。
+   *
+   * mysql 驱动会在这里连库并建表 —— 连不上就当场抛，服务起不来。
+   * 那是有意的：起来了但第一次写数据才报错，用户看到的是一条业务失败，
+   * 而运维在部署日志里什么都看不到。
+   */
+  const storage = await createStorage({ config, logger })
+
+  // 会话与其余数据共用同一个连接池（mysql 驱动下），理由见 src/persistence/mysql.js
+  const store = await createSessionStore({ config, logger, pool: storage.pool || null })
+
+  /**
+   * 账号。password 模式才需要 —— dev 模式信任 X-Username，没有"账号"这回事。
+   * 首次启动把 CONSOLE_USERS 里的账号播种进去（已存在的不动）。
+   */
+  const users = config.auth.mode === 'password' ? createUserStore({ config, storage, logger }) : null
+  if (users) await users.seedFromEnv()
+
+  const identity = createIdentityResolver({ config, logger, users })
   const workspace = createWorkspaceStore({ config, logger })
   // 技能管理面（改/删/停用）。没有用户工作空间时它整体是关的 —— 与 canCreate 同一个前提
   const skillManager = workspace.enabled
@@ -39,19 +60,19 @@ async function main() {
   const metrics = createMetrics()
 
   /**
-   * 无数据库的那几样状态，全部落在 DATA_DIR 下、按 username 分区。
+   * 结构化状态：全部按 username 分区，全部走同一个 storage 后端（MySQL）。
    *
-   * 它们与会话驱动是**解耦**的：SESSION_STORE=mysql 时长期记忆一样能用，
-   * 因为它落的是 DATA_DIR 而不是会话表。
+   * 它们**不再各自决定存哪儿** —— 从前每个 store 自己拼路径、自己 writeAtomic，
+   * 于是"接了数据库"这件事只完成了会话那一份，剩下几份仍然绑在本地盘上。
    */
-  const memory = createMemoryStore({ config, logger })
+  const memory = createMemoryStore({ config, storage, logger })
   const memoryCapture = createMemoryCapture({ memory, config, logger })
-  const projects = createProjectStore({ config, logger })
-  const artifacts = createArtifactStore({ config, logger })
+  const projects = createProjectStore({ config, storage, logger })
+  const artifacts = createArtifactStore({ config, storage, logger })
   // 分享**依赖**作品而不是反过来：作品不知道自己被分享了也照样成立
-  const shares = createShareStore({ config, logger, artifacts })
-  const crons = createCronStore({ config, logger })
-  const cronVault = createCronCredentialVault({ config, logger })
+  const shares = createShareStore({ config, storage, logger, artifacts })
+  const crons = createCronStore({ config, storage, logger })
+  const cronVault = createCronCredentialVault({ config, storage, logger })
 
   let broker
   let llmInfoClient = null
@@ -98,7 +119,7 @@ async function main() {
   const scheduler = createScheduler({ config, logger, crons, vault: cronVault, runService, sessionStore: store })
   const app = createServer({
     config, logger, identity, broker, runService, store, llmInfoClient, metrics, workspace, skillManager,
-    memory, projects, crons, scheduler, cronVault, artifacts, shares,
+    memory, projects, crons, scheduler, cronVault, artifacts, shares, users,
   })
 
   await app.listen(config.port)
@@ -111,8 +132,7 @@ async function main() {
     envFile: config.envFile.path ? `${config.envFile.path}（${config.envFile.keys} 项）` : '未使用（全靠环境变量）',
     authMode: config.auth.mode,
     llmMode: config.llm.mode,
-    sessionStore: store.driver,
-    dataDir: config.dataDir,
+    storage: `mysql（${config.mysql.user}@${config.mysql.host}:${config.mysql.port}/${config.mysql.database}）`,
     memory: memory.enabled
       ? (memoryCapture.enabled
         ? `开（自动抓取：攒批 ${Math.round(config.memory.captureQuietMs / 1000)}s / ${config.memory.captureMaxTurns} 轮）`
@@ -136,11 +156,6 @@ async function main() {
       logger.warn('AUTH_MODE=password + LLM_MODE=platform：password 模式下没有凭据可透传给 llminfo，模型清单会取不到。建议改用 LLM_MODE=direct')
     }
   }
-  if (store.driver === 'memory') {
-    // 不是提示是事实：这个驱动下每次发版、每次重启，所有人的对话记录都归零。
-    // 想留住历史用 SESSION_STORE=file（落 DATA_DIR）或 mysql。
-    logger.warn('SESSION_STORE=memory：会话只在进程内存里，重启即全部丢失', { 建议: 'SESSION_STORE=file' })
-  }
   if (config.artifacts.allowedOrigins.length) {
     // 与 SANDBOX_INJECT_ME_TOKEN 同一类：这是在预览沙箱上开的一道口子，
     // 开了之后模型生成的页面就能往这些地址发请求（也就能把页面里的东西带出去）。
@@ -155,13 +170,6 @@ async function main() {
     logger.info('作品分享已启用：作者生成的 /s/<token> 链接**免登录**即可访问', {
       市场: shares.marketEnabled ? '开（需作者显式发布）' : '关',
       关闭方式: 'ARTIFACT_SHARING_ENABLED=0',
-    })
-  }
-  if (store.driver === 'file' || memory.enabled || crons.enabled || artifacts.enabled) {
-    // 本机磁盘。多副本部署下同一个人可能落到不同副本，看到的历史/记忆就会不一样。
-    logger.info('本地数据目录已启用', {
-      dataDir: config.dataDir,
-      note: '多副本部署请把 DATA_DIR 指到共享盘，否则各副本数据互不可见',
     })
   }
   if (scheduler.enabled) {
@@ -185,6 +193,8 @@ async function main() {
     scheduler.stop()
     await app.close()
     await store.close?.()
+    // 连接池最后关：上面那些 close 还可能在写最后几笔
+    await storage.close?.()
     logger.info('已停机')
     process.exit(0)
   }

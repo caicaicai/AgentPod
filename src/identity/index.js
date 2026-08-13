@@ -8,7 +8,12 @@
 import { Errors } from '../errors.js'
 import { parseUsers, verifyToken } from './password-auth.js'
 
-export function createIdentityResolver({ config, logger }) {
+/**
+ * @param {object} params
+ * @param {object} [params.users] 账号存储（src/identity/user-store.js）。
+ *   有它就以库里的账号为准；没有（比如某些单测）才退回 CONSOLE_USERS 的明文比对。
+ */
+export function createIdentityResolver({ config, logger, users = null }) {
   const passwordUsers = config.auth.mode === 'password' ? parseUsers(config.auth.password.users) : null
   const passwordSecret = config.auth.mode === 'password'
     ? (config.auth.password.sessionSecret || config.platform.fallbackCookie || `auto-${Date.now()}-${Math.random()}`)
@@ -57,5 +62,7 @@ export function createIdentityResolver({ config, logger }) {
     readCredential: () => ({ credential: '', source: '无' }),
     clear: () => {},
     passwordUsers, passwordSecret,
+    /** 账号存储。HTTP 层的登录/注册/改密都从这里拿，避免各处再 import 一遍 */
+    users,
   }
 }

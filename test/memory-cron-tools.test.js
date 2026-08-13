@@ -16,6 +16,17 @@ import { memoryPlugin } from '../src/tools/memory.js'
 import { cronPlugin } from '../src/tools/cron.js'
 import { createMemoryStore } from '../src/memory/store.js'
 import { createCronStore } from '../src/cron/store.js'
+import { createMemoryStorage } from './helpers/memory-storage.js'
+
+/** 存储后端的测试替身。生产只有 MySQL，见 test/helpers/memory-storage.js */
+const testStorage = createMemoryStorage()
+
+/**
+ * 替身是这个文件共用的一个实例，每条用例前清干净。
+ * 不清的话，上一条留下的记录会让"列出全部"这类断言得到一个跟自己无关的数字，
+ * 而报错看起来像是被测代码有问题。
+ */
+beforeEach(() => testStorage.reset())
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {}, child() { return silentLogger } }
 const fakeEgress = { async request() { throw new Error('本测试不该出网') } }
@@ -45,8 +56,8 @@ let memory
 let crons
 beforeEach(async () => {
   root = await mkdtemp(path.join(tmpdir(), 'ap-tools-'))
-  memory = createMemoryStore({ config: { dataDir: root, memory: { enabled: true } }, logger: silentLogger })
-  crons = createCronStore({ config: { dataDir: root, cron: { enabled: true } }, logger: silentLogger })
+  memory = createMemoryStore({ storage: testStorage, config: { dataDir: root, memory: { enabled: true } }, logger: silentLogger })
+  crons = createCronStore({ storage: testStorage, config: { dataDir: root, cron: { enabled: true } }, logger: silentLogger })
 })
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 

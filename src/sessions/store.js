@@ -44,119 +44,28 @@ function toListRow(username) {
   })
 }
 
-export function createMemoryStore() {
-  const rows = new Map() // `${username}::${sessionKey}` -> row
-
-  return {
-    driver: 'memory',
-    async load(query) {
-      assertScoped(query, 'store.load')
-      return rows.get(`${query.username}::${query.sessionKey}`) || null
-    },
-    async save(row) {
-      assertScoped(row, 'store.save')
-      const key = `${row.username}::${row.sessionKey}`
-      const existing = rows.get(key)
-      rows.set(key, {
-        username: row.username,
-        sessionKey: row.sessionKey,
-        sessionId: row.sessionId,
-        jsonl: row.jsonl,
-        entryCount: row.entryCount,
-        // 已有标题永远优先：save 每轮都会带一个"从本轮提问推出来的"候选标题，
-        // 若它能覆盖，用户改过的名字会在下一轮对话后被悄悄改回去。
-        title: existing?.title || normalizeTitle(row.title),
-        projectId: existing?.projectId || row.projectId || '',
-        pinned: Boolean(existing?.pinned),
-        archived: Boolean(existing?.archived),
-        createdAt: existing?.createdAt || Date.now(),
-        updatedAt: Date.now(),
-      })
-    },
-
-    async rename(query) {
-      assertScoped(query, 'store.rename')
-      const row = rows.get(`${query.username}::${query.sessionKey}`)
-      if (!row) return false
-      row.title = normalizeTitle(query.title)
-      return true
-    },
-    async list(query) {
-      assertScoped(query, 'store.list')
-      return [...rows.values()]
-        .filter((row) => row.username === query.username)
-        .filter((row) => query.projectId === undefined || (row.projectId || '') === (query.projectId || ''))
-        .filter((row) => query.includeArchived || !row.archived)
-        .sort((a, b) => (Number(b.pinned) - Number(a.pinned)) || (b.updatedAt - a.updatedAt))
-        .map(({ jsonl, ...rest }) => rest) // 列表不带正文
-    },
-    async remove(query) {
-      assertScoped(query, 'store.remove')
-      return rows.delete(`${query.username}::${query.sessionKey}`)
-    },
-
-    /** 与 file 驱动同签名，见 sessions/file-store.js 的说明 */
-    async patch(query) {
-      assertScoped(query, 'store.patch')
-      const row = rows.get(`${query.username}::${query.sessionKey}`)
-      if (!row) return null
-      if (query.title !== undefined) { row.title = normalizeTitle(query.title); row.updatedAt = Date.now() }
-      if (query.pinned !== undefined) row.pinned = Boolean(query.pinned)
-      if (query.archived !== undefined) row.archived = Boolean(query.archived)
-      if (query.projectId !== undefined) row.projectId = String(query.projectId || '')
-      const { jsonl, ...rest } = row
-      return rest
-    },
-
-    async search(query) {
-      assertScoped(query, 'store.search')
-      const keyword = String(query.q || '').trim().toLowerCase()
-      if (!keyword) return []
-      const hits = []
-      for (const row of [...rows.values()].filter((item) => item.username === query.username)) {
-        const { jsonl, ...rest } = row
-        if ((row.title || '').toLowerCase().includes(keyword)) {
-          hits.push({ ...rest, matchedIn: 'title', snippet: '' })
-          continue
-        }
-        const at = String(jsonl || '').toLowerCase().indexOf(keyword)
-        if (at < 0) continue
-        hits.push({
-          ...rest,
-          matchedIn: 'content',
-          snippet: jsonl.slice(Math.max(0, at - 40), at + keyword.length + 60).replace(/\s+/g, ' '),
-        })
-      }
-      return hits
-        .sort((a, b) => (Number(b.pinned) - Number(a.pinned)) || (b.updatedAt - a.updatedAt))
-        .slice(0, query.limit || 50)
-    },
-  }
-}
-
 /**
- * MySQL 实现骨架：表结构见 ./schema.sql。
+ * MySQL 实现：表结构见 ./schema.sql。
  * 只追加新增的 JSONL 行（按已存行数比对），避免每轮重写整段会话。
- * mysql2 是可选依赖，用不到 mysql 时不必安装。
+ *
+ * 曾经这里还有 memory（进程内）与 file（落 DATA_DIR）两个驱动。本服务现在
+ * **只支持 MySQL**（理由见 src/persistence/storage.js 文件头：同时维护两套后端的
+ * 成本落在每一处改动上，而文件那套永远只能是"单副本时能用"）。
  */
-export async function createMysqlStore({ config, logger }) {
-  let mysql
-  try {
-    mysql = await import('mysql2/promise')
-  } catch {
-    throw new Error('SESSION_STORE=mysql 需要安装可选依赖 mysql2：npm i mysql2')
+/**
+ * @param {object} params
+ * @param {object} [params.pool] 共用的连接池（storage 已经建好时传进来）。
+ *   不传就自己建一个 —— 只有直接拿这个 store 单测时才走那条路。
+ *   **正常启动路径一定是传进来的**：一个进程一个池，理由见 src/persistence/mysql.js。
+ */
+export async function createMysqlStore({ config, logger, pool: sharedPool = null }) {
+  let pool = sharedPool
+  let ownsPool = false
+  if (!pool) {
+    const { createPool } = await import('../persistence/mysql.js')
+    pool = await createPool({ config, logger })
+    ownsPool = true
   }
-
-  const pool = mysql.createPool({
-    host: config.sessions.mysql.host,
-    port: config.sessions.mysql.port,
-    user: config.sessions.mysql.user,
-    password: config.sessions.mysql.password,
-    database: config.sessions.mysql.database,
-    connectionLimit: 10,
-    charset: 'utf8mb4',
-    timezone: 'Z',
-  })
 
   async function loadRow(username, sessionKey) {
     const [rows] = await pool.query(
@@ -315,17 +224,16 @@ export async function createMysqlStore({ config, logger }) {
     },
 
     async close() {
-      await pool.end()
+      // 池是借来的就别关：storage 还在用它存项目、作品、账号
+      if (ownsPool) await pool.end()
     },
   }
 }
 
-export async function createSessionStore({ config, logger }) {
-  if (config.sessions.driver === 'mysql') return createMysqlStore({ config, logger })
-  if (config.sessions.driver === 'file') {
-    // 动态 import：memory / mysql 部署不需要为了一个用不到的驱动去解析文件存储那套依赖
-    const { createFileStore } = await import('./file-store.js')
-    return createFileStore({ config, logger })
-  }
-  return createMemoryStore()
+/**
+ * 会话存储。**只有 MySQL 一种**，所以这里没有分支 —— 保留这个工厂是为了
+ * 让调用方不必关心池是借来的还是自己建的。
+ */
+export async function createSessionStore({ config, logger, pool = null }) {
+  return createMysqlStore({ config, logger, pool })
 }

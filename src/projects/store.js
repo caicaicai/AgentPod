@@ -11,12 +11,10 @@
  *
  * ── 落盘形状 ────────────────────────────────────────────────────────────
  *
- *   <dataDir>/users/<username>/projects/
- *     <id>.json        项目元信息（名字、说明、instructions）
- *     <id>/MEMORY.md   该项目的长期记忆（由 src/memory/store.js 写）
+ *   ap_kv（collection=projects）  项目元信息（名字、说明、instructions）
+ *   ap_doc（scope=<projectId>）   该项目的长期记忆（由 src/memory/store.js 写）
  *
- * 元信息是文件、记忆是目录，同名并列。看着有点怪，但换来的是两边各自用最合适的
- * 存储原语：元信息走通用的 file-map（原子写 + 串行队列），记忆是给人读的 markdown。
+ * 两者各用最合适的原语：元信息是按 id 存取的小 JSON，记忆是给人读的一整篇 markdown。
  *
  * ── 为什么没有成员与共享 ────────────────────────────────────────────────
  *
@@ -26,10 +24,9 @@
  * 将来要共享，加的是权限层，不是把这里的 username 拿掉。
  */
 import { randomUUID } from 'node:crypto'
-import { rm } from 'node:fs/promises'
 
-import { createFileMap } from '../persistence/file-map.js'
-import { assertSegment, safeJoin, userRoot } from '../persistence/paths.js'
+import { assertSegment } from '../persistence/paths.js'
+import { requireStorage } from '../persistence/storage.js'
 
 const NAME_MAX = 60
 const DESCRIPTION_MAX = 500
@@ -66,23 +63,23 @@ function toPublic(project) {
   }
 }
 
-export function createProjectStore({ config, logger = console }) {
-  const dataDir = config.dataDir
+/**
+ * @param {object} params
+ * @param {object} params.storage 结构化存储后端（file | mysql），见 src/persistence/storage.js。
+ *   项目就是"按 id 存一个小 JSON"，所以它整个只用到 map 这一种能力 ——
+ *   两种驱动下的逻辑**一行都不用分叉**。
+ */
+export function createProjectStore({ config, storage, logger = console }) {
+  requireStorage(storage, 'createProjectStore')
   const enabled = config.projects?.enabled !== false
 
   function mapFor(username) {
     assertSegment(username, 'username')
-    return createFileMap({ dir: safeJoin(userRoot(dataDir, username), 'projects'), logger })
-  }
-
-  /** 项目自己那棵目录（记忆、将来的项目级文件都放这儿） */
-  function dirFor(username, projectId) {
-    return safeJoin(userRoot(dataDir, username), 'projects', assertSegment(projectId, 'projectId'))
+    return storage.mapFor('projects', username)
   }
 
   return {
     enabled,
-    dirFor,
 
     async create({ username, name, description = '', instructions = '' }) {
       const clean = cleanName(name)
@@ -145,9 +142,9 @@ export function createProjectStore({ config, logger = console }) {
       const existing = await mapFor(username).get(id)
       if (!existing) return false
       await mapFor(username).delete(id)
-      // 项目记忆跟着走：留着就是一份谁也访问不到、却还占着盘的孤儿文件
-      await rm(dirFor(username, id), { recursive: true, force: true }).catch((error) => {
-        logger.warn?.('项目目录清理失败', { username, projectId: id, err: error?.message })
+      // 项目记忆跟着走：留着就是一份谁也访问不到、却还占着地方的孤儿
+      await storage.docs.dropScope({ username, scope: id }).catch((error) => {
+        logger.warn?.('项目文档清理失败', { username, projectId: id, err: error?.message })
       })
       return true
     },

@@ -16,7 +16,7 @@ import http from 'node:http'
 import { buildPromptContent, describeAttachments, normalizeAttachments } from '../src/agent/attachments.js'
 import { buildModel } from '../src/models/model-factory.js'
 import { runTurn } from '../src/agent/run-turn.js'
-import { createMemoryStore } from '../src/sessions/store.js'
+import { createMemorySessionStore as createMemoryStore } from './helpers/memory-session-store.js'
 import { parseInlinedAttachments } from '../web/src/lib/attachments.js'
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUg=='

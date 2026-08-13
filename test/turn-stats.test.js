@@ -13,7 +13,7 @@ import { registerFauxProvider, fauxAssistantMessage } from '@mariozechner/pi-ai'
 
 import { parseTranscript, attachTurnStats } from '../src/sessions/transcript.js'
 import { runTurn } from '../src/agent/run-turn.js'
-import { createMemoryStore } from '../src/sessions/store.js'
+import { createMemorySessionStore as createMemoryStore } from './helpers/memory-session-store.js'
 import { buildModel } from '../src/models/model-factory.js'
 
 /** 拼一行 pi 的 JSONL */

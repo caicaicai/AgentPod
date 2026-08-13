@@ -23,6 +23,8 @@ const BASE = {
   // AUTH_MODE 的默认值是 password，而它要求 CONSOLE_USERS —— 不显式给一个，
   // 每条用例都会在读到 llm.direct.* 之前就被配置校验拦下
   AUTH_MODE: 'dev',
+  // MYSQL_* 现在是必填的（本服务只支持数据库存储），不给就过不了配置校验
+  MYSQL_HOST: 'db.example', MYSQL_USER: 'ap', MYSQL_DATABASE: 'ap',
 }
 const cfg = (extra = {}) => loadConfig({ cwd: '/nonexistent', env: { ...BASE, ...extra } })
 

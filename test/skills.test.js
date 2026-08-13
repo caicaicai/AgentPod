@@ -22,7 +22,7 @@ import { registerFauxProvider, fauxAssistantMessage, fauxToolCall } from '@mario
 import { runTurn } from '../src/agent/run-turn.js'
 import { loadSkills } from '../src/agent/skills.js'
 import { toSandboxSkills, attachSkillMaterialization, SKILLS_ROOT } from '../src/agent/skill-materializer.js'
-import { createMemoryStore } from '../src/sessions/store.js'
+import { createMemorySessionStore as createMemoryStore } from './helpers/memory-session-store.js'
 import { buildModel } from '../src/models/model-factory.js'
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {}, child() { return silentLogger } }

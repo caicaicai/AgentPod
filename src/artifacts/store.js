@@ -34,11 +34,9 @@
  * 算引用，而算错的后果是某一版永远打不开。用一点磁盘换一个不会算错的规则。
  */
 import { randomUUID } from 'node:crypto'
-import { readdir, readFile, rm, stat } from 'node:fs/promises'
-import path from 'node:path'
 
-import { createFileMap } from '../persistence/file-map.js'
-import { assertSegment, safeJoin, userRoot, writeAtomic } from '../persistence/paths.js'
+import { assertSegment } from '../persistence/paths.js'
+import { requireStorage } from '../persistence/storage.js'
 
 /**
  * 作品类型。**这个清单等于"界面渲染得出来的东西"**，不是"模型想得到的东西" ——
@@ -194,8 +192,8 @@ function toPublic(record) {
   }
 }
 
-export function createArtifactStore({ config, logger = console }) {
-  const dataDir = config.dataDir
+export function createArtifactStore({ config, storage, logger = console }) {
+  requireStorage(storage, 'createArtifactStore')
   const settings = config.artifacts || {}
   const enabled = settings.enabled !== false
   const limits = {
@@ -205,24 +203,18 @@ export function createArtifactStore({ config, logger = console }) {
     maxFiles: settings.maxFiles ?? 40,
   }
 
+  /**
+   * 元信息走 map，正文走 blobs。
+   *
+   * 这两样分开是刻意的：清单接口一次可能回几十条，每条都带上正文的话，
+   * "打开作品面板"就成了一次几 MB 的传输。文件驱动下 blobs 是一棵真实的目录树，
+   * mysql 驱动下是 ap_artifact_file 的若干行 —— 这里一行都不用分叉。
+   */
   function mapFor(username) {
     assertSegment(username, 'username')
-    return createFileMap({ dir: safeJoin(userRoot(dataDir, username), 'artifacts'), logger })
+    return storage.mapFor('artifacts', username)
   }
-
-  /** 作品自己那棵目录（各版本各一个子目录） */
-  function dirFor(username, id) {
-    return safeJoin(userRoot(dataDir, username), 'artifacts', assertSegment(id, '作品 id'))
-  }
-
-  function versionDir(username, id, n) {
-    return safeJoin(dirFor(username, id), `v${Number(n)}`)
-  }
-
-  function fileIn(username, id, n, relPath) {
-    // 再走一次 safeJoin：assertRelPath 拦的是字符集，越界要以**解析后**的结果为准
-    return safeJoin(versionDir(username, id, n), ...assertRelPath(relPath).split('/'))
-  }
+  const blobs = storage.blobs
 
   function assertBudget(files) {
     if (files.length > limits.maxFiles) {
@@ -246,9 +238,14 @@ export function createArtifactStore({ config, logger = console }) {
     const totalBytes = assertBudget(files)
     const n = (record.version || 0) + 1
 
-    for (const file of files) {
-      await writeAtomic(fileIn(username, record.id, n, file.path), file.content, 'artifact')
-    }
+    // 路径在这里再收一次口：assertRelPath 拦的是字符集，而它会变成真实的路径
+    // 或一行的主键，两种驱动下都不能让它带着 `..` 走到下一层
+    await blobs.writeVersion({
+      username,
+      id: record.id,
+      version: n,
+      files: files.map((file) => ({ path: assertRelPath(file.path), content: file.content })),
+    })
 
     const entry = record.entry
     const versions = [...(record.versions || []), {
@@ -271,8 +268,8 @@ export function createArtifactStore({ config, logger = console }) {
     await mapFor(username).put(record.id, next)
 
     for (const old of pruned) {
-      await rm(versionDir(username, record.id, old), { recursive: true, force: true }).catch((error) => {
-        logger.warn?.('旧版本目录清理失败', { username, id: record.id, version: old, err: error?.message })
+      await blobs.removeVersion({ username, id: record.id, version: old }).catch((error) => {
+        logger.warn?.('旧版本清理失败', { username, id: record.id, version: old, err: error?.message })
       })
     }
     return next
@@ -310,23 +307,15 @@ export function createArtifactStore({ config, logger = console }) {
       throw new Error(`第 ${n} 版的文件已被清理（只保留最近 ${limits.maxVersions} 版），当前是第 ${record.version} 版`)
     }
 
-    const files = []
-    for (const item of entry.files || []) {
-      // 老格式的正文在 `<id>/v1.txt`，新格式在 `<id>/v1/<path>`
-      const file = record.legacy
-        ? safeJoin(dirFor(username, id), `v${n}.txt`)
-        : fileIn(username, id, n, item.path)
-      let content
-      try {
-        content = await readFile(file, 'utf8')
-      } catch (error) {
-        if (error.code !== 'ENOENT') throw error
-        // 元信息说有、文件却不在：只可能是有人手动删过盘上的东西。
-        // 报得具体一点，别让它表现成一句笼统的"读取失败"。
-        throw new Error(`第 ${n} 版的 ${item.path} 不存在（可能被手工删除）`)
-      }
-      files.push({ path: item.path, content, bytes: Buffer.byteLength(content, 'utf8') })
-    }
+    const paths = (entry.files || []).map((item) => item.path)
+    // `legacy` 只可能出现在文件驱动的老部署里（早期整份作品是一段正文，
+    // 落在 `<id>/v1.txt`）。mysql 驱动是新表，不存在这种记录，那边忽略这个标记
+    const contents = await blobs.readVersion({ username, id, version: n, paths, legacy: Boolean(record.legacy) })
+
+    const files = paths.map((relPath) => {
+      const content = contents.get(relPath)
+      return { path: relPath, content, bytes: Buffer.byteLength(content, 'utf8') }
+    })
     return { meta: toPublic(record), version: n, files }
   }
 
@@ -335,9 +324,9 @@ export function createArtifactStore({ config, logger = console }) {
     const existing = await mapFor(username).get(key)
     if (!existing) return false
     await mapFor(username).delete(key)
-    // 文件目录跟着走：留着就是一份谁也访问不到、却还占着盘的孤儿
-    await rm(dirFor(username, key), { recursive: true, force: true }).catch((error) => {
-      logger.warn?.('作品文件目录清理失败', { username, id: key, err: error?.message })
+    // 正文跟着走：留着就是一份谁也访问不到、却还占着地方的孤儿
+    await blobs.removeArtifact({ username, id: key }).catch((error) => {
+      logger.warn?.('作品正文清理失败', { username, id: key, err: error?.message })
     })
     return true
   }
@@ -345,7 +334,6 @@ export function createArtifactStore({ config, logger = console }) {
   return {
     enabled,
     limits,
-    dirFor,
 
     async create({
       username, sessionKey = '', projectId = '', kind, title, files, entry = '', language = '', note = '',
@@ -508,28 +496,14 @@ export function createArtifactStore({ config, logger = console }) {
       return removed
     },
 
-    /** 某一版在盘上的目录，给"整份导出"这类外部工具用 */
-    async versionPath({ username, id, version }) {
-      const dir = versionDir(username, id, version)
-      await stat(dir)
-      return dir
-    },
+    /**
+     * 某一版在盘上的目录，给"整份导出"这类外部工具用。
+     * **mysql 驱动下回 null** —— 那边没有"目录"这回事，导出请走详情接口或 raw。
+     */
+    versionPath: ({ username, id, version }) => blobs.versionPath({ username, id, version }),
 
-    /** 盘上真实的文件列表，用于自检（元信息与实际是否对得上） */
-    async listOnDisk({ username, id, version }) {
-      const dir = versionDir(username, id, version)
-      const out = []
-      async function walk(current, prefix) {
-        for (const item of await readdir(current, { withFileTypes: true })) {
-          const next = path.join(current, item.name)
-          const rel = prefix ? `${prefix}/${item.name}` : item.name
-          if (item.isDirectory()) await walk(next, rel)
-          else if (item.isFile()) out.push(rel)
-        }
-      }
-      await walk(dir, '')
-      return out.sort()
-    },
+    /** 后端里真实存着的文件列表，用于自检（元信息与实际是否对得上） */
+    listOnDisk: ({ username, id, version }) => blobs.listVersion({ username, id, version }),
   }
 }
 

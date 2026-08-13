@@ -21,7 +21,7 @@ import assert from 'node:assert/strict'
 import { registerFauxProvider, fauxAssistantMessage } from '@mariozechner/pi-ai'
 
 import { runTurn } from '../src/agent/run-turn.js'
-import { createMemoryStore } from '../src/sessions/store.js'
+import { createMemorySessionStore as createMemoryStore } from './helpers/memory-session-store.js'
 import { buildModel } from '../src/models/model-factory.js'
 import { SANDBOX_WORKSPACE_ROOT } from '../src/agent/sandbox-files.js'
 

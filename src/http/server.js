@@ -166,7 +166,7 @@ async function serveStatic(res, pathname, { webDir, confineTo = webDir } = {}) {
 export function createServer({
   config, logger, identity, broker, runService, store, llmInfoClient, metrics, workspace = null,
   skillManager = null, memory = null, projects = null, crons = null, scheduler = null, cronVault = null,
-  artifacts = null, shares = null,
+  artifacts = null, shares = null, users = null,
 }) {
   const webDir = config.webDir || DEFAULT_WEB_DIR
 
@@ -270,7 +270,12 @@ export function createServer({
           // 分开两个开关：能不能生成链接、能不能上广场，是两个决定（见 shares.js）
           artifactShare: Boolean(shares?.enabled),
           artifactMarket: Boolean(shares?.marketEnabled),
+          // 界面据此决定画不画「注册」「改密」「用户管理」
+          accounts: Boolean(users),
+          register: Boolean(users) && Boolean(config.auth.password?.allowRegister),
         },
+        // 只有 mysql 一种，报出来是给运维确认"我确实连着库"
+        storage: 'mysql',
       })
     }
     if (url.pathname === '/metrics.json') {
@@ -278,29 +283,88 @@ export function createServer({
     }
 
     // ---------- 账号密码登录（AUTH_MODE=password 时生效）----------
-    if (req.method === 'POST' && url.pathname === '/v1/auth/login') {
+    if (url.pathname.startsWith('/v1/auth/') && url.pathname !== '/v1/auth/me') {
       if (config.auth.mode !== 'password') {
         return sendJson(res, 404, { error: 'NOT_FOUND', message: '当前 AUTH_MODE 不支持密码登录' })
       }
-      const body = await readJsonBody(req, config.limits.bodyLimitBytes)
-      const { username, password } = body || {}
-      if (typeof username !== 'string' || !username) {
-        throw Errors.badRequest('用户名必填')
+
+      /** 用户名和密码两个字段的取法一模一样，别写三遍 */
+      async function readCredentials() {
+        const body = await readJsonBody(req, config.limits.bodyLimitBytes)
+        const username = typeof body?.username === 'string' ? body.username.trim() : ''
+        if (!username) throw Errors.badRequest('用户名必填')
+        return { body: body || {}, username }
       }
-      if (typeof password !== 'string' || !password) {
-        throw Errors.badRequest('密码必填')
-      }
-      if (!identity.passwordUsers || identity.passwordUsers.size === 0) {
-        return sendJson(res, 503, { error: 'NO_USERS', message: '未配置 CONSOLE_USERS 环境变量，无法登录' })
-      }
-      if (!validateCredentials(identity.passwordUsers, username, password)) {
-        reqLogger.warn('密码登录失败', { username })
-        throw Errors.unauthenticated('用户名或密码错误')
-      }
+
       const ttlSec = config.auth.password.sessionTtlHours * 3600
-      const { token, expiresAt } = signToken(username, identity.passwordSecret, ttlSec)
-      reqLogger.info('密码登录成功', { username })
-      return sendJson(res, 200, { ok: true, token, expiresAt, username })
+
+      if (req.method === 'POST' && url.pathname === '/v1/auth/login') {
+        const { body, username } = await readCredentials()
+        if (typeof body.password !== 'string' || !body.password) throw Errors.badRequest('密码必填')
+
+        /**
+         * 账号来自存储（见 src/identity/user-store.js）。没接 users 时才退回
+         * CONSOLE_USERS 的明文比对 —— 那条路只剩下不带账号体系的部署在走。
+         */
+        let ok = false
+        let reason = ''
+        if (users) {
+          const result = await users.verify(username, body.password)
+          ok = result.ok
+          reason = result.reason || ''
+          if (!ok && reason === 'no-such-user' && (await users.count()) === 0) {
+            return sendJson(res, 503, {
+              error: 'NO_USERS',
+              message: '还没有任何账号：配置 CONSOLE_USERS 后重启，或开启 AUTH_ALLOW_REGISTER 让第一个人自己注册',
+            })
+          }
+        } else {
+          if (!identity.passwordUsers || identity.passwordUsers.size === 0) {
+            return sendJson(res, 503, { error: 'NO_USERS', message: '未配置 CONSOLE_USERS 环境变量，无法登录' })
+          }
+          ok = validateCredentials(identity.passwordUsers, username, body.password)
+        }
+
+        if (!ok) {
+          // 日志里记下真实原因（禁用 / 密码错 / 无此人），**响应里一律同一句** ——
+          // 区分开就等于告诉撞库的人"这个用户名是对的，继续猜密码"
+          reqLogger.warn('密码登录失败', { username, reason })
+          if (reason === 'disabled') throw Errors.unauthenticated('该账号已被禁用')
+          throw Errors.unauthenticated('用户名或密码错误')
+        }
+
+        const { token, expiresAt } = signToken(username, identity.passwordSecret, ttlSec)
+        reqLogger.info('密码登录成功', { username })
+        return sendJson(res, 200, { ok: true, token, expiresAt, username })
+      }
+
+      /**
+       * 注册。**默认关**（AUTH_ALLOW_REGISTER=0）。
+       *
+       * 开放注册意味着任何能访问到这个地址的人都能拿到一个账号，
+       * 而账号在这里等于"能跑模型、能开沙盒"。所以它是一个必须显式打开的开关，
+       * 不是一个默认能力。内网部署想让同事自助开号时才打开。
+       */
+      if (req.method === 'POST' && url.pathname === '/v1/auth/register') {
+        if (!users) throw Errors.notFound('本部署未启用账号存储')
+        if (!config.auth.password.allowRegister) {
+          throw Errors.forbidden('本部署未开放注册（AUTH_ALLOW_REGISTER=0），请让管理员创建账号')
+        }
+        const { body, username } = await readCredentials()
+        try {
+          // 第一个注册进来的人是管理员：全新部署里总得有人能管别人，
+          // 而那时还没有任何管理员可以来授权
+          const first = (await users.count()) === 0
+          const user = await users.create({ username, password: body.password, role: first ? 'admin' : 'user' })
+          const { token, expiresAt } = signToken(username, identity.passwordSecret, ttlSec)
+          reqLogger.info('注册成功', { username, role: user.role })
+          return sendJson(res, 201, { ok: true, user, token, expiresAt, username })
+        } catch (error) {
+          throw Errors.badRequest(error.message)
+        }
+      }
+
+      throw Errors.notFound('没有这个接口')
     }
 
     // ---------- 静态页面 ----------
@@ -432,7 +496,101 @@ export function createServer({
         credentialFacts: describeCredential(subject.credential),
         verified: Boolean(subject.verified),
         cached: Boolean(subject.cached),
+        // 界面据此决定画不画「管理员」那一块。没接账号存储时为 null
+        account: users ? await users.get(subject.username) : null,
       })
+    }
+
+    /* ─────────────── 账号（改密 / 管理）─────────────── */
+
+    if (url.pathname === '/v1/auth/password' || url.pathname.startsWith('/v1/admin/users')) {
+      if (!users) throw Errors.notFound('本部署未启用账号存储（AUTH_MODE 不是 password）')
+
+      /**
+       * 改自己的密码。**必须带旧密码**。
+       *
+       * 令牌可能是从别人电脑上、从一次共享屏幕里拿到的；只凭令牌就能改密，
+       * 等于把"临时借用"直接变成"永久接管"，而真正的主人连登录都做不到了。
+       */
+      if (req.method === 'POST' && url.pathname === '/v1/auth/password') {
+        const body = await readJsonBody(req, config.limits.bodyLimitBytes)
+        try {
+          const result = await users.changePassword({
+            username: subject.username,
+            oldPassword: body.oldPassword,
+            newPassword: body.newPassword,
+          })
+          if (!result.ok) throw Errors.badRequest(result.error || '改密失败')
+          reqLogger.info('用户改密成功', { username: subject.username })
+          /**
+           * 已签发的令牌**不会失效** —— 签名密钥没变，旧令牌到期前照样能用。
+           * 如实告诉调用方，别让人以为改完密码就把别处的登录踢掉了。
+           */
+          return sendJson(res, 200, { ok: true, tokensRevoked: false })
+        } catch (error) {
+          if (error instanceof AppError) throw error
+          throw Errors.badRequest(error.message)
+        }
+      }
+
+      /* ── 以下要管理员 ── */
+      const me = await users.get(subject.username)
+      if (me?.role !== 'admin') throw Errors.forbidden('需要管理员权限')
+
+      if (req.method === 'GET' && url.pathname === '/v1/admin/users') {
+        return sendJson(res, 200, { users: await users.list() })
+      }
+
+      if (req.method === 'POST' && url.pathname === '/v1/admin/users') {
+        const body = await readJsonBody(req, config.limits.bodyLimitBytes)
+        try {
+          const created = await users.create({ username: body.username, password: body.password, role: body.role })
+          reqLogger.info('管理员创建账号', { by: subject.username, username: created.username })
+          return sendJson(res, 201, { ok: true, user: created })
+        } catch (error) {
+          throw Errors.badRequest(error.message)
+        }
+      }
+
+      const target = decodeURIComponent(url.pathname.slice('/v1/admin/users/'.length) || '')
+      if (req.method === 'PATCH' && target && !target.includes('/')) {
+        const body = await readJsonBody(req, config.limits.bodyLimitBytes)
+        try {
+          let updated = null
+          if (typeof body.disabled === 'boolean') {
+            /**
+             * 不许把自己禁掉。
+             *
+             * 这不是洁癖：唯一的管理员一旦禁了自己，就**没有任何人**能再进来把它打开 ——
+             * 只能去数据库里手工改一行。挡住这一步比事后补救便宜得多。
+             */
+            if (body.disabled && target === subject.username) {
+              throw Errors.badRequest('不能禁用自己 —— 那样就再没人能把它打开了')
+            }
+            updated = await users.setDisabled({ username: target, disabled: body.disabled })
+          }
+          if (typeof body.role === 'string') {
+            if (target === subject.username && body.role !== 'admin') {
+              throw Errors.badRequest('不能撤销自己的管理员身份')
+            }
+            updated = await users.setRole({ username: target, role: body.role })
+          }
+          if (typeof body.newPassword === 'string') {
+            if (!(await users.resetPassword({ username: target, newPassword: body.newPassword }))) {
+              throw Errors.notFound('用户不存在')
+            }
+            updated = await users.get(target)
+            reqLogger.info('管理员重置密码', { by: subject.username, username: target })
+          }
+          if (!updated) throw Errors.badRequest('没有可更新的字段（disabled / role / newPassword）')
+          return sendJson(res, 200, { ok: true, user: updated })
+        } catch (error) {
+          if (error instanceof AppError) throw error
+          throw Errors.badRequest(error.message)
+        }
+      }
+
+      throw Errors.notFound('没有这个接口')
     }
 
     // 模型清单：只回可公开字段，llmToken 永不下发

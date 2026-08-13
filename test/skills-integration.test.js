@@ -31,7 +31,7 @@ import { probeNamespaceSupport } from '../sandbox-worker/test/support.js'
 import { createHttpSandbox } from '../src/sandbox/client.js'
 import { loadSkills } from '../src/agent/skills.js'
 import { runTurn } from '../src/agent/run-turn.js'
-import { createMemoryStore } from '../src/sessions/store.js'
+import { createMemorySessionStore as createMemoryStore } from './helpers/memory-session-store.js'
 import { buildModel } from '../src/models/model-factory.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))

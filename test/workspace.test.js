@@ -339,7 +339,7 @@ describe('run 收尾的顺序', () => {
 
   test('回写必须排在 release 之前 —— release 是整个 slot 销毁重建，之后什么都捞不到', async () => {
     const { runTurn } = await import('../src/agent/run-turn.js')
-    const { createMemoryStore } = await import('../src/sessions/store.js')
+    const { createMemorySessionStore: createMemoryStore } = await import('./helpers/memory-session-store.js')
     const { registerFauxProvider, fauxAssistantMessage } = await import('@mariozechner/pi-ai')
     const { buildModel } = await import('../src/models/model-factory.js')
 
@@ -381,7 +381,7 @@ describe('run 收尾的顺序', () => {
 
   test('没占过槽位就别回写 —— 否则纯聊天的 run 会为了同步空目录白申请一个租约', async () => {
     const { runTurn } = await import('../src/agent/run-turn.js')
-    const { createMemoryStore } = await import('../src/sessions/store.js')
+    const { createMemorySessionStore: createMemoryStore } = await import('./helpers/memory-session-store.js')
     const { registerFauxProvider, fauxAssistantMessage } = await import('@mariozechner/pi-ai')
     const { buildModel } = await import('../src/models/model-factory.js')
 

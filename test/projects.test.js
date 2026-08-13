@@ -14,6 +14,17 @@ import path from 'node:path'
 
 import { createProjectStore, projectPrompt } from '../src/projects/store.js'
 import { createMemoryStore } from '../src/memory/store.js'
+import { createMemoryStorage } from './helpers/memory-storage.js'
+
+/** 存储后端的测试替身。生产只有 MySQL，见 test/helpers/memory-storage.js */
+const testStorage = createMemoryStorage()
+
+/**
+ * 替身是这个文件共用的一个实例，每条用例前清干净。
+ * 不清的话，上一条留下的记录会让"列出全部"这类断言得到一个跟自己无关的数字，
+ * 而报错看起来像是被测代码有问题。
+ */
+beforeEach(() => testStorage.reset())
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {} }
 
@@ -21,7 +32,7 @@ let root
 let projects
 beforeEach(async () => {
   root = await mkdtemp(path.join(tmpdir(), 'ap-proj-'))
-  projects = createProjectStore({ config: { dataDir: root, projects: { enabled: true } }, logger: silentLogger })
+  projects = createProjectStore({ storage: testStorage, config: { dataDir: root, projects: { enabled: true } }, logger: silentLogger })
 })
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
@@ -108,20 +119,30 @@ describe('隔离', () => {
 })
 
 describe('删项目', () => {
-  test('项目记忆跟着删，别留孤儿文件', async () => {
-    const memory = createMemoryStore({ config: { dataDir: root, memory: { enabled: true } }, logger: silentLogger })
+  /**
+   * 断言走 store 自己的接口，而不是去 stat 那个 MEMORY.md 文件。
+   *
+   * 从前它拿 `memory.fileFor()` 要到真实路径再 stat —— 那把用例绑死在
+   * "记忆一定是磁盘上的一个文件"上。接上 STORAGE_DRIVER=mysql 之后这个前提
+   * 不成立了（记忆是 ap_doc 的一行），而**要守的东西一点没变**：
+   * 项目删了，它的记忆读不出来了。
+   */
+  test('项目记忆跟着删，别留孤儿', async () => {
+    const memory = createMemoryStore({ storage: testStorage, config: { dataDir: root, memory: { enabled: true } }, logger: silentLogger })
     const project = await projects.create({ username: 'zhangsan', name: '结算中台' })
     await memory.capture({ username: 'zhangsan', projectId: project.id }, ['本项目下周上线'])
-
-    const memoryFile = memory.fileFor({ username: 'zhangsan', projectId: project.id })
-    assert.ok(await stat(memoryFile), '前提：项目记忆确实写出来了')
+    assert.match(
+      await memory.recall({ username: 'zhangsan', projectId: project.id }),
+      /本项目下周上线/,
+      '前提：项目记忆确实写进去了',
+    )
 
     assert.equal(await projects.remove({ username: 'zhangsan', projectId: project.id }), true)
-    await assert.rejects(() => stat(memoryFile), /ENOENT/)
+    assert.equal(await memory.recall({ username: 'zhangsan', projectId: project.id }), '')
   })
 
   test('个人记忆不受影响', async () => {
-    const memory = createMemoryStore({ config: { dataDir: root, memory: { enabled: true } }, logger: silentLogger })
+    const memory = createMemoryStore({ storage: testStorage, config: { dataDir: root, memory: { enabled: true } }, logger: silentLogger })
     const project = await projects.create({ username: 'zhangsan', name: 'x' })
     await memory.capture({ username: 'zhangsan' }, ['我是张三'])
     await projects.remove({ username: 'zhangsan', projectId: project.id })

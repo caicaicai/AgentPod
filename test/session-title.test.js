@@ -16,7 +16,7 @@ import path from 'node:path'
 
 import { TITLE_MAX, TITLE_PROMPT, generateTitle, sanitizeTitle, titleWidth } from '../src/sessions/title.js'
 import { deriveTitle } from '../src/sessions/transcript.js'
-import { createFileStore } from '../src/sessions/file-store.js'
+import { createMemorySessionStore } from './helpers/memory-session-store.js'
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {}, child() { return silentLogger } }
 
@@ -115,7 +115,7 @@ describe('只起一次', () => {
   let store
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), 'ap-title-'))
-    store = createFileStore({ config: { dataDir: root }, logger: silentLogger })
+    store = createMemorySessionStore()
   })
   afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 

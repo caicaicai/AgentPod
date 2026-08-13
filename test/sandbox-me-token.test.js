@@ -62,7 +62,7 @@ describe('注入开关', () => {
 describe('config 默认值', () => {
   // AUTH_MODE / LLM_MODE 的默认值（password / platform）各自还有必填项，
   // 不显式给一对就会在读到注入开关之前被校验拦下
-  const BASE = { SANDBOX_MODE: 'none', AUTH_MODE: 'dev', LLM_MODE: 'faux' }
+  const BASE = { SANDBOX_MODE: 'none', AUTH_MODE: 'dev', LLM_MODE: 'faux', MYSQL_HOST: 'db.example', MYSQL_USER: 'ap', MYSQL_DATABASE: 'ap' }
   // **不要用仓库根当 cwd**：loadConfig 会读那里的 .env，
   // 于是这组用例的结果会取决于开发机上那份私有配置。
   const CWD = tmpdir()

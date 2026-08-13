@@ -16,7 +16,7 @@ import path from 'node:path'
 
 import { parseTranscript, deriveTitle } from '../src/sessions/transcript.js'
 import { toClientFrames, createFrameEncoder } from '../src/agent/events.js'
-import { createMemoryStore } from '../src/sessions/store.js'
+import { createMemorySessionStore as createMemoryStore } from './helpers/memory-session-store.js'
 import { createServer } from '../src/http/server.js'
 
 /* ─────────── 造一段真实形状的 pi 会话 ─────────── */

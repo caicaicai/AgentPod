@@ -14,12 +14,23 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import { createServer } from '../src/http/server.js'
-import { createFileStore } from '../src/sessions/file-store.js'
+import { createMemorySessionStore } from './helpers/memory-session-store.js'
 import { createMemoryStore } from '../src/memory/store.js'
 import { createProjectStore } from '../src/projects/store.js'
 import { createCronStore } from '../src/cron/store.js'
 import { createCronCredentialVault } from '../src/cron/credentials.js'
 import { createArtifactStore } from '../src/artifacts/store.js'
+import { createMemoryStorage } from './helpers/memory-storage.js'
+
+/** 存储后端的测试替身。生产只有 MySQL，见 test/helpers/memory-storage.js */
+const testStorage = createMemoryStorage()
+
+/**
+ * 替身是这个文件共用的一个实例，每条用例前清干净。
+ * 不清的话，上一条留下的记录会让"列出全部"这类断言得到一个跟自己无关的数字，
+ * 而报错看起来像是被测代码有问题。
+ */
+beforeEach(() => testStorage.reset())
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {}, child() { return silentLogger } }
 
@@ -42,12 +53,12 @@ function buildConfig(dataDir, overrides = {}) {
 }
 
 async function startServer(dataDir, { config = buildConfig(dataDir), stores = {} } = {}) {
-  const store = stores.store ?? createFileStore({ config, logger: silentLogger })
-  const memory = stores.memory ?? createMemoryStore({ config, logger: silentLogger })
-  const projects = stores.projects ?? createProjectStore({ config, logger: silentLogger })
-  const crons = stores.crons ?? createCronStore({ config, logger: silentLogger })
-  const cronVault = stores.cronVault ?? createCronCredentialVault({ config, logger: silentLogger })
-  const artifacts = stores.artifacts ?? createArtifactStore({ config, logger: silentLogger })
+  const store = stores.store ?? createMemorySessionStore()
+  const memory = stores.memory ?? createMemoryStore({ storage: testStorage, config, logger: silentLogger })
+  const projects = stores.projects ?? createProjectStore({ storage: testStorage, config, logger: silentLogger })
+  const crons = stores.crons ?? createCronStore({ storage: testStorage, config, logger: silentLogger })
+  const cronVault = stores.cronVault ?? createCronCredentialVault({ storage: testStorage, config, logger: silentLogger })
+  const artifacts = stores.artifacts ?? createArtifactStore({ storage: testStorage, config, logger: silentLogger })
 
   const app = createServer({
     config,
@@ -107,7 +118,8 @@ describe('能力宣告', () => {
   test('healthz 告诉界面哪些块该画', async () => {
     const { body } = await api.get('/healthz')
     assert.deepEqual(body.features, {
-      sessionStore: 'file',
+      // 这个 harness 用的是会话存储的测试替身（生产只有 mysql 一种驱动）
+      sessionStore: 'memory',
       memory: true,
       projects: true,
       cron: true,
@@ -119,6 +131,10 @@ describe('能力宣告', () => {
       // 少一个的表现是"功能开着但没有入口"
       artifactShare: false,
       artifactMarket: false,
+      // 这个 harness 没接账号存储（账号有自己那套用例）。两个字段仍然要露面：
+      // 界面靠它们决定画不画注册入口与用户管理
+      accounts: false,
+      register: false,
     })
   })
 
@@ -425,8 +441,7 @@ describe('定时任务接口', () => {
     const vaultApi = client(withVault.base)
     const created = await vaultApi.post('/v1/crons', { task: 'x', schedule: daily })
 
-    const vault = createCronCredentialVault({
-      config: buildConfig(dataDir, { cron: { credentialMode: 'stored' } }), logger: silentLogger,
+    const vault = createCronCredentialVault({ storage: testStorage, config: buildConfig(dataDir, { cron: { credentialMode: 'stored' } }), logger: silentLogger,
     })
     assert.equal(await vault.resolve({ username: 'u1' }), 'sso=fake', '建任务时应把当时的登录态留下来')
 

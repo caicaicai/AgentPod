@@ -32,7 +32,7 @@ function withDir(fn) {
  * password 和 platform，各自还要求 CONSOLE_USERS 和 SPEED_API_BASE。
  * dev + faux 是最省事的一对，而且与这组用例要测的东西完全无关。
  */
-const BASE = { SANDBOX_MODE: 'none', AUTH_MODE: 'dev', LLM_MODE: 'faux' }
+const BASE = { SANDBOX_MODE: 'none', AUTH_MODE: 'dev', LLM_MODE: 'faux', MYSQL_HOST: 'db.example', MYSQL_USER: 'ap', MYSQL_DATABASE: 'ap' }
 
 describe('从文件读配置', () => {
   test('默认读 <cwd>/.env', () => {
@@ -122,7 +122,7 @@ describe('从文件读配置', () => {
       )
       const config = loadConfig({ cwd: dir, env: { ...BASE, SESSION_STORE: 'mysql', MYSQL_HOST: 'h', MYSQL_USER: 'u', MYSQL_DATABASE: 'd' } })
       assert.deepEqual(config.artifacts.allowedOrigins, ['https://cdn.example.com', 'https://esm.example.com'])
-      assert.equal(config.sessions.mysql.password, 'a=b=c', '值里的等号被截断了')
+      assert.equal(config.mysql.password, 'a=b=c', '值里的等号被截断了')
     })
   })
 

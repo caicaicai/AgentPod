@@ -62,8 +62,8 @@
  */
 import { randomBytes } from 'node:crypto'
 
-import { createFileMap } from '../persistence/file-map.js'
-import { assertSegment, safeJoin } from '../persistence/paths.js'
+import { assertSegment } from '../persistence/paths.js'
+import { requireStorage } from '../persistence/storage.js'
 
 /** 市场卡片上的一句简介。长了就该点进去看作品本身 */
 const SUMMARY_MAX = 140
@@ -152,14 +152,15 @@ function toMarketCard({ meta, pointer }) {
  * @param {object} params.artifacts  作品存储。分享**依赖**它而不是反过来：
  *   分享是加在作品上的一层能力，作品不知道自己被分享了也照样成立。
  */
-export function createShareStore({ config, logger = console, artifacts }) {
+export function createShareStore({ config, storage, logger = console, artifacts }) {
+  requireStorage(storage, 'createShareStore')
   const settings = config.artifacts || {}
   // 作品功能本身关掉时，分享无从谈起 —— 别让它变成一个"开着但永远 404"的开关
   const enabled = settings.enabled !== false && settings.sharing !== false
   const marketEnabled = enabled && settings.market !== false
 
   /** 全局指针表。整个数据层里唯一一处不按 username 分区的地方，理由见文件头 */
-  const map = createFileMap({ dir: safeJoin(config.dataDir, 'shares'), logger })
+  const map = storage.globalMap('shares')
 
   /** 指针过期了就顺手删掉。删不掉也不影响正确性（权威在作品记录上），所以只记一句 */
   async function forget(token, why) {

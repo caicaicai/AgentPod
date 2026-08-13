@@ -19,10 +19,21 @@ import { registerFauxProvider, fauxAssistantMessage } from '@mariozechner/pi-ai'
 import { runTurn } from '../src/agent/run-turn.js'
 import { createRunService } from '../src/agent/run-service.js'
 import { TITLE_PROMPT } from '../src/sessions/title.js'
-import { createMemoryStore as createSessionMemoryStore } from '../src/sessions/store.js'
+import { createMemorySessionStore as createSessionMemoryStore } from './helpers/memory-session-store.js'
 import { createMemoryStore } from '../src/memory/store.js'
 import { createProjectStore } from '../src/projects/store.js'
 import { buildModel } from '../src/models/model-factory.js'
+import { createMemoryStorage } from './helpers/memory-storage.js'
+
+/** 存储后端的测试替身。生产只有 MySQL，见 test/helpers/memory-storage.js */
+const testStorage = createMemoryStorage()
+
+/**
+ * 替身是这个文件共用的一个实例，每条用例前清干净。
+ * 不清的话，上一条留下的记录会让"列出全部"这类断言得到一个跟自己无关的数字，
+ * 而报错看起来像是被测代码有问题。
+ */
+beforeEach(() => testStorage.reset())
 
 const silent = { info() {}, warn() {}, error() {}, debug() {}, child() { return silent } }
 
@@ -112,8 +123,8 @@ describe('run-service 装配的上下文（整条链）', () => {
       llm: { retry: { enabled: false, maxRetries: 0, baseDelayMs: 1, extraPatterns: [] } },
     }
     sessions = createSessionMemoryStore()
-    memory = createMemoryStore({ config, logger: silent })
-    projects = createProjectStore({ config, logger: silent })
+    memory = createMemoryStore({ storage: testStorage, config, logger: silent })
+    projects = createProjectStore({ storage: testStorage, config, logger: silent })
     runService = createRunService({
       config,
       logger: silent,

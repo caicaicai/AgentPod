@@ -20,6 +20,17 @@ import {
 import { createCronStore } from '../src/cron/store.js'
 import { createCronCredentialVault } from '../src/cron/credentials.js'
 import { createScheduler } from '../src/cron/scheduler.js'
+import { createMemoryStorage } from './helpers/memory-storage.js'
+
+/** 存储后端的测试替身。生产只有 MySQL，见 test/helpers/memory-storage.js */
+const testStorage = createMemoryStorage()
+
+/**
+ * 替身是这个文件共用的一个实例，每条用例前清干净。
+ * 不清的话，上一条留下的记录会让"列出全部"这类断言得到一个跟自己无关的数字，
+ * 而报错看起来像是被测代码有问题。
+ */
+beforeEach(() => testStorage.reset())
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {}, child() { return silentLogger } }
 const TZ = 'Asia/Shanghai'
@@ -169,7 +180,7 @@ describe('存储', () => {
   let crons
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), 'ap-cron-'))
-    crons = createCronStore({ config: { dataDir: root, cron: { enabled: true } }, logger: silentLogger })
+    crons = createCronStore({ storage: testStorage, config: { dataDir: root, cron: { enabled: true } }, logger: silentLogger })
   })
   afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
@@ -278,7 +289,7 @@ describe('凭据留存', () => {
   afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
   test('默认 none：什么都不存，也就取不出来', async () => {
-    const vault = createCronCredentialVault({ config: { dataDir: root, cron: {} }, logger: silentLogger })
+    const vault = createCronCredentialVault({ storage: testStorage, config: { dataDir: root, cron: {} }, logger: silentLogger })
     assert.equal(vault.mode, 'none')
     assert.equal(vault.enabled, false)
     assert.equal(await vault.remember({ username: 'zhangsan', credential: 'sso=abc' }), false)
@@ -286,8 +297,7 @@ describe('凭据留存', () => {
   })
 
   test('stored：存得进、取得出、清得掉，且按 username 隔离', async () => {
-    const vault = createCronCredentialVault({
-      config: { dataDir: root, cron: { credentialMode: 'stored' } }, logger: silentLogger,
+    const vault = createCronCredentialVault({ storage: testStorage, config: { dataDir: root, cron: { credentialMode: 'stored' } }, logger: silentLogger,
     })
     assert.equal(vault.enabled, true)
     await vault.remember({ username: 'zhangsan', credential: 'sso=abc' })
@@ -305,8 +315,7 @@ describe('凭据留存', () => {
    */
   test('落盘权限必须是 0600', { skip: process.platform === 'win32' ? 'Windows 没有 POSIX 权限位，此性质只在 linux 上可观测' : false }, async () => {
     const { stat } = await import('node:fs/promises')
-    const vault = createCronCredentialVault({
-      config: { dataDir: root, cron: { credentialMode: 'stored' } }, logger: silentLogger,
+    const vault = createCronCredentialVault({ storage: testStorage, config: { dataDir: root, cron: { credentialMode: 'stored' } }, logger: silentLogger,
     })
     await vault.remember({ username: 'zhangsan', credential: 'sso=abc' })
     const mode = (await stat(path.join(root, 'users', 'zhangsan', 'cron-credential.json'))).mode & 0o777
@@ -322,14 +331,14 @@ describe('调度', () => {
 
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), 'ap-sched-'))
-    crons = createCronStore({ config: { dataDir: root, cron: { enabled: true } }, logger: silentLogger })
+    crons = createCronStore({ storage: testStorage, config: { dataDir: root, cron: { enabled: true } }, logger: silentLogger })
     executed = []
     scheduler = createScheduler({
       // llm.mode=faux → 不需要用户凭据也能跑，正好把"缺登录态"那条路径隔开单独测
       config: { dataDir: root, cron: { enabled: true }, llm: { mode: 'faux' } },
       logger: silentLogger,
       crons,
-      vault: createCronCredentialVault({ config: { dataDir: root, cron: {} }, logger: silentLogger }),
+      vault: createCronCredentialVault({ storage: testStorage, config: { dataDir: root, cron: {} }, logger: silentLogger }),
       runService: {
         async execute(request) {
           executed.push(request)
@@ -410,7 +419,7 @@ describe('调度', () => {
       config: { dataDir: root, cron: { enabled: true }, llm: { mode: 'faux' } },
       logger: silentLogger,
       crons,
-      vault: createCronCredentialVault({ config: { dataDir: root, cron: {} }, logger: silentLogger }),
+      vault: createCronCredentialVault({ storage: testStorage, config: { dataDir: root, cron: {} }, logger: silentLogger }),
       runService: { async execute() { throw Object.assign(new Error('沙盒满了'), { code: 'BUSY' }) } },
     })
     const at = Date.now() + 10 * 60000
@@ -427,7 +436,7 @@ describe('调度', () => {
       config: { dataDir: root, cron: { enabled: true }, llm: { mode: 'platform' } },
       logger: silentLogger,
       crons,
-      vault: createCronCredentialVault({ config: { dataDir: root, cron: {} }, logger: silentLogger }),
+      vault: createCronCredentialVault({ storage: testStorage, config: { dataDir: root, cron: {} }, logger: silentLogger }),
       runService: { async execute(request) { executed.push(request); return { runId: 'r', durationMs: 1, finalText: '' } } },
     })
     await noCred.tick(Date.now() + 10 * 60000)
