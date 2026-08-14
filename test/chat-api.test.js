@@ -445,6 +445,34 @@ describe('静态资源', () => {
     assert.match(script.headers.get('content-type'), /javascript/)
   })
 
+  /**
+   * 界面自己的那几条地址（见 web/src/lib/route.js）刷新之后必须还在。
+   *
+   * 少一条的表现是：应用里点得进去，按 F5 就 404 —— 而这恰恰是最容易漏的一步，
+   * 因为前端改完之后在 vite dev 下一切正常（它自带 history fallback），
+   * 只有装到真服务端上才露出来。
+   */
+  test('界面自己的地址刷新之后还在（回同一份 index.html）', async () => {
+    for (const path of ['/c/s_abc', '/artifacts', '/artifacts/a_1', '/admin', '/admin/usage']) {
+      const response = await fetch(`${server.base}${path}`)
+      assert.equal(response.status, 200, `${path} 刷新之后该回界面`)
+      assert.match(response.headers.get('content-type'), /text\/html/, path)
+    }
+  })
+
+  /**
+   * 反过来：**不认识的路径仍然 404**。
+   *
+   * 没有做成"凡是不认识的 GET 都回 index.html"，就是为了让打错的接口地址
+   * 得到一个 404，而不是一段 200 的 HTML —— 后者只会让调用方对着
+   * `<!doctype html>` 猜自己哪个字母敲错了。
+   */
+  test('不认识的路径不会被兜成界面', async () => {
+    for (const path of ['/v1/sessons', '/artifactsss', '/c', '/adminx']) {
+      assert.equal((await fetch(`${server.base}${path}`)).status, 404, `${path} 该是 404`)
+    }
+  })
+
   test('目录穿越取不到 assets/ 以外的文件', async () => {
     /**
      * 用例要能真的打到那道边界检查，需要同时躲开前面两层：

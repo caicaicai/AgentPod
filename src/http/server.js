@@ -40,6 +40,22 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DEFAULT_WEB_DIR = path.resolve(__dirname, '../../web/dist')
 
 /**
+ * 界面自己的那几条地址。**它们全都回同一个 index.html**，由前端按路径决定画什么
+ * （见 web/src/lib/route.js）。
+ *
+ * 为什么不做成"凡是不认识的 GET 都回 index.html"：那样 `/v1/sessons/x`（打错一个字母）
+ * 会得到一个 200 的 HTML 而不是 404，调接口的人只能对着一段 `<!doctype html>` 猜哪儿错了。
+ * 白名单是多一行维护换一次说得清的失败 —— 前端加一条新地址时这里要跟着加，
+ * 忘了的话表现很明确：应用里点得进去，刷新就 404。
+ */
+const APP_PATHS = [/^\/c\/[^/]+$/, /^\/artifacts(\/[^/]+)?$/, /^\/admin(\/[^/]+)?$/]
+
+function isAppPath(pathname) {
+  const path = pathname.replace(/\/+$/, '') || '/'
+  return APP_PATHS.some((pattern) => pattern.test(path))
+}
+
+/**
  * sessionKey 是客户端自选的。它会成为存储主键的一部分（内存里是
  * `${username}::${sessionKey}`，MySQL 里是 VARCHAR(128)），所以先收口成一个
  * 安全字符集，免得靠"username 里应该不会有分隔符"这种假设来保证不串号。
@@ -386,7 +402,7 @@ export function createServer({
     // 页面本身不含任何用户数据，数据一律由下面那些要身份的接口提供，所以静态资源不鉴权。
     if (req.method === 'GET') {
       if (config.webUi) {
-        if (url.pathname === '/' || url.pathname === '/index.html') {
+        if (url.pathname === '/' || url.pathname === '/index.html' || isAppPath(url.pathname)) {
           const redirect = identity.navigationRedirect?.({ req, url }) || ''
           if (redirect) {
             reqLogger.info('未登录，跳转登录页', { path: url.pathname })

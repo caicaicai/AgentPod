@@ -18,25 +18,34 @@ import ProjectPanel from './components/ProjectPanel.vue'
 import SharePage from './components/SharePage.vue'
 import SkillsPanel from './components/SkillsPanel.vue'
 import {
-  boot, closeAdmin, closeArtifactDetail, closeLibrary, closeMarket, closeWizard, saveDraft, state, stop,
+  boot, closeAdmin, closeArtifactDetail, closeLibrary, closeMarket, closeWizard,
+  hasStoredIdentity, saveDraft, state, stop,
 } from './stores/app.js'
 import { dialog } from './lib/dialog.js'
-import { publicRoute } from './lib/route.js'
+import { parsePath } from './lib/route.js'
 
 /**
- * 公开路径（`/s/<token>`、`/market`）走另一套外壳。
- *
- * **只在启动时判一次**，理由见 lib/route.js：访客落在分享页上就一直在分享页，
- * 不会在应用内部导航过去。
+ * 首屏落在哪条地址上。**只在这里判一次**：之后的来回导航由 store 里那套
+ * 地址↔状态的同步接手（见 stores/app.js 的「地址栏」一节），这里要的只是
+ * "这一次要不要走应用外壳"。
+ */
+const route = parsePath()
+
+/**
+ * 访客外壳：分享页，以及**没有身份痕迹时**的市场页。
  *
  * 关键在于这时候**不调 boot()** —— 那一串接口（会话、模型、技能、记忆）
- * 对没有账号的访客全是 401，结果是一个弹着登录框的分享页。
- * 而这一页存在的全部意义，就是不需要账号也能看。
+ * 对没有账号的访客全是 401，sso 模式下还会把他直接甩去登录页。
+ * 而这两页存在的全部意义，就是不需要账号也能看。
+ *
+ * 反过来，自己人打开 `/market` 走的是完整外壳（同一个地址、同一份数据，多一条侧栏），
+ * 于是应用里点进市场和把这条链接发给别人，说的是同一件事。分不清是谁时按访客算，
+ * 理由见 hasStoredIdentity。
  */
-const route = publicRoute()
+const visitor = route.name === 'share' || (route.name === 'market' && !hasStoredIdentity())
 
 onMounted(() => {
-  if (!route) boot()
+  if (!visitor) boot()
 })
 
 /**
@@ -67,8 +76,8 @@ function onBeforeUnload() {
 }
 
 onMounted(() => {
-  // 公开页上这两个都没有意义：没有面板可关、没有草稿可存
-  if (route) return
+  // 访客页上这两个都没有意义：没有面板可关、没有草稿可存
+  if (visitor) return
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('beforeunload', onBeforeUnload)
 })
@@ -83,8 +92,8 @@ onBeforeUnmount(() => {
     公开页排在最前面，连登录框都不参与：访客没有账号，
     给他弹一个登录框等于告诉他"你不配看这份别人分享给你的东西"。
   -->
-  <SharePage v-if="route?.name === 'share'" :token="route.token" />
-  <MarketPage v-else-if="route?.name === 'market'" standalone />
+  <SharePage v-if="route.name === 'share'" :token="route.token" />
+  <MarketPage v-else-if="visitor" standalone />
 
   <LoginOverlay v-else-if="state.needLogin" />
 

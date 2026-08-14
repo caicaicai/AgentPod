@@ -13,14 +13,20 @@ import { test, describe, skip } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const webDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../web')
 const require = createRequire(path.join(webDir, 'noop.js'))
 
 let vue = null
 try {
-  vue = await import(require.resolve('vue'))
+  /**
+   * `pathToFileURL` 不能省：Windows 上 `require.resolve` 回的是 `C:\…`，
+   * 而 ESM 的 import() 只认 file://。少了它这里会抛 ERR_UNSUPPORTED_ESM_URL_SCHEME，
+   * 被下面这个 catch 吞掉 —— 于是整组用例在 Windows 上**一直是跳过的**，
+   * 而跳过的理由显示成"没装 web/node_modules"，谁也不会去查。
+   */
+  vue = await import(pathToFileURL(require.resolve('vue')).href)
 } catch {
   vue = null
 }

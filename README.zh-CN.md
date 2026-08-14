@@ -214,7 +214,7 @@ sandbox-worker/bin/check-namespace-caps.sh
 | `ARTIFACT_SHARING_ENABLED` | `1` | 作品分享链接（`/s/<token>`，**免登录可访问**）。这是唯一一条不要求身份的数据通道 |
 | `ARTIFACT_MARKET_ENABLED` | `1` | 公开的作品市场（`/market`）。只收录作者**显式发布**的作品 |
 | `CRON_ENABLED` | `1` | 定时任务 |
-| `WEB_UI` | `1` | 在 `/` 提供内置对话界面 |
+| `WEB_UI` | `1` | 内置对话界面。每个去处都有真地址（`/c/<会话>`、`/artifacts`、`/admin/<页>`…），刷新与收藏都落回同一页，见 `web/README.md` |
 | `DEV_CONSOLE` | `0` | 调试端点（生产环境必须为 `0`） |
 
 ### 认证配置（Password 模式）

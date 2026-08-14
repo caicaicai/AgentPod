@@ -18,6 +18,7 @@ import {
 import { formatTurnStats } from '../lib/format.js'
 import { parseInlinedAttachments, toWire } from '../lib/attachments.js'
 import { composeElementPrompt, parsePickedElement } from '../lib/artifact-view.js'
+import { ADMIN_TABS, parsePath, pathFor } from '../lib/route.js'
 
 const MODEL_KEY = 'ap.model'
 const PROJECT_KEY = 'ap.projectId'
@@ -1535,11 +1536,31 @@ export function logout() {
   state.view = 'chat'
   state.sessions = []
   state.turns = []
+  /**
+   * 会话也归零，顺带把地址退回 `/`。
+   * 不退的话地址栏上还挂着上一个人的会话 id —— 换个人登录进来第一眼看到的
+   * 就是别人的链接，而刷新一下还会真的去请求它（然后 404 或者 403）。
+   */
+  state.activeKey = newSessionKey()
+  state.pendingNew = true
   state.models = []
   state.skills = []
 }
 
 export { getDevUsername, setDevUsername }
+
+/**
+ * 本地有没有身份的痕迹。**同步**，只用来在 `/market` 上分岔（见 App.vue）。
+ *
+ * 它回答不了"这个人现在登录着没有" —— sso 模式的登录态是一个 HttpOnly Cookie，
+ * JS 看不见。所以它只在 password / dev 两种模式下说得准，而这正好是需要它的场合：
+ * 分不清的时候按访客算，代价是 sso 用户在市场页刷新会看到那个不带侧栏的版本，
+ * 内容一模一样，页上也有回应用的入口。反过来猜错的代价大得多 ——
+ * 一个真访客会被 401 踢去 SSO 登录页，而那一页存在的意义就是不用登录也能看。
+ */
+export function hasStoredIdentity() {
+  return Boolean(getAuthToken() || getDevUsername())
+}
 
 /* ═══════════════ 发送与流式 ═══════════════ */
 
@@ -1788,13 +1809,129 @@ export async function stop() {
   }
 }
 
+/* ═══════════════ 地址栏 ═══════════════ */
+
+/**
+ * 正在按地址改状态。**这期间不许反向写地址**：
+ * 切一次会话要经过好几个中间态（先 view='chat'，再换 activeKey），
+ * 每个中间态都写一次的话，用户按一下返回键，历史里会多出两三条他没去过的地址。
+ */
+let applyingUrl = false
+
+/**
+ * 状态 → 地址。
+ *
+ * `search` 和 `hash` 原样留着：里面可能有别处在管的标记（sso_retry 见 lib/api.js），
+ * 这里只负责 pathname 那一段。
+ */
+function syncUrl({ replace = false } = {}) {
+  const path = pathFor(state)
+  if (path === location.pathname) return
+  history[replace ? 'replaceState' : 'pushState'](null, '', `${path}${location.search}${location.hash}`)
+}
+
+/**
+ * 状态一变就把地址跟上。**在这里盯着，而不是在每个入口后面补一行 pushState** ——
+ * 能改变去处的地方有十几个（侧栏、作品卡片上的"继续改它"、Esc、向导、删除当前会话…），
+ * 逐个补一定会漏，而漏掉的那条的表现是"地址栏在说一个我已经离开的页面"。
+ *
+ * 取值函数直接用 pathFor：它读哪几个字段，这个 watch 就跟哪几个字段，不用另抄一份依赖清单。
+ */
+watch(
+  /**
+   * 加载中不算数。
+   *
+   * 会话是"先切过去、再等历史回来"的（见 openSession），而切过去的那一刻
+   * `pendingNew` 可能还是 true —— 本地列表里没有它（搜索结果、别的项目、已归档）。
+   * 这时候写地址会写出一条 `/`，等历史回来再写一条 `/c/<key>`：
+   * 用户点了一次，历史里多出两条，按返回键第一下像是没反应。
+   */
+  () => (state.loadingSession ? '' : pathFor(state)),
+  (path) => {
+    // booted 之前地址是**输入**不是输出（见 bootAfterLogin 末尾那次 replace）
+    if (path && state.booted && !applyingUrl) syncUrl()
+  },
+)
+
+/**
+ * 地址 → 状态。冷启动、登录之后、浏览器前进/后退都走这一条。
+ *
+ * 认不出或者去不了（功能没开、不是管理员）时一律落回对话：
+ * 一个打不开的地址应该退化成"进到了首页"，而不是一块空白。
+ */
+async function applyRoute(route) {
+  applyingUrl = true
+  try {
+    if (route.name === 'artifacts' && state.features.artifacts) {
+      await openLibrary()
+      // 直接摊开某一份。取不到（删了、换了账号）时 openArtifact 自己会在库里留一句话
+      if (route.artifactId) await openArtifact(route.artifactId)
+      return
+    }
+    if (route.name === 'market' && state.features.artifactMarket) {
+      await openMarket()
+      return
+    }
+    /**
+     * 管理台要**先确认自己是管理员**再进。
+     * 判定当然在服务端（这里少判一次只是界面难看，服务端少判一次是越权），
+     * 但不判的话，普通用户手敲 /admin 会进到一个所有接口都 403 的空表 ——
+     * 那比"回到对话"更让人以为是坏了。
+     */
+    if (route.name === 'admin' && state.account?.role === 'admin') {
+      state.adminTab = ADMIN_TABS.includes(route.tab) ? route.tab : ADMIN_TABS[0]
+      await openAdmin()
+      await setAdminTab(state.adminTab)
+      return
+    }
+
+    state.view = 'chat'
+    state.panel = ''
+    const key = route.name === 'chat' ? route.sessionKey : ''
+    if (key && key === state.activeKey) return
+    /**
+     * 这一轮还在跑：openSession 和 startNewSession 都会拒绝（切走会把流式结果丢在半路）。
+     * **必须在这里说一声**，否则用户按了返回键什么都没发生，看起来就是页面卡住了。
+     * 地址由调用方改回状态真正在的那一条（见 onPopState）。
+     */
+    if (state.live) {
+      showBanner('这一轮还在跑，想切走的话先按停止')
+      return
+    }
+    if (key) {
+      if (!await openSession(key)) showBanner('这条对话打不开了 —— 可能已被删除，或者服务重启后它没有留存')
+      return
+    }
+    /**
+     * `/` = 新对话。**已经在一条没落库的新对话上时什么都不做** ——
+     * 那时候再开一条只会把刚打了一半的草稿换到另一个键下面，看起来就是"字没了"。
+     */
+    if (!state.pendingNew) startNewSession()
+  } finally {
+    applyingUrl = false
+  }
+}
+
+/** 浏览器的前进/后退。地址已经变好了，这里只负责把状态搬过去 */
+async function onPopState() {
+  await applyRoute(parsePath())
+  /**
+   * 状态没跟上时把地址改回来（这一轮还在跑时 openSession 会拒绝切换）。
+   * 不改的话，地址栏在说一件没有发生的事 —— 而下一次刷新就会当真。
+   */
+  syncUrl({ replace: true })
+}
+
 /* ═══════════════ 启动 ═══════════════ */
 
 /**
  * healthz 之后拉取全部数据的公共逻辑。
  * 登录成功后和首次 boot 都走这里。
+ *
+ * `route` 是这次要落到哪一页。默认读地址栏 —— 冷启动读的是用户粘进来的那条链接，
+ * 登录之后读的是他被拦下来之前想去的那条（登录框不改地址，所以它还在）。
  */
-async function bootAfterLogin() {
+async function bootAfterLogin(route = parsePath()) {
   state.features = state.health?.features || {}
   state.projectId = localStorage.getItem(PROJECT_KEY) || ''
 
@@ -1814,14 +1951,38 @@ async function bootAfterLogin() {
 
   if (!isRedirectingToLogin()) clearSsoRetryMarker()
 
-  const last = state.sessions[0]
-  if (last) await openSession(last.sessionKey)
-  else loadDraft()
+  /**
+   * 先把对话摆好，再盖上要去的那一页。
+   *
+   * 顺序不能反：作品库、市场、管理台都不是"另一个应用"，从它们退回来（Esc、关闭按钮）
+   * 落到的是对话 —— 那时候后面得有东西，不能是一片空白。
+   */
+  if (route.name === 'chat' && route.sessionKey) {
+    if (!await openSession(route.sessionKey)) {
+      showBanner('这条对话打不开了 —— 可能已被删除，或者服务重启后它没有留存')
+    }
+  } else {
+    const last = state.sessions[0]
+    if (last) await openSession(last.sessionKey)
+    else loadDraft()
+  }
+  if (route.name !== 'chat') await applyRoute(route)
 
   state.booted = true
+  /**
+   * 对齐一次：`/admin` 补成 `/admin/users`、功能没开的那些落回 `/`、
+   * 落在 `/` 上时补成刚打开的那条会话的地址（于是这一页从此可以复制给别人）。
+   *
+   * **replace 而不是 push**：这仍然是用户的同一次进入，不该在历史里多出一条 ——
+   * 不然按一下返回键会回到"同一个页面的上一个写法"，看起来像什么都没发生。
+   */
+  syncUrl({ replace: true })
 }
 
 export async function boot() {
+  // 前进/后退。只在应用外壳里挂 —— 分享页没有第二个去处可去
+  window.addEventListener('popstate', onPopState)
+
   // password 模式下，401 时不跳 SSO 而是弹登录框
   onNeedLogin(() => {
     state.needLogin = true
