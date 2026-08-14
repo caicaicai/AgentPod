@@ -16,6 +16,7 @@ import { normalizeAttachments } from '../agent/attachments.js'
 import { artifactFileName, artifactDisposition } from '../artifacts/store.js'
 import { AppError, Errors, toAppError } from '../errors.js'
 import { validateCredentials, signToken } from '../identity/password-auth.js'
+import { assertSegment } from '../persistence/paths.js'
 import { toPublicModels } from '../models/llminfo-client.js'
 import { parseTranscript } from '../sessions/transcript.js'
 import { describeCredential } from '../tools/context.js'
@@ -166,7 +167,7 @@ async function serveStatic(res, pathname, { webDir, confineTo = webDir } = {}) {
 export function createServer({
   config, logger, identity, broker, runService, store, llmInfoClient, metrics, workspace = null,
   skillManager = null, memory = null, projects = null, crons = null, scheduler = null, cronVault = null,
-  artifacts = null, shares = null, users = null,
+  artifacts = null, shares = null, users = null, usage = null,
 }) {
   const webDir = config.webDir || DEFAULT_WEB_DIR
 
@@ -273,6 +274,9 @@ export function createServer({
           // 界面据此决定画不画「注册」「改密」「用户管理」
           accounts: Boolean(users),
           register: Boolean(users) && Boolean(config.auth.password?.allowRegister),
+          // 管理台的「Token 用量」那一页。只有管理员看得到那一页，但这个宣告是公开的：
+          // 它说的是"这个部署记不记账"，不是"谁用了多少"
+          usage: Boolean(usage?.enabled),
         },
         // 只有 mysql 一种，报出来是给运维确认"我确实连着库"
         storage: 'mysql',
@@ -514,7 +518,15 @@ export function createServer({
 
     /* ─────────────── 账号（改密 / 管理）─────────────── */
 
-    if (url.pathname === '/v1/auth/password' || url.pathname.startsWith('/v1/admin/users')) {
+    /**
+     * `/v1/admin/` 整个前缀都收在这一块里（管人、看用量）。
+     *
+     * 前缀匹配在这儿是安全的，而在鉴权**之前**那块 auth 路由里不行 ——
+     * 区别在于：那边前缀一宽就会把需要登录的路由当成匿名的未知接口吃掉（真发生过，
+     * 见下面 /v1/auth/password 那段的注释）；这边前缀一宽只会让新的 /v1/admin/*
+     * 自动继承"必须是管理员"这条判定，而那正是我们要的默认值。
+     */
+    if (url.pathname === '/v1/auth/password' || url.pathname.startsWith('/v1/admin/')) {
       if (!users) throw Errors.notFound('本部署未启用账号存储（AUTH_MODE 不是 password）')
 
       /**
@@ -563,7 +575,94 @@ export function createServer({
         }
       }
 
-      const target = decodeURIComponent(url.pathname.slice('/v1/admin/users/'.length) || '')
+      /* ── Token 用量 ── */
+
+      /**
+       * 谁在用多少 token、花在哪个模型上。
+       *
+       * 只回聚合数：次数、输入/输出/缓存读入的 token、最近一次的时间。
+       * **一个字的对话内容都不经过这里** —— 管理员该看得见成本，不该顺带看见
+       * 别人写了什么，而"顺带能看见"迟早会有人真的去看。
+       *
+       *   days   时间窗（默认 30，0 = 全部）
+       *   group  `user`（默认）每个账号一行、带他用过的模型；`model` 每个模型一行、
+       *          带用了它的人。同一份交叉表的两种转置，所以两页合计相等。
+       *
+       * 台账里没有的账号也会出现在 `group=user` 的清单里（一行 0），否则"没用过"
+       * 和"不存在"在界面上长得一样。模型那一维没有这层补零：服务端没有"本部署有
+       * 哪些模型"的权威清单（每个用户的可用模型是各自从 llminfo 拿的）。
+       */
+      if (req.method === 'GET' && url.pathname === '/v1/admin/usage') {
+        if (!usage?.enabled) return sendJson(res, 200, { enabled: false, users: [], models: [], total: null })
+        return sendJson(res, 200, await usage.summary({
+          accounts: await users.list(),
+          days: url.searchParams.get('days'),
+          group: url.searchParams.get('group') || 'user',
+        }))
+      }
+
+      /**
+       * 展开一行看趋势（按天）。
+       *
+       * 路径分成 `.../usage/user/<名字>` 与 `.../usage/model/<模型>` 两条，而不是
+       * 共用一个 `.../usage/<谁>`：模型 id 和用户名住在同一层的话，一个叫 `model`
+       * 的账号就能把另一条路由遮掉。多一段前缀换掉这类**取决于命名巧合**的歧义。
+       *
+       * 汇总不在这两条路由上 —— 它已经在总表每一行里带下来了，展开时不再打一次，
+       * 也就不会出现"表里 450,092、展开后 450,091"这种对不上。
+       */
+      if (req.method === 'GET' && url.pathname.startsWith('/v1/admin/usage/user/')) {
+        /**
+         * 名字先过一遍字符集再往下传。
+         *
+         * 用的是**存储层那一个** assertSegment，不是账号那一个 assertUsername：
+         * 后者允许 `..`（当用户名它没问题），而存储层会拒绝它并抛一个普通 Error ——
+         * 于是一个打错的名字会表现成 500。两处用同一个判据，过了这里就一定过那边。
+         */
+        let who
+        try {
+          who = assertSegment(decodeURIComponent(url.pathname.slice('/v1/admin/usage/user/'.length) || ''), '用户名')
+        } catch (error) {
+          throw Errors.badRequest(error.message)
+        }
+        if (!usage?.enabled) return sendJson(res, 200, { enabled: false, username: who, daily: [] })
+        const trend = await usage.trend({
+          username: who,
+          // 带上模型就只看他在这个模型上的曲线（换模型前后的对比）
+          modelId: url.searchParams.get('modelId') || '',
+          days: url.searchParams.get('days'),
+        })
+        /**
+         * 名字既不是一个账号、台账里也一行都没有 → 404。
+         *
+         * 不能只判"是不是账号"：账号删掉之后它的账还在台账里（总表上那一行标着
+         * orphan），点开来该看得到明细。也不能不判：那样一个打错的名字会回一张
+         * 全是 0 的表，看起来像"这个人没用过"。
+         */
+        if (!trend.total.runs && !(await users.get(who))) throw Errors.notFound('用户不存在')
+        return sendJson(res, 200, trend)
+      }
+
+      if (req.method === 'GET' && url.pathname.startsWith('/v1/admin/usage/model/')) {
+        /**
+         * 模型 id **不过 assertSegment**：那是给路径段用的（≤64 字符、不许有 `/`），
+         * 而模型 id 是网关给的一个字符串，`vendor/name:tag` 这种写法完全合法。
+         * 它在这里只当查询参数用（参数化 SQL，不拼路径），所以只收口长度。
+         */
+        const modelId = decodeURIComponent(url.pathname.slice('/v1/admin/usage/model/'.length) || '')
+        if (!modelId || modelId.length > 128) throw Errors.badRequest('模型 id 不合法')
+        if (!usage?.enabled) return sendJson(res, 200, { enabled: false, modelId, daily: [] })
+        const trend = await usage.trend({ modelId, days: url.searchParams.get('days') })
+        // 模型没有"账号表"可以对照，所以判据只有一条：台账里有没有它
+        if (!trend.total.runs) throw Errors.notFound('这个模型在该时间窗内没有用量')
+        return sendJson(res, 200, trend)
+      }
+
+      /* ── 单个账号（改角色 / 禁用 / 重置密码）── */
+
+      const target = url.pathname.startsWith('/v1/admin/users/')
+        ? decodeURIComponent(url.pathname.slice('/v1/admin/users/'.length))
+        : ''
       if (req.method === 'PATCH' && target && !target.includes('/')) {
         const body = await readJsonBody(req, config.limits.bodyLimitBytes)
         try {

@@ -310,6 +310,13 @@ docker compose up -d      # 自带 mysql 服务，agent 等它健康检查通过
 | GET | `/v1/admin/users` | 列出全部账号（要管理员） |
 | POST | `/v1/admin/users` | 管理员建号 |
 | PATCH | `/v1/admin/users/:name` | `{ disabled, role, newPassword }`。禁用**不删数据**；不许禁用自己或撤销自己的管理员身份（否则可能没人再进得来） |
+| GET | `/v1/admin/usage` | token 用量（要管理员）。`?days=30` 是时间窗（`days=0` = 全部历史）；`?group=user`（默认）每个账号一行、带他用过的模型，`?group=model` 每个模型一行、带用了它的账号。两者是同一份**账号 × 模型**交叉表的转置，所以合计一定相等。一次没跑过的账号也有一行 0 —— 否则"没用过"和"不存在"长得一样 |
+| GET | `/v1/admin/usage/user/:name` | 单个账号的按天曲线；`?modelId=` 可以只看某一个模型 |
+| GET | `/v1/admin/usage/model/:modelId` | 单个模型的按天曲线（全体账号合起来） |
+
+用量是**按模型归因的，不只按账号**：模型单价差一个数量级，"这个人花了 800 万 token"
+单独拿出来没法计费。`cache_read_tokens` 单独一列是同一个理由 —— 它与新输入的计价不同，
+所以从不并进那个总数。三个接口都只回聚合数，**一个字的对话内容都不经过它们**。
 
 ### 对话
 
@@ -443,7 +450,7 @@ src/                    Agent 主服务
 ├── tools/              扩展工具（任务规划、浏览器、记忆、定时任务）
 ├── persistence/        文件存储原语
 ├── credentials/        凭据代理
-└── telemetry/          指标采集
+└── telemetry/          进程内指标 + 落库的按人 token 用量台账
 
 web/                    对话界面（Vue 3 + Vite）
 ├── src/stores/         全局状态（reactive 单例，无状态库）

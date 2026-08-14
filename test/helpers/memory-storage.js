@@ -42,6 +42,27 @@ function applyPatch(value, patch) {
   return next
 }
 
+/** 用量台账的时间窗过滤，对应真后端的 `WHERE (? IS NULL OR created_at >= ?)` */
+function rowsSince(usage, since) {
+  const from = since ? new Date(since) : null
+  return [...usage.values()].filter((row) => !from || row.createdAt >= from)
+}
+
+/** 按天汇总，旧到新。与真后端的 DATE_FORMAT 一致：分的是 **UTC** 的天（连接上 timezone='Z'） */
+function daily(rows) {
+  const groups = new Map()
+  for (const row of rows) {
+    const day = row.createdAt.toISOString().slice(0, 10)
+    const current = groups.get(day) || { day, runs: 0, input: 0, output: 0, cacheRead: 0 }
+    current.runs += 1
+    current.input += row.input
+    current.output += row.output
+    current.cacheRead += row.cacheRead
+    groups.set(day, current)
+  }
+  return [...groups.values()].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0))
+}
+
 function createMap(store, collection, owner) {
   const prefix = `${collection}${SEP}${owner}${SEP}`
   const keyOf = (id) => `${prefix}${id}`
@@ -110,6 +131,7 @@ export function createMemoryStorage() {
     kv: new Map(), // `${collection}\0${owner}\0${id}` -> 记录
     docs: new Map(), // `${username}\0${kind}\0${scope}` -> 正文
     blobs: new Map(), // `${username}\0${id}\0${version}\0${path}` -> 正文
+    usage: new Map(), // runId -> 一次 run 的用量明细（与 ap_usage 一行对应）
   }
 
   /**
@@ -196,6 +218,66 @@ export function createMemoryStorage() {
       },
     },
 
+    /**
+     * Token 用量台账。与真后端**逐字段同形状**：数字是 number、时间是 ISO 串、
+     * 排序规则一致（总 token 降序 / 天升序），否则契约用例会在这几处炸。
+     */
+    usage: {
+      async record({
+        username, runId, source = 'web', modelId = '',
+        input = 0, output = 0, cacheRead = 0, durationMs = 0, createdAt = null,
+      }) {
+        assertSegment(username, 'username')
+        // 与真后端的 INSERT IGNORE 一致：同一个 runId 记第二次原样忽略
+        if (store.usage.has(String(runId))) return
+        store.usage.set(String(runId), {
+          username,
+          runId: String(runId),
+          source: String(source).slice(0, 32),
+          modelId: String(modelId || '').slice(0, 128),
+          input: Math.max(0, Math.round(Number(input) || 0)),
+          output: Math.max(0, Math.round(Number(output) || 0)),
+          cacheRead: Math.max(0, Math.round(Number(cacheRead) || 0)),
+          durationMs: Math.max(0, Math.round(Number(durationMs) || 0)),
+          /**
+           * `createdAt` 只有用例会传（真后端那边是 CURRENT_TIMESTAMP，写不进去）。
+           * 有它才测得了时间窗过滤 —— 否则要让用例等一天。
+           */
+          createdAt: createdAt ? new Date(createdAt) : new Date(),
+        })
+      },
+
+      async byUserAndModel({ since = null } = {}) {
+        const groups = new Map()
+        for (const row of rowsSince(store.usage, since)) {
+          const key = `${row.username}${SEP}${row.modelId}`
+          const current = groups.get(key)
+            || { username: row.username, modelId: row.modelId, runs: 0, input: 0, output: 0, cacheRead: 0, lastAt: null }
+          current.runs += 1
+          current.input += row.input
+          current.output += row.output
+          current.cacheRead += row.cacheRead
+          if (!current.lastAt || row.createdAt > current.lastAt) current.lastAt = row.createdAt
+          groups.set(key, current)
+        }
+        return [...groups.values()]
+          .map((row) => ({ ...row, lastAt: row.lastAt ? row.lastAt.toISOString() : null }))
+          .sort((a, b) => (b.input + b.output) - (a.input + a.output))
+      },
+
+      /** 与真后端一致：`modelId` 空串 = 不筛模型（不是"筛模型为空串的那些行"） */
+      async dailyForUser({ username, modelId = '', since = null }) {
+        assertSegment(username, 'username')
+        return daily(rowsSince(store.usage, since).filter(
+          (row) => row.username === username && (!modelId || row.modelId === modelId),
+        ))
+      },
+
+      async dailyForModel({ modelId, since = null }) {
+        return daily(rowsSince(store.usage, since).filter((row) => row.modelId === String(modelId || '')))
+      },
+    },
+
     async close() {},
 
     /** 契约用例每条之前清一次，与 mysql 那边 DELETE 各表对应 */
@@ -203,6 +285,7 @@ export function createMemoryStorage() {
       store.kv.clear()
       store.docs.clear()
       store.blobs.clear()
+      store.usage.clear()
     },
   }
 }

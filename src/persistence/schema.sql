@@ -83,5 +83,40 @@ CREATE TABLE IF NOT EXISTS `ap_artifact_file` (
   PRIMARY KEY (`username`, `artifact_id`, `version`, `path`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='作品每一版的文件正文';
 
+-- ── Token 用量台账 ──────────────────────────────────────────────────────
+--
+-- 一行 = 一次跑完的 run。**只追加，不更新**（一次 run 的用量跑完就定了）。
+--
+-- ⚠️ 这是唯一一张**故意不以 username 开头建索引**的按人分区表，理由与隔离契约
+-- 不冲突：它的读者只有管理员，而管理员问的问题恰恰是跨用户的（"这个月谁在烧
+-- token"）。所以两条索引都要有 ——
+--   idx_created           跨用户按时间窗扫（管理台的总表）
+--   idx_username_created  单个用户的明细（点开某一行时）
+-- 少了后一条，看一个人的明细会退化成全表扫。
+--
+-- 为什么存明细行而不是直接存"每人每天一个累加值"：
+--   1. 累加值回答不了"这些 token 花在哪个模型上"，而模型单价差一个数量级；
+--   2. UPDATE 累加要么加锁要么用 ON DUPLICATE KEY，并发下都比一条 INSERT 贵；
+--   3. 真嫌行多了，按 created_at 删掉旧的即可（DELETE ... WHERE created_at < ?），
+--      而累加值一旦压缩过就找不回明细。
+--
+-- run_id 上有唯一键：重试/重放同一个 run 不会把用量记两遍。
+CREATE TABLE IF NOT EXISTS `ap_usage` (
+  `id`                BIGINT       NOT NULL AUTO_INCREMENT,
+  `username`          VARCHAR(64)  NOT NULL,
+  `run_id`            VARCHAR(64)  NOT NULL,
+  `source`            VARCHAR(32)  NOT NULL DEFAULT 'web' COMMENT 'web | cron | api | channel',
+  `model_id`          VARCHAR(128) NOT NULL DEFAULT '',
+  `input_tokens`      BIGINT       NOT NULL DEFAULT 0,
+  `output_tokens`     BIGINT       NOT NULL DEFAULT 0,
+  `cache_read_tokens` BIGINT       NOT NULL DEFAULT 0 COMMENT '命中缓存读入的 token，计价与 input 不同，单列',
+  `duration_ms`       INT          NOT NULL DEFAULT 0,
+  `created_at`        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_run` (`run_id`),
+  KEY `idx_created` (`created_at`),
+  KEY `idx_username_created` (`username`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='每次 run 的 token 用量（管理台按人汇总用）';
+
 -- ── 会话 ────────────────────────────────────────────────────────────────
 -- 会话表早于本文件存在，定义在 src/sessions/schema.sql，由同一个 ensureSchema 一起建。

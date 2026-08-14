@@ -13,6 +13,7 @@ import { createSkillManager, createDisabledSkillManager } from './workspace/skil
 import { createSandbox } from './sandbox/client.js'
 import { createRunService } from './agent/run-service.js'
 import { createMetrics } from './telemetry/metrics.js'
+import { createUsageStore } from './telemetry/usage-store.js'
 import { createServer } from './http/server.js'
 import { createMemoryStore } from './memory/store.js'
 import { createMemoryCapture } from './memory/capture.js'
@@ -58,6 +59,11 @@ async function main() {
     : createDisabledSkillManager()
   const sandbox = createSandbox({ config, logger })
   const metrics = createMetrics()
+  /**
+   * Token 用量台账。与 metrics 并存不是重复：metrics 是进程内的、看这一刻的健康度，
+   * 这张台账落库、跨重启跨副本，回答的是"这个月谁烧了多少"（见文件头）。
+   */
+  const usage = createUsageStore({ storage, logger })
 
   /**
    * 结构化状态：全部按 username 分区，全部走同一个 storage 后端（MySQL）。
@@ -113,13 +119,13 @@ async function main() {
 
   const runService = createRunService({
     config, logger, store, sandbox, broker, metrics, workspace, skillManager,
-    memory, memoryCapture, projects, crons, artifacts,
+    memory, memoryCapture, projects, crons, artifacts, usage,
   })
   // 调度器要用 runService，所以只能排在它后面建
   const scheduler = createScheduler({ config, logger, crons, vault: cronVault, runService, sessionStore: store })
   const app = createServer({
     config, logger, identity, broker, runService, store, llmInfoClient, metrics, workspace, skillManager,
-    memory, projects, crons, scheduler, cronVault, artifacts, shares, users,
+    memory, projects, crons, scheduler, cronVault, artifacts, shares, users, usage,
   })
 
   await app.listen(config.port)

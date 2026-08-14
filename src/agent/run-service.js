@@ -20,7 +20,7 @@ import { generateTitle } from '../sessions/title.js'
 export function createRunService({
   config, logger, store, sandbox, broker, metrics, workspace = null,
   skillManager = null, memory = null, memoryCapture = null, projects = null, crons = null,
-  artifacts = null,
+  artifacts = null, usage = null,
 }) {
   const active = new Map() // runId -> { username, abort, startedAt, source }
   const perUser = new Map() // username -> count
@@ -392,6 +392,26 @@ export function createRunService({
         }
 
         metrics?.recordRun({ username, source, status: 'ok', durationMs: result.durationMs, usage: result.usage, modelId: model.id })
+        /**
+         * 落一行 token 用量台账（管理台按人看用量要的就是它）。
+         *
+         * **不 await**：这是一条 INSERT，本身很快，但它排在 `final` 帧之前 ——
+         * await 了就等于把库的抖动直接加到用户看到答案的时延上。`record` 自己
+         * 永不抛（见 telemetry/usage-store.js），所以这里也不需要 catch。
+         *
+         * 代价说清楚：进程在这一瞬间被 kill，这一行账会丢。可归因的账不等于账单，
+         * 计费的真源在模型网关那边（llm_requests 表）；这张表是**给管理员看趋势**的。
+         */
+        usage?.record({
+          username,
+          runId,
+          source,
+          modelId: model.id,
+          input: result.usage?.input,
+          output: result.usage?.output,
+          cacheRead: result.usage?.cacheRead,
+          durationMs: result.durationMs,
+        })
         runLogger.info('run 完成', {
           durationMs: result.durationMs,
           entryCount: result.entryCount,

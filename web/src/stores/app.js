@@ -177,6 +177,28 @@ export const state = reactive({
   adminBusy: false,
   adminNote: '',
   adminNoteWarn: false,
+  /** 管理台的两页：'users' 管人，'usage' 看 token 用量 */
+  adminTab: 'users',
+
+  /**
+   * Token 用量。
+   *
+   * `adminUsage` 是总表（`{ enabled, group, since, total, users | models }`，
+   * null = 还没取过）。每行都带着另一维的拆分：用户行带 `models`，模型行带 `users` ——
+   * 所以展开一行不再打一次接口，展开的数字与表里那个**一定相等**。
+   *
+   * `adminUsageGroup` 决定看哪一维：'user'（谁烧得最多）或 'model'（哪个模型烧得最多）。
+   *
+   * `adminUsageTrend` 是展开那一行的**按天曲线**（只有它需要额外一次请求）。
+   * 只留一份：同一时刻只可能展开一行，留着旧的只会让人看到上一行的数字闪一下。
+   */
+  adminUsage: null,
+  adminUsageDays: 30,
+  adminUsageGroup: 'user',
+  adminUsageLoading: false,
+  adminUsageOpen: '',
+  adminUsageTrend: null,
+  adminUsageTrendLoading: false,
 
   // ── 界面开关 ──
   sidebarCollapsed: false,
@@ -1177,6 +1199,87 @@ export function closeAdmin() {
   state.view = 'chat'
 }
 
+/* ── Token 用量 ── */
+
+/**
+ * 总表。
+ *
+ * 账号清单与用量是**两次请求**，不是一次带回来的：管人那一页每做一次动作都要重取
+ * 账号清单（服务端有它自己的规则），而用量是只读的、按时间窗算的，跟着一起重取
+ * 只是白花一次聚合查询。服务端已经把两者对齐好了（没跑过的账号也有一行 0），
+ * 所以这里不需要在前端做连接。
+ */
+export async function refreshUsage() {
+  if (!state.features.accounts) return
+  state.adminUsageLoading = true
+  try {
+    state.adminUsage = await api.adminUsage(state.adminUsageDays, state.adminUsageGroup)
+    state.adminNote = ''
+    state.adminNoteWarn = false
+  } catch (error) {
+    state.adminNote = `用量加载失败：${error.message}`
+    state.adminNoteWarn = true
+  } finally {
+    state.adminUsageLoading = false
+  }
+}
+
+/**
+ * 换时间窗 / 换维度。
+ *
+ * 两件事都要**收起展开的那一行**：它的曲线是按旧参数取的，留着就会出现
+ * 表头写着"近 7 天"而下面那条曲线还是 30 天的。重取比在本地裁剪可靠 ——
+ * 裁剪等于把服务端的时间窗规则在前端抄一份。
+ */
+export async function setUsageDays(days) {
+  state.adminUsageDays = Number(days)
+  closeUsageRow()
+  await refreshUsage()
+}
+
+export async function setUsageGroup(group) {
+  if (state.adminUsageGroup === group) return
+  state.adminUsageGroup = group
+  closeUsageRow()
+  await refreshUsage()
+}
+
+function closeUsageRow() {
+  state.adminUsageOpen = ''
+  state.adminUsageTrend = null
+}
+
+/**
+ * 展开/收起一行。再点同一行就是收起。
+ *
+ * 拆分（这个人用了哪些模型 / 这个模型被谁用了）已经在总表那一行里，界面直接画；
+ * 这里只去取**按天曲线**，因为那是唯一一份总表没带的数据。
+ */
+export async function openUsageRow(key) {
+  if (state.adminUsageOpen === key) return closeUsageRow()
+
+  state.adminUsageOpen = key
+  state.adminUsageTrend = null
+  state.adminUsageTrendLoading = true
+  try {
+    state.adminUsageTrend = state.adminUsageGroup === 'model'
+      ? await api.adminModelTrend(key, state.adminUsageDays)
+      : await api.adminUserTrend(key, state.adminUsageDays)
+  } catch (error) {
+    state.adminUsageOpen = ''
+    state.adminNote = `${key} 的用量趋势加载失败：${error.message}`
+    state.adminNoteWarn = true
+  } finally {
+    state.adminUsageTrendLoading = false
+  }
+}
+
+/** 切页。用量那一页第一次进来才取数，来回切不重复请求 */
+export async function setAdminTab(tab) {
+  state.adminTab = tab
+  if (tab === 'usage' && !state.adminUsage) await refreshUsage()
+}
+
 /**
  * 三个管理动作的公共出口：跑完都要刷新清单。
  *
@@ -1247,6 +1350,12 @@ export function logout() {
   // 角色跟着清：不清的话，换个人登录进来会先看到上一个人的管理员入口
   state.account = null
   state.adminUsers = []
+  // 用量是按人名列出来的，属于上一个人才看得到的东西：跟账号清单一起清
+  state.adminUsage = null
+  state.adminUsageOpen = ''
+  state.adminUsageTrend = null
+  state.adminUsageGroup = 'user'
+  state.adminTab = 'users'
   state.view = 'chat'
   state.sessions = []
   state.turns = []

@@ -68,7 +68,7 @@ function buildConfig() {
 /** 每个用例前把上一条留下的东西清干净，两边各按各的方式 */
 async function wipe(driver, storage) {
   if (driver !== 'mysql') return storage.reset()
-  for (const table of ['ap_kv', 'ap_doc', 'ap_artifact_file']) {
+  for (const table of ['ap_kv', 'ap_doc', 'ap_artifact_file', 'ap_usage']) {
     await storage.pool.query(`DELETE FROM ${table}`)
   }
   return undefined
@@ -386,6 +386,144 @@ forEachDriver('分享与市场', ({ config, storage }) => {
     const token = (await shares.create({ username: 'zhangsan', artifactId: meta.id })).share.token
     await artifacts.remove({ username: 'zhangsan', id: meta.id })
     assert.equal(await shares.open(token), null)
+  })
+})
+
+/* ═══════════════ Token 用量台账 ═══════════════ */
+
+forEachDriver('token 用量', ({ storage }) => {
+  const ledger = () => storage().usage
+
+  /** 一行账。`createdAt` 只有用例传（生产走 UTC_TIMESTAMP()），为的是测得了时间窗 */
+  const row = (over = {}) => ({
+    username: 'zhangsan', runId: `run_${Math.random().toString(36).slice(2)}`,
+    source: 'web', modelId: 'gpt-4o', input: 100, output: 20, cacheRead: 5, durationMs: 1200,
+    ...over,
+  })
+
+  const DAY = 24 * 60 * 60 * 1000
+
+  /**
+   * 交叉表是这一层的**唯一**汇总入口：按人看和按模型看都是它的转置
+   * （在 telemetry/usage-store.js 里做）。所以这里钉的是"一个人 + 一个模型 = 一行"。
+   */
+  test('用户 × 模型：一个组合一行，次数、三种 token、最近一次', async () => {
+    await ledger().record(row({ modelId: 'gpt-4o', input: 100, output: 20, cacheRead: 5 }))
+    await ledger().record(row({ modelId: 'gpt-4o', input: 300, output: 40, cacheRead: 0 }))
+    await ledger().record(row({ modelId: 'tiny', input: 11, output: 2 }))
+    await ledger().record(row({ username: 'lisi', modelId: 'gpt-4o', input: 7, output: 3 }))
+
+    const rows = await ledger().byUserAndModel()
+    assert.equal(rows.length, 3, '张三两个模型两行 + 李四一行')
+
+    const mine = rows.find((item) => item.username === 'zhangsan' && item.modelId === 'gpt-4o')
+    assert.equal(mine.runs, 2)
+    assert.equal(mine.input, 400)
+    assert.equal(mine.output, 60)
+    assert.equal(mine.cacheRead, 5)
+    // **必须是 number**：mysql2 把 SUM() 回成字符串，不收口的话上层一相加就变成拼接
+    assert.equal(typeof mine.input, 'number')
+    assert.equal(typeof mine.lastAt, 'string', '时间统一 ISO 串')
+
+    assert.deepEqual(
+      rows.map((item) => [item.username, item.modelId]),
+      [['zhangsan', 'gpt-4o'], ['zhangsan', 'tiny'], ['lisi', 'gpt-4o']],
+      '按总 token 降序',
+    )
+  })
+
+  test('一行都没有时回空数组，不是抛，也不是一堆 0', async () => {
+    assert.deepEqual(await ledger().byUserAndModel(), [])
+    assert.deepEqual(await ledger().dailyForUser({ username: 'zhangsan' }), [])
+    assert.deepEqual(await ledger().dailyForModel({ modelId: 'gpt-4o' }), [])
+  })
+
+  test('同一个 runId 记两次只算一次 —— 重放不该把账记两遍', async () => {
+    const once = row({ runId: 'run_fixed', input: 100, output: 20 })
+    await ledger().record(once)
+    await ledger().record({ ...once, input: 999999 })
+
+    const [mine] = await ledger().byUserAndModel()
+    assert.equal(mine.runs, 1)
+    assert.equal(mine.input, 100, '第二次是原样忽略，不是覆盖')
+  })
+
+  test('时间窗只算窗内的行', async () => {
+    const now = Date.now()
+    await ledger().record(row({ input: 10, output: 1, createdAt: new Date(now - 20 * DAY) }))
+    await ledger().record(row({ input: 500, output: 5, createdAt: new Date(now - 2 * DAY) }))
+
+    const recent = await ledger().byUserAndModel({ since: new Date(now - 7 * DAY) })
+    assert.equal(recent[0].runs, 1)
+    assert.equal(recent[0].input, 500)
+
+    const all = await ledger().byUserAndModel({ since: null })
+    assert.equal(all[0].runs, 2, 'since=null 表示不限时间')
+    assert.equal(all[0].input, 510)
+  })
+
+  /** 模型 id 是网关给的字符串，不是路径段：`vendor/name:tag` 这种写法要存得下、查得回 */
+  test('模型 id 里的斜杠、冒号、点原样往返', async () => {
+    const weird = 'vendor/claude-opus-5:thinking@2026-05'
+    await ledger().record(row({ modelId: weird, input: 42, output: 8 }))
+    const [only] = await ledger().byUserAndModel()
+    assert.equal(only.modelId, weird)
+    assert.equal((await ledger().dailyForModel({ modelId: weird }))[0].input, 42)
+  })
+
+  /** 模型 id 空串是一个正经的取值（老数据、或者网关没给），不能被当成"不筛" */
+  test('空模型 id 自己算一组', async () => {
+    await ledger().record(row({ modelId: '', input: 5, output: 1 }))
+    await ledger().record(row({ modelId: 'gpt-4o', input: 50, output: 10 }))
+
+    const rows = await ledger().byUserAndModel()
+    assert.deepEqual(rows.map((item) => item.modelId), ['gpt-4o', ''])
+    assert.equal((await ledger().dailyForModel({ modelId: '' }))[0].input, 5)
+  })
+
+  test('按天：UTC 的天、旧到新、只含这个人的', async () => {
+    const day = (iso) => new Date(`${iso}T06:00:00.000Z`)
+    await ledger().record(row({ input: 5, output: 1, createdAt: day('2026-03-02') }))
+    await ledger().record(row({ input: 7, output: 2, createdAt: day('2026-03-01') }))
+    await ledger().record(row({ input: 9, output: 3, createdAt: day('2026-03-01') }))
+    await ledger().record(row({ username: 'lisi', input: 1000, createdAt: day('2026-03-01') }))
+
+    const daily = await ledger().dailyForUser({ username: 'zhangsan' })
+    assert.deepEqual(daily.map((item) => item.day), ['2026-03-01', '2026-03-02'])
+    assert.deepEqual(
+      daily.map((item) => [item.runs, item.input, item.output]),
+      [[2, 16, 5], [1, 5, 1]],
+    )
+  })
+
+  /** "换了模型之后这个人的用量变了吗" —— 要能只看他在某一个模型上的曲线 */
+  test('按天可以只看一个模型；不传模型 = 全部模型加起来', async () => {
+    const day = (iso) => new Date(`${iso}T06:00:00.000Z`)
+    await ledger().record(row({ modelId: 'gpt-4o', input: 100, output: 10, createdAt: day('2026-03-01') }))
+    await ledger().record(row({ modelId: 'tiny', input: 5, output: 1, createdAt: day('2026-03-01') }))
+
+    const onlyBig = await ledger().dailyForUser({ username: 'zhangsan', modelId: 'gpt-4o' })
+    assert.deepEqual(onlyBig.map((item) => [item.runs, item.input]), [[1, 100]])
+
+    const both = await ledger().dailyForUser({ username: 'zhangsan' })
+    assert.deepEqual(both.map((item) => [item.runs, item.input]), [[2, 105]], '空 modelId 表示不筛')
+  })
+
+  test('一个模型的按天：全体用户合起来', async () => {
+    const day = (iso) => new Date(`${iso}T06:00:00.000Z`)
+    await ledger().record(row({ modelId: 'gpt-4o', input: 100, output: 10, createdAt: day('2026-03-01') }))
+    await ledger().record(row({ username: 'lisi', modelId: 'gpt-4o', input: 20, output: 2, createdAt: day('2026-03-01') }))
+    await ledger().record(row({ username: 'lisi', modelId: 'tiny', input: 999, createdAt: day('2026-03-01') }))
+
+    const daily = await ledger().dailyForModel({ modelId: 'gpt-4o' })
+    assert.deepEqual(daily.map((item) => [item.day, item.runs, item.input]), [['2026-03-01', 2, 120]])
+  })
+
+  /** username 是主键的一部分，两边都必须过同一道字符集检查（隔离契约 #4） */
+  test('用户名不合法当场拒绝，两个后端一样', async () => {
+    await assert.rejects(() => ledger().record(row({ username: '../etc' })), /不能作为目录名/)
+    await assert.rejects(() => ledger().dailyForUser({ username: '..' }), /不能作为目录名/)
+    await assert.rejects(() => ledger().dailyForUser({ username: 'a/b' }), /不能作为目录名/)
   })
 })
 

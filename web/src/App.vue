@@ -87,6 +87,22 @@ onBeforeUnmount(() => {
   <MarketPage v-else-if="route?.name === 'market'" standalone />
 
   <LoginOverlay v-else-if="state.needLogin" />
+
+  <!--
+    ── 管理台是整个窗口，不是正文区里的一块 ──────────────────────────────
+    它和下面那套外壳并列，**不带会话列表**。
+    理由是这一页的活与对话无关：看的是一张要横向比较的表（用户名、角色、几列数字、
+    一排操作按钮），而会话列表在旁边占着 260px，只是把每一行挤窄。
+    别的视图（作品库、市场）留着侧栏是有道理的 —— 那两处经常"看一眼就跳回某条对话"；
+    管人和对账不是那种来回切的活，进来就是要专心看完。
+
+    AppDialog 必须跟着挂：禁用账号、改角色都要先问一次，而问的那个框在这一层。
+  -->
+  <div v-else-if="state.view === 'admin'" class="layout">
+    <AdminConsole />
+    <AppDialog />
+  </div>
+
   <div v-else class="layout" :class="{ 'sidebar-collapsed': state.sidebarCollapsed }">
     <AppSidebar />
     <!--
@@ -95,7 +111,6 @@ onBeforeUnmount(() => {
     -->
     <ArtifactLibrary v-if="state.view === 'artifacts'" />
     <MarketPage v-else-if="state.view === 'market'" />
-    <AdminConsole v-else-if="state.view === 'admin'" />
     <ChatThread v-else />
 
     <SkillsPanel v-if="state.panel === 'skills'" />

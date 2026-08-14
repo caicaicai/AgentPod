@@ -15,20 +15,41 @@
  * 所以现在只有一条路。代价必须写明白：**跑起这个服务需要一个 MySQL**，
  * 本地开发也一样（`docker compose --profile dev up -d mysql` 或任意一个 MySQL 8）。
  *
- * ── 它提供三种能力，上层只认这三种 ──────────────────────────────────────
+ * ── 它提供四种能力，上层只认这四种 ──────────────────────────────────────
  *
  *   mapFor / globalMap   按 id 存一个小 JSON（项目、定时任务、作品元信息、
  *                        分享指针、账号）
  *   docs                 一整篇文档（长期记忆 MEMORY.md）
  *   blobs                作品每一版的文件正文
+ *   usage                token 用量台账：只追加的明细行 + 按人/按天/按模型的汇总
  *
- * 这三种之外的东西不要往这儿加。尤其是**会话工作区与用户技能**：它们要被整目录
+ * 这四种之外的东西不要往这儿加。尤其是**会话工作区与用户技能**：它们要被整目录
  * stage 进沙盒、大小没有上限，属于共享文件系统的活（见 src/workspace/store.js），
  * 与本模块无关。
+ *
+ * `usage` 是后来加的第四种，不是把前三种当橡皮筋抻开：它要的是"按时间窗跨用户
+ * 分组求和"，那是 SQL 的活，用 mapFor 实现等于把整张表读进内存自己加一遍 ——
+ * 而那正是它在生产上会先垮掉的地方。
  */
 import { createMysqlMap, listOwners } from './mysql-map.js'
 import { createPool, ensureSchema } from './mysql.js'
 import { assertSegment } from './paths.js'
+
+/**
+ * 汇总行的收口。
+ *
+ * mysql2 把 `SUM()` 的结果当 DECIMAL 回成**字符串**（'12345'），`MAX(datetime)`
+ * 回成 Date。不收口的话，两个数相加会变成字符串拼接（'12'+'34'='1234'），
+ * 而这种错在小数字上看起来只是"这个人用得有点多"。JSON 出去的时间统一 ISO 串。
+ */
+function toBucket(row) {
+  const out = { ...row }
+  for (const key of ['runs', 'input', 'output', 'cacheRead']) {
+    if (key in out) out[key] = Number(out[key]) || 0
+  }
+  if ('lastAt' in out) out.lastAt = out.lastAt ? new Date(out.lastAt).toISOString() : null
+  return out
+}
 
 /**
  * 建后端：连库 + 建表。
@@ -171,6 +192,102 @@ export async function createStorage({ config, logger = console, pool: sharedPool
           [username, id, Number(version)],
         )
         return rows.map((row) => row.path)
+      },
+    },
+
+    /**
+     * Token 用量台账。
+     *
+     * ⚠️ 汇总一律在 SQL 里做（SUM + GROUP BY），不把明细行捞回 Node 再加。
+     * 一个跑了半年的部署有几十万行，捞回来加一遍的代价全落在管理员点开那一页的
+     * 那几秒里 —— 而那几秒会随时间线性变长，上线时看不出来。
+     *
+     * `since` 是 Date 或 null（null = 不限时间）。所有时间按 UTC 进出
+     * （连接上 timezone='Z'，见 mysql.js），所以"按天分组"分的是 UTC 的天。
+     */
+    usage: {
+      /**
+       * 记一行。**幂等**：同一个 runId 记第二次原样忽略（`INSERT IGNORE`），
+       * 不是覆盖 —— 一次 run 的用量跑完就定了，第二次调用只可能是重放。
+       */
+      async record({
+        username, runId, source = 'web', modelId = '',
+        input = 0, output = 0, cacheRead = 0, durationMs = 0, createdAt = null,
+      }) {
+        assertSegment(username, 'username')
+        await pool.query(
+          'INSERT IGNORE INTO ap_usage'
+          + ' (username, run_id, source, model_id, input_tokens, output_tokens, cache_read_tokens, duration_ms, created_at)'
+          + ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, UTC_TIMESTAMP()))',
+          [
+            username, String(runId), String(source).slice(0, 32), String(modelId || '').slice(0, 128),
+            Math.max(0, Math.round(Number(input) || 0)),
+            Math.max(0, Math.round(Number(output) || 0)),
+            Math.max(0, Math.round(Number(cacheRead) || 0)),
+            Math.max(0, Math.round(Number(durationMs) || 0)),
+            /**
+             * 正常写入不传 createdAt，落 UTC_TIMESTAMP()。允许传是为了**契约用例
+             * 能测时间窗**（"上周的那几行不该算进最近 7 天"）—— 否则那条用例要
+             * 等一天才跑得出来，于是就没人写它。
+             */
+            createdAt ? new Date(createdAt) : null,
+          ],
+        )
+      },
+
+      /**
+       * **用户 × 模型**的交叉表，一次查完。
+       *
+       * 为什么是交叉表，而不是"按用户"和"按模型"两个各自 GROUP BY：
+       *
+       *   1. 上层要的两个视图（谁烧得最多 / 哪个模型烧得最多）**是同一份数据的两种
+       *      转置**。分成两个查询就有了两份汇总语义，迟早只改一份 —— 而对不上的
+       *      表现是"两页的总计差了一点"，谁也说不清哪页是对的。
+       *   2. 模型单价差一个数量级。要算钱，"这个人在这个模型上花了多少"才是最小
+       *      可计价单元；先按人加完再按模型加，中间那一步就把它丢了。
+       *
+       * 行数是**真的产生过用量的**组合数（不是账号数 × 模型数），
+       * 按人/按模型的转置在 telemetry/usage-store.js 里做，都是纯加法。
+       */
+      async byUserAndModel({ since = null } = {}) {
+        const [rows] = await pool.query(
+          'SELECT username, model_id AS modelId, COUNT(*) AS runs, SUM(input_tokens) AS input,'
+          + ' SUM(output_tokens) AS output, SUM(cache_read_tokens) AS cacheRead, MAX(created_at) AS lastAt'
+          + ' FROM ap_usage WHERE (? IS NULL OR created_at >= ?) GROUP BY username, model_id'
+          + ' ORDER BY (SUM(input_tokens) + SUM(output_tokens)) DESC',
+          [since, since],
+        )
+        return rows.map(toBucket)
+      },
+
+      /**
+       * 一个用户的按天明细，旧到新 —— 画趋势要的是这个顺序。
+       *
+       * 带 modelId 就只看这个人在这个模型上的趋势（"换了模型之后用量变了吗"），
+       * 不带就是他全部模型加起来。
+       */
+      async dailyForUser({ username, modelId = '', since = null }) {
+        assertSegment(username, 'username')
+        const [rows] = await pool.query(
+          'SELECT DATE_FORMAT(created_at, \'%Y-%m-%d\') AS day, COUNT(*) AS runs,'
+          + ' SUM(input_tokens) AS input, SUM(output_tokens) AS output, SUM(cache_read_tokens) AS cacheRead'
+          + ' FROM ap_usage WHERE username = ? AND (? = \'\' OR model_id = ?) AND (? IS NULL OR created_at >= ?)'
+          + ' GROUP BY day ORDER BY day ASC',
+          [username, String(modelId || ''), String(modelId || ''), since, since],
+        )
+        return rows.map(toBucket)
+      },
+
+      /** 一个模型的按天明细（全体用户合起来）。看的是"这个模型的量在往哪走" */
+      async dailyForModel({ modelId, since = null }) {
+        const [rows] = await pool.query(
+          'SELECT DATE_FORMAT(created_at, \'%Y-%m-%d\') AS day, COUNT(*) AS runs,'
+          + ' SUM(input_tokens) AS input, SUM(output_tokens) AS output, SUM(cache_read_tokens) AS cacheRead'
+          + ' FROM ap_usage WHERE model_id = ? AND (? IS NULL OR created_at >= ?)'
+          + ' GROUP BY day ORDER BY day ASC',
+          [String(modelId || ''), since, since],
+        )
+        return rows.map(toBucket)
       },
     },
 

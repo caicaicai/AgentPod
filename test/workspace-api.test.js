@@ -135,6 +135,9 @@ describe('能力宣告', () => {
       // 界面靠它们决定画不画注册入口与用户管理
       accounts: false,
       register: false,
+      // 也没接用量台账（它的用例在 accounts-api.test.js 里）。同上：字段要在，
+      // 管理台靠它决定画不画「Token 用量」那一页
+      usage: false,
     })
   })
 

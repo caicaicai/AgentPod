@@ -274,6 +274,20 @@ export const api = {
   adminCreateUser: (body) => request('/v1/admin/users', { method: 'POST', body }),
   adminPatchUser: (username, body) =>
     request(`/v1/admin/users/${encodeURIComponent(username)}`, { method: 'PATCH', body }),
+  /**
+   * Token 用量。`days=0` 表示不限时间，`group` 是 'user' 或 'model'。
+   *
+   * 回的只有聚合数（次数 / 输入 / 输出 / 缓存读入 / 最近一次），**没有任何对话内容** ——
+   * 服务端也是这么实现的，不是靠前端不显示。
+   *
+   * 每行都带着另一维的拆分（用户行带 `models`、模型行带 `users`），所以展开一行
+   * 不需要再请求一次；下面两个只用来取**按天曲线**。
+   */
+  adminUsage: (days, group) => request(`/v1/admin/usage${q({ days, group })}`),
+  adminUserTrend: (username, days, modelId) =>
+    request(`/v1/admin/usage/user/${encodeURIComponent(username)}${q({ days, modelId })}`),
+  adminModelTrend: (modelId, days) =>
+    request(`/v1/admin/usage/model/${encodeURIComponent(modelId)}${q({ days })}`),
   models: (refresh = false) => request(`/v1/models${refresh ? '?refresh=1' : ''}`),
   skills: () => request('/v1/skills'),
 

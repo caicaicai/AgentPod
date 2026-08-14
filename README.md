@@ -317,6 +317,15 @@ otherwise "does this username exist" leaks through response timing, which is ste
 | GET | `/v1/admin/users` | List accounts (admin only) |
 | POST | `/v1/admin/users` | Admin creates an account |
 | PATCH | `/v1/admin/users/:name` | `{ disabled, role, newPassword }`. Disabling **keeps the data**; you cannot disable yourself or drop your own admin role (nobody might be left who can undo it) |
+| GET | `/v1/admin/usage` | Token usage, admin only. `?days=30` is the window (`days=0` = all time); `?group=user` (default) gives a row per account carrying the models it used, `?group=model` gives a row per model carrying the accounts that used it. Both are transposes of one **account × model** cross-tab, so the totals are identical either way. Accounts that never ran anything still get a row of zeros — otherwise "never used it" and "doesn't exist" look identical |
+| GET | `/v1/admin/usage/user/:name` | One account's per-day series; `?modelId=` narrows it to a single model |
+| GET | `/v1/admin/usage/model/:modelId` | One model's per-day series across all accounts |
+
+Usage is attributed **per model, not just per account** — model prices differ by an order of
+magnitude, so "this user spent 8M tokens" is unbillable on its own. `cache_read_tokens` is a
+separate column for the same reason: it is priced differently from fresh input, so it is never
+folded into the headline total. All three endpoints return aggregates only — **no conversation
+content passes through them**.
 
 ### Chat
 
@@ -452,7 +461,7 @@ src/                    Core agent service
 ├── tools/              Extended tools (task plan, browser, memory, cron)
 ├── persistence/        File-based storage primitives
 ├── credentials/        Credential broker
-└── telemetry/          Metrics collection
+└── telemetry/          In-process metrics + the persisted per-user token usage ledger
 
 web/                    Chat UI (Vue 3 + Vite)
 ├── src/stores/         Global state (reactive singleton)

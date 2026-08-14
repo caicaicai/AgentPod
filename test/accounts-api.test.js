@@ -18,6 +18,7 @@ import assert from 'node:assert/strict'
 import { createServer } from '../src/http/server.js'
 import { createIdentityResolver } from '../src/identity/index.js'
 import { createUserStore } from '../src/identity/user-store.js'
+import { createUsageStore } from '../src/telemetry/usage-store.js'
 import { createMemoryStorage } from './helpers/memory-storage.js'
 import { createMemorySessionStore } from './helpers/memory-session-store.js'
 
@@ -71,6 +72,8 @@ async function startServer(config = buildConfig()) {
     scheduler: { enabled: false, runNow: async () => ({ ok: true }) },
     llmInfoClient: null,
     metrics: { snapshot: () => ({}) },
+    // 用量台账走同一个存储替身：接口那一层要测的是鉴权与拼装，不是 SQL
+    usage: createUsageStore({ storage, logger: silentLogger }),
   })
   await app.listen(0)
   return { app, base: `http://127.0.0.1:${app.server.address().port}`, users }
@@ -319,10 +322,234 @@ describe('管理员接口', () => {
   })
 })
 
+/**
+ * ── Token 用量 ──────────────────────────────────────────────────────────
+ *
+ * 这一组关心三件事，都是"只经过 HTTP 才犯得到"的错：
+ *
+ *   1. **越权** —— 用量是按人名列出来的，普通用户看得到就等于看得到别人在干多少活；
+ *   2. **拼装** —— 没跑过 run 的账号也要有一行（0），否则"没用过"和"不存在"
+ *      在界面上长得一样；
+ *   3. **不该出去的不出去** —— 这个接口一个字的对话内容都不该带。
+ */
+describe('Token 用量', () => {
+  const DAY = 24 * 60 * 60 * 1000
+
+  /** 直接往存储替身里塞账，不必真跑一轮模型 */
+  const seed = (over) => storage.usage.record({
+    username: 'admin', runId: `run_${Math.random().toString(36).slice(2)}`,
+    source: 'web', modelId: 'gpt-4o', input: 100, output: 20, cacheRead: 5, durationMs: 900,
+    ...over,
+  })
+
+  test('管理员能看到总表：每个账号一行，没用过的是 0', async () => {
+    const admin = await asAdmin()
+    await call('POST', '/v1/admin/users', { token: admin, body: { username: 'bob', password: 'bob-password' } })
+    await seed({ input: 1000, output: 200 })
+
+    const { status, body } = await call('GET', '/v1/admin/usage', { token: admin })
+    assert.equal(status, 200)
+    assert.equal(body.enabled, true)
+    assert.equal(body.group, 'user', '默认按用户看')
+    assert.equal(body.total.tokens, 1200, 'tokens = 输入 + 输出，缓存读入单列')
+    assert.equal(body.total.cacheRead, 5)
+
+    const rows = new Map(body.users.map((row) => [row.username, row]))
+    assert.equal(rows.get('admin').tokens, 1200)
+    assert.equal(rows.get('admin').role, 'admin', '角色一起带上，省得前端再连一次表')
+    assert.ok(rows.has('bob'), '一次都没跑过的账号也要在表里')
+    assert.equal(rows.get('bob').tokens, 0)
+    assert.equal(rows.get('bob').runs, 0)
+    assert.equal(rows.get('bob').lastAt, null)
+
+    assert.deepEqual(body.users.map((row) => row.username), ['admin', 'bob'], '按用量降序')
+  })
+
+  /**
+   * ── 模型这一维 ──
+   * 用量必须能按模型看：模型单价差一个数量级，"这个人用了 800 万 token"
+   * 不带模型是笔糊涂账，将来要计费更是直接算不出来。
+   */
+  test('每个用户行都带着他用过的模型 —— 不用点开就看得到', async () => {
+    const admin = await asAdmin()
+    await seed({ modelId: 'claude-opus-5', input: 1000, output: 200 })
+    await seed({ modelId: 'claude-haiku-4-5', input: 40, output: 10 })
+
+    const { body } = await call('GET', '/v1/admin/usage', { token: admin })
+    const mine = body.users.find((row) => row.username === 'admin')
+    assert.deepEqual(
+      mine.models.map((row) => [row.modelId, row.tokens]),
+      [['claude-opus-5', 1200], ['claude-haiku-4-5', 50]],
+      '大的在前',
+    )
+    assert.equal(mine.models.reduce((sum, row) => sum + row.tokens, 0), mine.tokens, '拆分要加得回这一行的总数')
+  })
+
+  test('group=model 换成按模型看，合计与按用户看**完全一致**', async () => {
+    const admin = await asAdmin()
+    await call('POST', '/v1/admin/users', { token: admin, body: { username: 'bob', password: 'bob-password' } })
+    await seed({ modelId: 'claude-opus-5', input: 1000, output: 200 })
+    await seed({ username: 'bob', modelId: 'claude-opus-5', input: 300, output: 60 })
+    await seed({ username: 'bob', modelId: 'claude-haiku-4-5', input: 40, output: 10 })
+
+    const asUser = await call('GET', '/v1/admin/usage?days=30', { token: admin })
+    const asModel = await call('GET', '/v1/admin/usage?days=30&group=model', { token: admin })
+
+    assert.equal(asModel.body.group, 'model')
+    assert.deepEqual(
+      asModel.body.models.map((row) => [row.modelId, row.tokens]),
+      [['claude-opus-5', 1560], ['claude-haiku-4-5', 50]],
+    )
+    assert.deepEqual(asModel.body.models[0].users.map((row) => row.username), ['admin', 'bob'], '谁在用这个模型')
+    // 换个维度总数就变了是这个功能最难查的错：两页都在，谁也说不清哪页是对的
+    assert.deepEqual(asModel.body.total, asUser.body.total)
+  })
+
+  test('乱填的 group 退回按用户，不报错', async () => {
+    const admin = await asAdmin()
+    await seed({})
+    const { status, body } = await call('GET', '/v1/admin/usage?group=whatever', { token: admin })
+    assert.equal(status, 200)
+    assert.equal(body.group, 'user')
+  })
+
+  test('days 是时间窗，0 表示全部；乱填退回默认 30 天而不是报错', async () => {
+    const admin = await asAdmin()
+    await seed({ input: 10, output: 1, createdAt: new Date(Date.now() - 40 * DAY) })
+    await seed({ input: 500, output: 50, createdAt: new Date(Date.now() - 2 * DAY) })
+
+    const week = await call('GET', '/v1/admin/usage?days=7', { token: admin })
+    assert.equal(week.body.total.tokens, 550)
+    assert.ok(week.body.since, '有窗就要把起点回出去，界面要显示"统计自"')
+
+    const all = await call('GET', '/v1/admin/usage?days=0', { token: admin })
+    assert.equal(all.body.total.tokens, 561)
+    assert.equal(all.body.since, null, 'days=0 = 不限时间')
+
+    const junk = await call('GET', '/v1/admin/usage?days=abc', { token: admin })
+    assert.equal(junk.status, 200, '一个查询参数填错不值得回 400')
+    assert.equal(junk.body.total.tokens, 550, '退回默认的 30 天')
+  })
+
+  test('展开一个人：按天曲线，可以只看某一个模型', async () => {
+    const admin = await asAdmin()
+    await seed({ modelId: 'gpt-4o', input: 100, output: 10, createdAt: new Date('2026-03-01T06:00:00Z') })
+    await seed({ modelId: 'tiny', input: 5, output: 1, createdAt: new Date('2026-03-02T06:00:00Z') })
+
+    const all = await call('GET', '/v1/admin/usage/user/admin?days=0', { token: admin })
+    assert.equal(all.status, 200)
+    assert.deepEqual(all.body.daily.map((row) => row.day), ['2026-03-01', '2026-03-02'])
+    assert.equal(all.body.total.tokens, 116)
+
+    const onlyBig = await call('GET', '/v1/admin/usage/user/admin?days=0&modelId=gpt-4o', { token: admin })
+    assert.deepEqual(onlyBig.body.daily.map((row) => [row.day, row.tokens]), [['2026-03-01', 110]])
+    assert.equal(onlyBig.body.modelId, 'gpt-4o', '把筛的是哪个模型回出去，界面照着写标题')
+  })
+
+  test('展开一个模型：全体用户合起来的按天曲线', async () => {
+    const admin = await asAdmin()
+    await call('POST', '/v1/admin/users', { token: admin, body: { username: 'bob', password: 'bob-password' } })
+    await seed({ modelId: 'claude-opus-5', input: 100, output: 10, createdAt: new Date('2026-03-01T06:00:00Z') })
+    await seed({ username: 'bob', modelId: 'claude-opus-5', input: 20, output: 2, createdAt: new Date('2026-03-01T06:00:00Z') })
+
+    const { status, body } = await call('GET', '/v1/admin/usage/model/claude-opus-5?days=0', { token: admin })
+    assert.equal(status, 200)
+    assert.deepEqual(body.daily.map((row) => [row.day, row.runs, row.tokens]), [['2026-03-01', 2, 132]])
+  })
+
+  /**
+   * 模型 id 是网关给的字符串，`vendor/name:tag` 这种写法完全合法 ——
+   * 它**不能**过用户名那道字符集检查（那是给路径段用的）。
+   */
+  test('模型 id 里有斜杠和冒号也查得动', async () => {
+    const admin = await asAdmin()
+    const weird = 'vendor/claude-opus-5:thinking'
+    await seed({ modelId: weird, input: 100, output: 10 })
+
+    const { status, body } = await call(
+      `GET`, `/v1/admin/usage/model/${encodeURIComponent(weird)}?days=0`, { token: admin },
+    )
+    assert.equal(status, 200)
+    assert.equal(body.modelId, weird)
+    assert.equal(body.total.tokens, 110)
+  })
+
+  test('普通用户看不到任何人的用量（包括自己那一行）', async () => {
+    const admin = await asAdmin()
+    await call('POST', '/v1/admin/users', { token: admin, body: { username: 'bob', password: 'bob-password' } })
+    const token = (await login('bob', 'bob-password')).body.token
+
+    assert.equal((await call('GET', '/v1/admin/usage', { token })).status, 403)
+    assert.equal((await call('GET', '/v1/admin/usage?group=model', { token })).status, 403)
+    assert.equal((await call('GET', '/v1/admin/usage/user/bob', { token })).status, 403)
+    assert.equal((await call('GET', '/v1/admin/usage/model/gpt-4o', { token })).status, 403)
+    assert.equal((await call('GET', '/v1/admin/usage')).status, 401, '不登录更不行')
+  })
+
+  test('查一个不存在的人回 404，用户名不合法回 400（不是 500）', async () => {
+    const admin = await asAdmin()
+    assert.equal((await call('GET', '/v1/admin/usage/user/ghost', { token: admin })).status, 404)
+    /**
+     * 名字不合法要落在 400 上。**不能用 `..` 来测这条** —— URL 解析器会把
+     * `%2e%2e` 当成上一级目录直接折掉（路径变成 /v1/admin/usage/），于是那次请求
+     * 根本到不了这个处理器，测的其实是 404 那条兜底。带空格的名字才真的走到这里。
+     */
+    const bad = await call('GET', '/v1/admin/usage/user/bad%20name', { token: admin })
+    assert.equal(bad.status, 400)
+    assert.match(bad.body.message, /用户名/)
+  })
+
+  /**
+   * 用户名和模型 id **不住在同一层**（`/usage/user/x` 与 `/usage/model/x`）。
+   * 住同一层的话，一个叫 `model` 的账号就能把另一条路由整条遮掉 ——
+   * 而那种坏法取决于谁先注册了这个用户名，排查时完全看不出与路由有关。
+   */
+  test('叫 model / user 的账号不会把路由遮掉', async () => {
+    const admin = await asAdmin()
+    await call('POST', '/v1/admin/users', { token: admin, body: { username: 'model', password: 'model-password' } })
+    await seed({ username: 'model', modelId: 'gpt-4o', input: 100, output: 10 })
+
+    const asUser = await call('GET', '/v1/admin/usage/user/model?days=0', { token: admin })
+    assert.equal(asUser.status, 200)
+    assert.equal(asUser.body.username, 'model')
+    assert.equal(asUser.body.total.tokens, 110)
+
+    const asModel = await call('GET', '/v1/admin/usage/model/gpt-4o?days=0', { token: admin })
+    assert.equal(asModel.status, 200)
+    assert.equal(asModel.body.modelId, 'gpt-4o')
+  })
+
+  test('查一个没有用量的模型回 404，不是一张空表', async () => {
+    const admin = await asAdmin()
+    await seed({ modelId: 'gpt-4o', input: 100, output: 10 })
+    assert.equal((await call('GET', '/v1/admin/usage/model/never-used?days=0', { token: admin })).status, 404)
+  })
+
+  /**
+   * 管理员该看得见成本，不该顺带看见别人写了什么。"顺带能看见"迟早会有人真的去看，
+   * 所以这条断言钉的是**字段清单本身**：将来谁往这个接口上加字段，会先撞到它。
+   */
+  test('只回聚合数，不带任何对话内容', async () => {
+    const admin = await asAdmin()
+    await seed({ input: 100, output: 20 })
+    const { body } = await call('GET', '/v1/admin/usage', { token: admin })
+    assert.deepEqual(
+      Object.keys(body.users[0]).sort(),
+      ['cacheRead', 'disabled', 'input', 'lastAt', 'models', 'output', 'role', 'runs', 'tokens', 'username'],
+    )
+    // 嵌进去的那一层同样只有数：模型名 + 用量，没有 sessionKey、没有正文
+    assert.deepEqual(
+      Object.keys(body.users[0].models[0]).sort(),
+      ['cacheRead', 'input', 'lastAt', 'modelId', 'output', 'runs', 'tokens'],
+    )
+  })
+})
+
 describe('能力宣告', () => {
   test('healthz 告诉界面画不画账号入口', async () => {
     const { body } = await call('GET', '/healthz')
     assert.equal(body.features.accounts, true)
     assert.equal(body.features.register, false, '默认不开放注册')
+    assert.equal(body.features.usage, true, '接了台账才画「Token 用量」那一页')
   })
 })

@@ -53,6 +53,33 @@ export function formatTurnStats(stats) {
   return parts.join(' · ')
 }
 
+/**
+ * Token 数。
+ *
+ * 千位分隔而不是 `1.2M`：管理台那张表是用来**对比几个人**的，缩写会把
+ * 980k 和 1.1M 摆成看起来差不多的两个短字符串，而它们差一个量级。
+ * 表格里配 `tabular-nums`，位数对齐之后长短本身就是信息。
+ */
+export function formatTokens(n) {
+  const value = Number(n) || 0
+  return value.toLocaleString('en-US')
+}
+
+/**
+ * 用量表里的"最近一次"。
+ *
+ * 与 formatTime 分开：那个函数今天之内只给时分（会话列表里够用，因为旁边就有
+ * 一句正文），而这里一列全是时间，只写 `09:30` 看不出是哪天。
+ */
+export function formatSince(ts) {
+  if (!ts) return '—'
+  const date = new Date(ts)
+  const days = Math.floor((Date.now() - date.getTime()) / 86400000)
+  if (days <= 0) return `今天 ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  if (days === 1) return `昨天 ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  return formatDateTime(ts)
+}
+
 /** 与服务端 describeSchedule 同口径。前端也要能独立渲染，不为一句话再加一个字段 */
 export function describeSchedule(schedule) {
   if (schedule?.cron) return `${schedule.cron}（${schedule.timezone || 'Asia/Shanghai'}）`
