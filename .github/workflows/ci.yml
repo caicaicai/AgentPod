@@ -11,6 +11,16 @@
 #
 # 拆开是为了让失败**一眼能归因**：红的是 lint、是服务端测试、还是前端构建，
 # 在列表上直接看得到，不用点进日志翻。三个可以并行，总时长取决于最慢的那个。
+#
+# ── @v5 和 node-version 是两回事，别混 ──────────────────────────────────
+#
+# actions/* 固定在 @v5，是因为 @v4 的 **action 自己**跑在 Node 20 运行时上，
+# GitHub 正在下线它（2026-09-16 从 runner 上移除），于是每次跑都挂一条
+# "Node.js 20 actions are deprecated"。@v5 换成了 Node 24 运行时。
+#
+# ⚠️ 那条告警说的**不是**下面的 `node-version: '20.19'`。前者是"跑 action 的
+# 那个 node"，后者是"跑我们代码的那个 node"，两者互不相干 —— 把 node-version
+# 改上去并不能让告警消失，只会悄悄把测试搬离 engines 声明的下限。
 name: CI
 
 on:
@@ -29,8 +39,8 @@ jobs:
     name: 代码检查
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '20.19'
           cache: npm
@@ -41,8 +51,8 @@ jobs:
     name: 服务端测试
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           # package.json 的 engines 写的是 >=20.11。**按下限跑** ——
           # 在最新版上跑只能证明"在最新版上能跑"，而部署环境未必是最新版。
@@ -77,8 +87,8 @@ jobs:
     name: 前端构建
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           # 前端的 engines 要求比服务端高（Vite 7 的下限）
           node-version: '20.19'
