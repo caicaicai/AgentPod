@@ -213,19 +213,15 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
 <template>
   <main class="admin">
     <header class="ad-head">
-      <button
-        v-if="state.sidebarCollapsed"
-        type="button"
-        class="icon-btn"
-        title="展开会话列表"
-        @click="state.sidebarCollapsed = false"
-      >
-        <AppIcon name="panel-open" :size="17" />
+      <!--
+        这一页占满整个窗口，没有会话列表，所以**这个按钮是唯一的出口** ——
+        它不能是一个只有图标的小按钮（那种在满屏的表格旁边找不着），
+        写清"返回对话"，并且是顶栏最左边第一个东西。Esc 也能退（见 App.vue）。
+      -->
+      <button type="button" class="ghost-btn back-btn" title="返回对话（Esc）" @click="closeAdmin">
+        <AppIcon name="chevron-right" :size="14" class="back" />返回对话
       </button>
-      <button type="button" class="ghost-btn" title="回到对话" @click="closeAdmin">
-        <AppIcon name="chevron-right" :size="14" class="back" />对话
-      </button>
-      <h1>管理员控制台</h1>
+      <h1><AppIcon name="shield" :size="15" />管理员控制台</h1>
 
       <nav class="tabs">
         <button type="button" :class="{ on: state.adminTab === 'users' }" @click="setAdminTab('users')">账号</button>
@@ -588,6 +584,11 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
 </template>
 
 <style scoped>
+/*
+  ── 整个窗口都是这一页 ──────────────────────────────────────────────────
+  App.vue 里它与「侧栏 + 正文」那套外壳并列，不在正文区里。所以这里要自己
+  撑满高度（外壳的 .layout 给了 100dvh，flex:1 拿到全部宽度）。
+*/
 .admin {
   display: flex;
   flex-direction: column;
@@ -602,17 +603,26 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
   gap: 10px;
   flex: 0 0 auto;
   height: var(--head-h);
-  padding: 0 16px;
+  padding: 0 20px;
   border-bottom: 1px solid var(--border);
 }
 .ad-head h1 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   margin: 0;
   font-size: 14.5px;
   font-weight: 600;
+  white-space: nowrap;
+}
+/* 出口要看得见：给它一道边，别让它像一句可点的说明文字 */
+.back-btn {
+  border: 1px solid var(--border);
 }
 .head-count {
   color: var(--muted-foreground);
   font-size: 12px;
+  white-space: nowrap;
 }
 .head-right {
   display: flex;
@@ -695,15 +705,27 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
   outline: none;
 }
 
+/*
+  ── 正文的宽度 ──────────────────────────────────────────────────────────
+
+  从 1080px 放到 1560px。这不是"能宽就宽"：
+
+  用量表有 8 列（主维 + 另一维 + 五个数字 + 时间），账号表的操作列里有三个按钮。
+  1080px 下这两张表都在**互相挤**：模型名被截成 `claude-sonn…`、三个操作按钮换行。
+  1560px 之后两张表都能一行放完，而这正是表格存在的理由 —— 横向比较。
+
+  仍然留一个上限、并且居中：一张表在 3440px 的屏上铺满，眼睛要从屏幕最左扫到
+  最右才能把一行读完，那比挤更难读。
+*/
 .ad-body {
   display: flex;
   flex-direction: column;
   gap: 14px;
   flex: 1;
   min-height: 0;
-  width: min(1080px, 100%);
+  width: min(1560px, 100%);
   margin: 0 auto;
-  padding: 18px 20px;
+  padding: 20px 24px 32px;
   overflow-y: auto;
 }
 
@@ -970,7 +992,7 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 260px;
+  max-width: 320px;
 }
 
 /*
@@ -986,7 +1008,7 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
 }
 .chip {
   display: inline-block;
-  max-width: 190px;
+  max-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
   vertical-align: bottom;
