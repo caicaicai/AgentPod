@@ -41,9 +41,21 @@ const props = defineProps({
   readonly: { type: Boolean, default: false },
   /** 只读宿主自己管加载态（store 那份 artifactLoading 与它无关） */
   loading: { type: Boolean, default: false },
+  /**
+   * 裸展示：**把这一份作品当成一个网页本身**，而不是"被我们的界面装着的一份内容"。
+   *
+   * 工具条、边框、圆角、外层留白全不画，正文直接铺满宿主给的那块地方。
+   * 分享页走这一条 —— 访客点开一条链接，期望看到的是作者做出来的那个东西，
+   * 不是套着一层站点框架的它。所有动作（切源码、看作者）由宿主自己安排在别处。
+   */
+  bare: { type: Boolean, default: false },
 })
 
-const tab = ref('preview')
+/**
+ * 预览还是源码。裸展示时宿主要能从外面切它（工具条不画了，按钮在宿主那边），
+ * 所以用 v-model 暴露出去；没人绑就退化成一个普通的局部状态。
+ */
+const tab = defineModel('tab', { type: String, default: 'preview' })
 /** 源码页看的是哪个文件。作品是多文件的，这一格才是"读它"的主要入口 */
 const activeFile = ref('')
 
@@ -240,8 +252,8 @@ watch(() => [meta.value?.id, detail.value?.version, tab.value].join(':'), clearP
 </script>
 
 <template>
-  <div v-if="meta" class="viewer" :class="{ roomy: props.roomy }">
-    <div class="toolbar">
+  <div v-if="meta" class="viewer" :class="{ roomy: props.roomy, bare: props.bare }">
+    <div v-if="!props.bare" class="toolbar">
       <div class="tabs">
         <button
           v-if="needsFrame(meta.kind)"
@@ -307,14 +319,17 @@ watch(() => [meta.value?.id, detail.value?.version, tab.value].join(':'), clearP
 
     <ShareBox v-if="shareOpen && !props.readonly" :meta="meta" @close="shareOpen = false" />
 
-    <p v-if="isOldVersion" class="note warn">
+    <p v-if="isOldVersion && !props.bare" class="note warn">
       你正在看第 {{ detail.version }} 版，最新的是第 {{ meta.version }} 版。
     </p>
     <!--
       预览构建失败（Vue 编译不过、mermaid 语法错）要在**外面**也说一句。
       沙箱内那份错误页用户看得到，但它在 iframe 里，复制不出来也搜不到。
+
+      裸展示时这一句不画：那一页上"没有我们的框"就是全部意义，为了一条
+      沙箱里已经写着的错误在页顶挂一根横条，是把它又贴回去了。
     -->
-    <p v-if="previewError && tab === 'preview'" class="note warn">{{ previewError }}</p>
+    <p v-if="previewError && tab === 'preview' && !props.bare" class="note warn">{{ previewError }}</p>
 
     <!--
       ⚠️ 这三支必须是**连着的一条 v-if 链**，中间不能插别的带 v-if 的元素。
@@ -423,6 +438,36 @@ watch(() => [meta.value?.id, detail.value?.version, tab.value].join(':'), clearP
   gap: 10px;
   flex: 1;
   min-height: 0;
+}
+
+/*
+  裸展示：把这个组件自己的痕迹全撤掉 —— 间距、边框、圆角、背景。
+  剩下的那一层 iframe 与页面同宽同高、四边到底，视觉上就是那份作品本身。
+  （iframe 撤不掉：它是隔离契约的第一道防线，见 ../artifact-view.js 的文件头。
+  但一个没有边框的满屏 iframe，跟直接渲染出来的页面是同一个样子。）
+*/
+.viewer.bare {
+  gap: 0;
+}
+.viewer.bare .preview-wrap {
+  min-height: 0;
+}
+.viewer.bare .preview-frame {
+  border: 0;
+  border-radius: 0;
+}
+.viewer.bare .source-wrap {
+  gap: 0;
+}
+.viewer.bare .filelist {
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+}
+.viewer.bare .source {
+  border: 0;
+  border-radius: 0;
+  padding: 20px 22px;
 }
 
 .note {
