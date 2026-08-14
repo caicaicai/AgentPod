@@ -48,7 +48,20 @@ jobs:
           # 在最新版上跑只能证明"在最新版上能跑"，而部署环境未必是最新版。
           node-version: '20.19'
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
       - run: npm ci
+
+      # `node --test` 会把 test/ 下的用例全扫进来，其中九个 import 了 web/src 下的
+      # 纯逻辑模块（route、format、highlight……）—— 前端那半边的行为也有人守着，
+      # 而不用起一个浏览器。它们绝大多数不依赖任何包，唯独 lib/dialog.js 要
+      # `reactive`（弹框状态得是响应式的，不然界面不跟着变），于是这一条把
+      # **整个服务端测试**卡在 Cannot find package 'vue' 上。
+      #
+      # 装一遍前端依赖比拆用例便宜：拆的话得再维护一套"哪些前端模块可以被服务端
+      # 测试碰"的规矩，而这条规矩没人看得见，下次照样踩。
+      - run: npm ci --prefix web
 
       # 隔离契约的静态校验。它排在测试**之前**：这条一旦破了，
       # 下面那些用例即使全绿也说明不了什么（见 scripts/check-isolation-rules.js）。

@@ -309,18 +309,17 @@ describe('凭据留存', () => {
   })
 
   /**
-   * Windows 不实现 POSIX 权限位：同一份文件 Node 一律报 0666，`chmod` 也改不动它。
-   * 这条守的是真实部署（linux 容器）上的性质，在 Windows 上**无从观测** ——
-   * 所以跳过，而不是把它改成一个在哪儿都成立、也就什么都不保证的断言。
+   * ⚠️ 这里从前有一条"落盘权限必须是 0600"。它已经**没有对应的性质了**：
+   * 凭据不再写本地盘，而是走 storage.docs 进库（原因见 src/cron/credentials.js
+   * 开头那段 —— 唯一一个写本地盘的状态会让多副本部署下"只有存过凭据的那台机器
+   * 上定时任务才跑得起来"）。挡住它的现在是数据库的访问控制，不是文件权限。
+   *
+   * 那条用例带着 `skip: process.platform === 'win32'`，而这个仓库平时只在
+   * Windows 上跑 —— 于是重构之后它一次都没有真正执行过，直到第一条 CI
+   * 在 ubuntu 上把它唤醒，报的是 ENOENT（文件根本不存在）。
+   *
+   * 不补一条"库里那行存在"的替代：上面"存得进、取得出、清得掉"已经覆盖了。
    */
-  test('落盘权限必须是 0600', { skip: process.platform === 'win32' ? 'Windows 没有 POSIX 权限位，此性质只在 linux 上可观测' : false }, async () => {
-    const { stat } = await import('node:fs/promises')
-    const vault = createCronCredentialVault({ storage: testStorage, config: { dataDir: root, cron: { credentialMode: 'stored' } }, logger: silentLogger,
-    })
-    await vault.remember({ username: 'zhangsan', credential: 'sso=abc' })
-    const mode = (await stat(path.join(root, 'users', 'zhangsan', 'cron-credential.json'))).mode & 0o777
-    assert.equal(mode, 0o600, `凭据文件权限应为 600，实际 ${mode.toString(8)}`)
-  })
 })
 
 describe('调度', () => {
