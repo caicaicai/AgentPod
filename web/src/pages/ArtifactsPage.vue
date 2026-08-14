@@ -1,17 +1,17 @@
 <script setup>
 import { computed } from 'vue'
 
-import AppIcon from './AppIcon.vue'
-import ArtifactViewer from './ArtifactViewer.vue'
-import { formatTime } from '../lib/format.js'
-import ArtifactWizard from './ArtifactWizard.vue'
+import AppIcon from '@/components/AppIcon.vue'
+import ArtifactViewer from '@/modules/artifacts/components/ArtifactViewer.vue'
+import { formatTime } from '@/lib/format.js'
+import ArtifactWizard from '@/modules/artifacts/components/ArtifactWizard.vue'
 import {
   ARTIFACT_RECIPES, KIND_META, filterArtifacts, kindIcon, kindLabel,
-} from '../lib/artifact-view.js'
+} from '@/modules/artifacts/artifact-view.js'
 import {
   closeArtifactDetail, closeLibrary, openArtifact, openArtifactSession, openWizard,
   refreshArtifacts, state,
-} from '../stores/app.js'
+} from '@/stores/app.js'
 
 /**
  * 作品库：跨会话的独立页面。

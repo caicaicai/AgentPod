@@ -1,11 +1,11 @@
 <script setup>
 import { computed, ref } from 'vue'
 
-import AppIcon from './AppIcon.vue'
-import SidePanel from './SidePanel.vue'
-import { cronAction, createCron, state } from '../stores/app.js'
-import { askConfirm } from '../lib/dialog.js'
-import { describeSchedule, formatDateTime, formatTime } from '../lib/format.js'
+import AppIcon from '@/components/AppIcon.vue'
+import SidePanel from '@/components/SidePanel.vue'
+import { cronAction, createCron, state } from '@/stores/app.js'
+import { askConfirm } from '@/lib/dialog.js'
+import { describeSchedule, formatDateTime, formatTime } from '@/lib/format.js'
 
 const FIRE_STATUS_TEXT = {
   ok: '成功', error: '失败', needs_reauth: '缺登录态', disabled: '已自动停用',

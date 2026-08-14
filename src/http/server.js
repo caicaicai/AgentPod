@@ -212,7 +212,7 @@ export function createServer({
    * 用 `text/html` 回，这个 URL 就成了一个**同源**的、内容由模型（也就可能由
    * 一封诱导邮件）决定的页面 —— 它能读走 localStorage 里的登录令牌。
    * 预览走的是另一条路：文件进 JSON，由前端拼好后塞进不带 allow-same-origin 的
-   * sandbox iframe（见 web/src/lib/artifact-view.js）。
+   * sandbox iframe（见 web/src/modules/artifacts/artifact-view.js）。
    * 所以这条不变量很值钱：**本服务从不以 HTML 的身份吐出任何模型生成的内容。**
    *
    * 抽成一个函数正是为了守住它：分享功能上线时这段逻辑差点被复制一份，

@@ -1,28 +1,40 @@
 <script setup>
+/**
+ * 外壳。**这里只做一件事：决定现在显示哪一页，以及页外面常驻着什么。**
+ *
+ * 页在 `pages/`，与 `lib/route.js` 里那几条地址一一对应；页里用到的零件在
+ * `modules/<领域>/`。这个文件不该出现任何"某一页内部怎么排"的逻辑 ——
+ * 它一长，就会变成那种谁都要改、谁都不敢改的文件。
+ *
+ * 三层外壳，从外到内：
+ *   访客（分享页 / 未登录的市场页）→ 登录框 → 管理台（整窗口）→ 侧栏 + 正文 + 抽屉
+ */
 import { onMounted, onBeforeUnmount } from 'vue'
 
-import AccountPanel from './components/AccountPanel.vue'
-import AdminConsole from './components/AdminConsole.vue'
-import AppDialog from './components/AppDialog.vue'
-import AppSidebar from './components/AppSidebar.vue'
-import ArtifactLibrary from './components/ArtifactLibrary.vue'
-import ArtifactPanel from './components/ArtifactPanel.vue'
-import ChatThread from './components/ChatThread.vue'
-import CronPanel from './components/CronPanel.vue'
-import DebugPanel from './components/DebugPanel.vue'
-import ImageLightbox from './components/ImageLightbox.vue'
-import LoginOverlay from './components/LoginOverlay.vue'
-import MarketPage from './components/MarketPage.vue'
-import MemoryPanel from './components/MemoryPanel.vue'
-import ProjectPanel from './components/ProjectPanel.vue'
-import SharePage from './components/SharePage.vue'
-import SkillsPanel from './components/SkillsPanel.vue'
+// 页面：与 lib/route.js 里那几条地址一一对应
+import AdminPage from '@/pages/AdminPage.vue'
+import ArtifactsPage from '@/pages/ArtifactsPage.vue'
+import ChatPage from '@/pages/ChatPage.vue'
+import MarketPage from '@/pages/MarketPage.vue'
+import SharePage from '@/pages/SharePage.vue'
+// 外壳上常驻的那几件：侧栏、抽屉、盖在最上面的登录框与灯箱
+import AppSidebar from '@/modules/sessions/components/AppSidebar.vue'
+import ProjectPanel from '@/modules/sessions/components/ProjectPanel.vue'
+import LoginOverlay from '@/modules/account/components/LoginOverlay.vue'
+import AccountPanel from '@/modules/account/components/AccountPanel.vue'
+import ArtifactPanel from '@/modules/artifacts/components/ArtifactPanel.vue'
+import CronPanel from '@/modules/panels/components/CronPanel.vue'
+import DebugPanel from '@/modules/panels/components/DebugPanel.vue'
+import MemoryPanel from '@/modules/panels/components/MemoryPanel.vue'
+import SkillsPanel from '@/modules/panels/components/SkillsPanel.vue'
+import AppDialog from '@/components/AppDialog.vue'
+import ImageLightbox from '@/components/ImageLightbox.vue'
 import {
   boot, closeAdmin, closeArtifactDetail, closeLibrary, closeMarket, closeWizard,
   hasStoredIdentity, saveDraft, state, stop,
-} from './stores/app.js'
-import { dialog } from './lib/dialog.js'
-import { parsePath } from './lib/route.js'
+} from '@/stores/app.js'
+import { dialog } from '@/lib/dialog.js'
+import { parsePath } from '@/lib/route.js'
 
 /**
  * 首屏落在哪条地址上。**只在这里判一次**：之后的来回导航由 store 里那套
@@ -108,7 +120,7 @@ onBeforeUnmount(() => {
     AppDialog 必须跟着挂：禁用账号、改角色都要先问一次，而问的那个框在这一层。
   -->
   <div v-else-if="state.view === 'admin'" class="layout">
-    <AdminConsole />
+    <AdminPage />
     <AppDialog />
   </div>
 
@@ -118,9 +130,9 @@ onBeforeUnmount(() => {
       作品库**替换**主区域而不是盖在上面：它是与对话并列的一个去处，
       不是对话的一个弹层。会话列表留着，方便从库里跳回某条对话。
     -->
-    <ArtifactLibrary v-if="state.view === 'artifacts'" />
+    <ArtifactsPage v-if="state.view === 'artifacts'" />
     <MarketPage v-else-if="state.view === 'market'" />
-    <ChatThread v-else />
+    <ChatPage v-else />
 
     <SkillsPanel v-if="state.panel === 'skills'" />
     <MemoryPanel v-else-if="state.panel === 'memory'" />

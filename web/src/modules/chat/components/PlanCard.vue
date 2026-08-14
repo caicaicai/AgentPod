@@ -1,7 +1,7 @@
 <script setup>
 import { computed } from 'vue'
 
-import AppIcon from './AppIcon.vue'
+import AppIcon from '@/components/AppIcon.vue'
 
 const props = defineProps({
   plan: { type: Object, required: true },

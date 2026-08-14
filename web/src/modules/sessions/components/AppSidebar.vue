@@ -1,14 +1,14 @@
 <script setup>
 import { computed } from 'vue'
 
-import AppIcon from './AppIcon.vue'
+import AppIcon from '@/components/AppIcon.vue'
 import SessionRow from './SessionRow.vue'
 import {
   createProject, deleteSession, getDevUsername, identityName, logout, openSession, patchSession,
   renameSession, scheduleSearch, setDevUsername, startNewSession, state, switchProject,
   toggleTheme, togglePanel, openLibrary, openMarket, openAdmin, isAdmin,
-} from '../stores/app.js'
-import { askConfirm, askText } from '../lib/dialog.js'
+} from '@/stores/app.js'
+import { askConfirm, askText } from '@/lib/dialog.js'
 
 /** 置顶的单独成组：它们是用户手动钉上去的，混在时间序里就等于没钉 */
 const pinned = computed(() => state.sessions.filter((s) => s.pinned))
@@ -326,7 +326,7 @@ function onDevUsernameChange(event) {
 
   ⚠️ 因此有一条约束：**每个能占据正文区的视图，顶栏都必须在 sidebarCollapsed
   时给出展开按钮**，否则用户会被关在一个再也打不开侧栏的页面里。
-  今天是 ChatThread 和 ArtifactLibrary 两个。
+  今天是 ChatPage 和 ArtifactsPage 两个。
 
   里面的内容用 visibility 藏掉（不是 display:none）：保持原来的宽度让它被裁掉，
   而不是在动画过程中重排一遍。

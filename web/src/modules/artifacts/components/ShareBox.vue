@@ -1,13 +1,13 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 
-import AppIcon from './AppIcon.vue'
-import { copyToClipboard } from '../lib/debug-bundle.js'
-import { shareUrl } from '../lib/route.js'
-import { askConfirm } from '../lib/dialog.js'
+import AppIcon from '@/components/AppIcon.vue'
+import { copyToClipboard } from '@/lib/debug-bundle.js'
+import { shareUrl } from '@/lib/route.js'
+import { askConfirm } from '@/lib/dialog.js'
 import {
   setArtifactMarket, shareArtifact, state, unshareArtifact,
-} from '../stores/app.js'
+} from '@/stores/app.js'
 
 /**
  * 分享面板：把一份作品变成一条链接，以及决定要不要把它挂到市场上。

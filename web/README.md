@@ -18,24 +18,65 @@ npm run dev       # Vite 起在 5273，把 /v1 与 /healthz 代理到 127.0.0.1:
 
 ## 结构
 
+**页面 + 模块**。一句话分工：`pages/` 是"能用地址打开的那几页"，`modules/` 是"一个领域自己的东西"，
+`components/` 与 `lib/` 是"谁都可能用的东西"。
+
 ```
 src/
-  main.js              入口
-  App.vue              布局：侧栏 + 对话区 + 右侧抽屉
-  stores/app.js        全局状态与动作（reactive 单例，没引状态库）
-  lib/
-    api.js             接口封装 · SSE 流 · 401 跳 SSO（含防转圈标记）
-    route.js           地址 ↔ 界面状态（两个纯函数，没引路由库）
-    attachments.js     附件：读文件、判类型、以及把历史里拼进正文的附件折回 chip
-    markdown.js        极简 markdown（先整体转义再变换）
-    debug-bundle.js    「复制调试信息」——里面绝不放凭据，见文件头
-    tools.js           工具卡片与任务清单的展示规则
-    format.js          时间与本轮统计的文案
-  components/          侧栏 · 会话行 · 对话区 · 消息 · 工具卡片 · 任务清单 · 输入区 · 各抽屉
+  main.js                     入口
+  App.vue                     外壳：选哪一页 + 页外面常驻的侧栏与抽屉
+
+  pages/                      ⇦ 与 lib/route.js 里那几条地址一一对应
+    ChatPage.vue              /  和 /c/<key>
+    ArtifactsPage.vue         /artifacts
+    MarketPage.vue            /market（也是访客直接打开的那页）
+    AdminPage.vue             /admin/<tab>
+    SharePage.vue             /s/<token>
+
+  modules/                    ⇦ 一个领域 = 它的组件 + 它自己的纯逻辑
+    chat/
+      components/             输入区 · 用户消息 · 助手消息 · 工具卡片 · 任务清单 · 附件 chip
+      tools.js                工具卡片与任务清单的展示规则
+      attachments.js          附件：读文件、判类型、把历史里拼进正文的附件折回 chip
+    artifacts/
+      components/             作品卡片 · 抽屉 · 正文视图 · 新建向导 · 分享框
+      artifact-view.js        预览的两道防线（沙箱 iframe + CSP），见文件头
+      artifact-vue.js         Vue 单文件作品的浏览器内编译
+      artifact-mermaid.js     mermaid 渲染（securityLevel: 'strict'）
+      highlight.js            代码高亮
+    sessions/components/      侧栏 · 会话行 · 项目抽屉
+    account/components/       登录框 · 我的账号
+    panels/components/        技能 · 记忆 · 定时任务 · 调试
+
+  components/                 ⇦ 跨领域的通用件（新增之前先问一句"真的谁都会用吗"）
+    AppIcon · AppDialog · SidePanel · ImageLightbox
+
+  lib/                        ⇦ 跨领域的基础设施
+    api.js                    接口封装 · SSE 流 · 401 跳 SSO（含防转圈标记）
+    route.js                  地址 ↔ 界面状态（两个纯函数，没引路由库）
+    markdown.js               极简 markdown（先整体转义再变换）
+    debug-bundle.js           「复制调试信息」——里面绝不放凭据，见文件头
+    dialog.js                 全局询问框（一次只问一个）
+    format.js                 时间与本轮统计的文案
+
+  stores/app.js               全局状态与动作（reactive 单例，没引状态库）
   assets/
-    tokens.css         设计令牌（明暗两套）。组件只用变量，不写死颜色
-    base.css           重置 + 共用控件 + markdown 排版（v-html 的内容不能用 scoped）
+    tokens.css                设计令牌（明暗两套）。组件只用变量，不写死颜色
+    base.css                  重置 + 共用控件 + markdown 排版（v-html 的内容不能用 scoped）
 ```
+
+**东西该放哪**：只有一个领域用 → 放进那个 `modules/<领域>/`；两个以上领域用 → 才上升到
+`components/` 或 `lib/`。反过来也成立 —— `lib/markdown.js` 在 `lib/` 里，是因为对话和作品预览
+都在用它；`modules/chat/tools.js` 不在，是因为只有对话页认得那些工具。
+
+### import 怎么写
+
+- **`.js` 逻辑文件：一律相对路径。** 服务端测试用 node 直接 import 它们
+  （`test/artifact-preview.test.js`、`test/attachments.test.js`…），而 node 不认 Vite 的 `@` 别名 ——
+  在这些文件里写 `@/` 会让那几个用例在**运行时**才炸，且报错指向 node 的模块解析，跟改动看着毫无关系。
+- **`.vue`：模块内用相对（`./ToolCard.vue`、`../tools.js`），跨出模块用 `@/`。**
+  相对路径能一眼看出"这是我自己人"，而 `@/components/AppIcon.vue` 比 `../../../components/AppIcon.vue`
+  好读得多，搬文件时也不用跟着数点。
 
 ## 地址
 

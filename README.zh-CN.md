@@ -492,9 +492,11 @@ src/                    Agent 主服务
 └── telemetry/          进程内指标 + 落库的按人 token 用量台账
 
 web/                    对话界面（Vue 3 + Vite）
-├── src/stores/         全局状态（reactive 单例，无状态库）
-├── src/lib/            接口封装、SSE、Markdown、调试信息
-└── src/components/     侧栏、对话区、工具卡片、抽屉面板
+├── src/pages/          页面，与地址一一对应（对话 / 作品库 / 市场 / 管理台 / 分享页）
+├── src/modules/        领域模块：组件 + 该领域自己的纯逻辑（chat、artifacts、sessions…）
+├── src/components/     跨领域的通用件（图标、询问框、抽屉外壳、灯箱）
+├── src/lib/            跨领域的基础设施（接口封装、SSE、地址、Markdown、调试信息）
+└── src/stores/         全局状态（reactive 单例，无状态库）
 
 sandbox-worker/         沙盒执行器（独立容器）
 ├── src/namespace/      PID/mount/network 命名空间 + cgroup

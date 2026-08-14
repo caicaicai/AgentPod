@@ -1,8 +1,8 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 
-import AppIcon from './AppIcon.vue'
-import { formatBytes } from '../lib/attachments.js'
+import AppIcon from '@/components/AppIcon.vue'
+import { formatBytes } from '../attachments.js'
 
 /**
  * 文本附件的内容预览。

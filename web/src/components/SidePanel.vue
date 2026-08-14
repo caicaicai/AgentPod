@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 
 import AppIcon from './AppIcon.vue'
-import { closePanel } from '../stores/app.js'
+import { closePanel } from '@/stores/app.js'
 
 /**
  * 右侧抽屉的外壳。技能 / 记忆 / 定时任务 / 项目 / 调试信息 / 作品共用。

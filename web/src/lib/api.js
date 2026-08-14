@@ -333,7 +333,7 @@ export const api = {
    *
    * 详情**带正文**（预览要用），所以别拿它当清单刷 —— 清单接口是专门不带正文的。
    * 原文另有 `/v1/artifacts/:id/raw`，界面用不上（正文已经在详情里了，
-   * 下载走 Blob，见 lib/artifact-view.js 的 downloadText）。
+   * 下载走 Blob，见 modules/artifacts/artifact-view.js 的 downloadText）。
    */
   listArtifacts: (sessionKey = '') => request(`/v1/artifacts${q({ sessionKey })}`),
   getArtifact: (id, version = 0) => request(`/v1/artifacts/${encodeURIComponent(id)}${q({ v: version || undefined })}`),

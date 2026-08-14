@@ -17,7 +17,7 @@ import { buildPromptContent, describeAttachments, normalizeAttachments } from '.
 import { buildModel } from '../src/models/model-factory.js'
 import { runTurn } from '../src/agent/run-turn.js'
 import { createMemorySessionStore as createMemoryStore } from './helpers/memory-session-store.js'
-import { parseInlinedAttachments } from '../web/src/lib/attachments.js'
+import { parseInlinedAttachments } from '../web/src/modules/chat/attachments.js'
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUg=='
 /** 一张真的 1x1 PNG。上面那些纯校验用例不在乎内容，这里要真发给"模型" */
@@ -257,7 +257,7 @@ describe('附件真的进了模型请求体', () => {
  * 服务端拼进 prompt 的格式，前端要能原样折回 chip。
  *
  * 这是一条**跨进程的格式契约**：拼串在 src/agent/attachments.js，反解在
- * web/src/lib/attachments.js。谁单方面改了围栏字符或那句提示语，另一边就会
+ * web/src/modules/chat/attachments.js。谁单方面改了围栏字符或那句提示语，另一边就会
  * 静默失效 —— 表现不是报错，而是"刷新之后附件变成了一堵几千字的墙"，
  * 而那正是这个项目一直在避免的"刚发完好好的、一刷新就变样"。
  */

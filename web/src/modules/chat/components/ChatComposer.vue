@@ -1,11 +1,11 @@
 <script setup>
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
-import AppIcon from './AppIcon.vue'
+import AppIcon from '@/components/AppIcon.vue'
 import ElementChip from './ElementChip.vue'
 import FileChips from './FileChips.vue'
-import { LARGE_PASTE_CHARS, MAX_FILES, readAll, textToAttachment } from '../lib/attachments.js'
-import { currentProject, saveDraft, send, state, stop } from '../stores/app.js'
+import { LARGE_PASTE_CHARS, MAX_FILES, readAll, textToAttachment } from '../attachments.js'
+import { currentProject, saveDraft, send, state, stop } from '@/stores/app.js'
 
 const emit = defineEmits(['preview', 'open-file'])
 

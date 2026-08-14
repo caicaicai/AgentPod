@@ -1,8 +1,8 @@
 <script setup>
 import { ref } from 'vue'
 
-import AppIcon from './AppIcon.vue'
-import { login, state } from '../stores/app.js'
+import AppIcon from '@/components/AppIcon.vue'
+import { login, state } from '@/stores/app.js'
 
 const username = ref('')
 const password = ref('')

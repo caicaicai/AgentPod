@@ -1,6 +1,6 @@
 <script setup>
-import SidePanel from './SidePanel.vue'
-import { closePanel, state } from '../stores/app.js'
+import SidePanel from '@/components/SidePanel.vue'
+import { closePanel, state } from '@/stores/app.js'
 
 /** 点一条技能 → 填进输入框。用户接着补一句"要做什么"，模型就知道该用哪个 */
 function useSkill(skill) {

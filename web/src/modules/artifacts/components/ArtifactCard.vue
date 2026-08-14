@@ -1,9 +1,9 @@
 <script setup>
 import { computed } from 'vue'
 
-import AppIcon from './AppIcon.vue'
-import { kindIcon, kindLabel } from '../lib/artifact-view.js'
-import { openArtifact, state } from '../stores/app.js'
+import AppIcon from '@/components/AppIcon.vue'
+import { kindIcon, kindLabel } from '../artifact-view.js'
+import { openArtifact, state } from '@/stores/app.js'
 
 /**
  * 对话里的作品卡片。

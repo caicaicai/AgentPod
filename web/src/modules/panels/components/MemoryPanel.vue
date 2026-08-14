@@ -1,8 +1,8 @@
 <script setup>
 import { ref } from 'vue'
 
-import SidePanel from './SidePanel.vue'
-import { loadMemory, saveMemory, setMemoryScope, state } from '../stores/app.js'
+import SidePanel from '@/components/SidePanel.vue'
+import { loadMemory, saveMemory, setMemoryScope, state } from '@/stores/app.js'
 
 const saving = ref(false)
 

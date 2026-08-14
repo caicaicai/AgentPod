@@ -1,14 +1,14 @@
 <script setup>
 import { computed, ref } from 'vue'
 
-import AppIcon from './AppIcon.vue'
-import ArtifactCard from './ArtifactCard.vue'
+import AppIcon from '@/components/AppIcon.vue'
+import ArtifactCard from '@/modules/artifacts/components/ArtifactCard.vue'
 import PlanCard from './PlanCard.vue'
 import ToolCard from './ToolCard.vue'
-import { copyToClipboard } from '../lib/debug-bundle.js'
-import { formatClock } from '../lib/format.js'
-import { renderMarkdown } from '../lib/markdown.js'
-import { layoutBlocks } from '../lib/tools.js'
+import { copyToClipboard } from '@/lib/debug-bundle.js'
+import { formatClock } from '@/lib/format.js'
+import { renderMarkdown } from '@/lib/markdown.js'
+import { layoutBlocks } from '../tools.js'
 
 const props = defineProps({
   turn: { type: Object, required: true },

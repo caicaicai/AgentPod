@@ -1,13 +1,13 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 
-import AppIcon from './AppIcon.vue'
-import ArtifactViewer from './ArtifactViewer.vue'
-import { publicApi } from '../lib/api.js'
-import { formatTime } from '../lib/format.js'
-import { kindLabel } from '../lib/artifact-view.js'
-import { MARKET_PATH } from '../lib/route.js'
-import { state, toggleTheme } from '../stores/app.js'
+import AppIcon from '@/components/AppIcon.vue'
+import ArtifactViewer from '@/modules/artifacts/components/ArtifactViewer.vue'
+import { publicApi } from '@/lib/api.js'
+import { formatTime } from '@/lib/format.js'
+import { kindLabel } from '@/modules/artifacts/artifact-view.js'
+import { MARKET_PATH } from '@/lib/route.js'
+import { state, toggleTheme } from '@/stores/app.js'
 
 /**
  * 访客看到的那一页：`/s/<token>`。
@@ -22,7 +22,7 @@ import { state, toggleTheme } from '../stores/app.js'
  * ── 安全上它没有开任何新口子 ────────────────────────────────────────────
  *
  * 作品正文照旧走 JSON，由 ArtifactViewer 塞进**不带 allow-same-origin** 的
- * sandbox iframe（理由见 lib/artifact-view.js 的文件头）。同源的这一层始终是
+ * sandbox iframe（理由见 modules/artifacts/artifact-view.js 的文件头）。同源的这一层始终是
  * 我们自己的代码 —— 服务端从不以 HTML 的身份吐出模型生成的内容。
  */
 const props = defineProps({

@@ -1,17 +1,17 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
-import AppIcon from './AppIcon.vue'
+import AppIcon from '@/components/AppIcon.vue'
 import ShareBox from './ShareBox.vue'
-import { copyToClipboard } from '../lib/debug-bundle.js'
+import { copyToClipboard } from '@/lib/debug-bundle.js'
 import {
   PREVIEW_SANDBOX, buildPreviewDoc, downloadText, needsFrame, supportsInspect,
-} from '../lib/artifact-view.js'
-import { detectLanguage, tokenize } from '../lib/highlight.js'
+} from '../artifact-view.js'
+import { detectLanguage, tokenize } from '../highlight.js'
 import {
   askAboutElement, clearPick, deleteArtifact, openArtifact, setPick, setPicking, state,
-} from '../stores/app.js'
-import { askConfirm } from '../lib/dialog.js'
+} from '@/stores/app.js'
+import { askConfirm } from '@/lib/dialog.js'
 
 /**
  * 一份作品的正文视图：预览 / 源码 / 版本 / 下载 / 删除。
@@ -149,7 +149,7 @@ const kb = (bytes) => (bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${by
  *
  * 产出的是**片段数组**而不是 HTML 字符串，模板里用插值渲染成 span ——
  * 全程没有一处 v-html。源码是模型生成的，那条"父页面只经手字符串"的规矩
- * 在这儿同样成立（见 lib/highlight.js 开头）。
+ * 在这儿同样成立（见 ../highlight.js 开头）。
  */
 const highlighted = computed(() => {
   if (!current.value) return []
@@ -331,7 +331,7 @@ watch(() => [meta.value?.id, detail.value?.version, tab.value].join(':'), clearP
         ⚠️ 预览必须走这个 iframe，而且 sandbox 里**绝不能出现 allow-same-origin**。
         内容是模型生成的，而模型的输入里有邮件和网页 —— 谁能往里塞脚本，
         取决于谁能给这个用户发东西。理由与另一道防线（文档内 CSP）见
-        web/src/lib/artifact-view.js 的文件头。
+        web/src/modules/artifacts/artifact-view.js 的文件头。
       -->
       <iframe
         ref="frame"

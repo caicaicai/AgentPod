@@ -1,10 +1,10 @@
 <script setup>
 import { computed, ref } from 'vue'
 
-import AppIcon from './AppIcon.vue'
-import SidePanel from './SidePanel.vue'
-import { formatDateTime } from '../lib/format.js'
-import { changePassword, state } from '../stores/app.js'
+import AppIcon from '@/components/AppIcon.vue'
+import SidePanel from '@/components/SidePanel.vue'
+import { formatDateTime } from '@/lib/format.js'
+import { changePassword, state } from '@/stores/app.js'
 
 /**
  * 我的账号：看看自己是谁，以及改密码。

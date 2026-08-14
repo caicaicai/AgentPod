@@ -1,11 +1,11 @@
 <script setup>
 import { computed, onMounted } from 'vue'
 
-import AppIcon from './AppIcon.vue'
-import { formatTime } from '../lib/format.js'
-import { KIND_META, kindIcon } from '../lib/artifact-view.js'
-import { shareUrl } from '../lib/route.js'
-import { closeMarket, refreshMarket, state, toggleTheme } from '../stores/app.js'
+import AppIcon from '@/components/AppIcon.vue'
+import { formatTime } from '@/lib/format.js'
+import { KIND_META, kindIcon } from '@/modules/artifacts/artifact-view.js'
+import { shareUrl } from '@/lib/route.js'
+import { closeMarket, refreshMarket, state, toggleTheme } from '@/stores/app.js'
 
 /**
  * 作品市场：所有**显式发布**出来的作品。

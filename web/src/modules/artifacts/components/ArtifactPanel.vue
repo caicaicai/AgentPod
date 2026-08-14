@@ -1,20 +1,20 @@
 <script setup>
 import { computed } from 'vue'
 
-import AppIcon from './AppIcon.vue'
+import AppIcon from '@/components/AppIcon.vue'
 import ArtifactViewer from './ArtifactViewer.vue'
-import SidePanel from './SidePanel.vue'
-import { formatTime } from '../lib/format.js'
-import { kindIcon, kindLabel } from '../lib/artifact-view.js'
+import SidePanel from '@/components/SidePanel.vue'
+import { formatTime } from '@/lib/format.js'
+import { kindIcon, kindLabel } from '../artifact-view.js'
 import {
   closeArtifactDetail, openArtifact, openLibrary, refreshArtifacts, setArtifactWidth, state,
   toggleArtifactFull,
-} from '../stores/app.js'
+} from '@/stores/app.js'
 
 /**
  * 对话右边的作品抽屉：**只看当前这条会话的产出**。
  *
- * 跨会话的那份在作品库（ArtifactLibrary，独立页面）。两者分工不同，
+ * 跨会话的那份在作品库（pages/ArtifactsPage.vue）。两者分工不同，
  * 所以这里刻意不做搜索和筛选 —— 一条会话里通常就一两份，搜索框是噪音；
  * 真要翻历史，头上那个按钮直接去库里。
  *

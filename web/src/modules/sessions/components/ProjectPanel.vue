@@ -1,9 +1,9 @@
 <script setup>
 import { ref, watchEffect } from 'vue'
 
-import SidePanel from './SidePanel.vue'
-import { closePanel, currentProject, deleteProject, saveProject } from '../stores/app.js'
-import { askConfirm } from '../lib/dialog.js'
+import SidePanel from '@/components/SidePanel.vue'
+import { closePanel, currentProject, deleteProject, saveProject } from '@/stores/app.js'
+import { askConfirm } from '@/lib/dialog.js'
 
 const form = ref({ name: '', description: '', instructions: '' })
 const saving = ref(false)

@@ -9,7 +9,7 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { detectLanguage, tokenize } from '../web/src/lib/highlight.js'
+import { detectLanguage, tokenize } from '../web/src/modules/artifacts/highlight.js'
 
 /** 断言：拼回去 === 原文；顺带把片段类型交出去给别的断言用 */
 function slice(code, lang) {

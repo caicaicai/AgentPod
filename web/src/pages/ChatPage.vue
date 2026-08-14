@@ -1,17 +1,17 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
 
-import AppIcon from './AppIcon.vue'
-import AssistantMessage from './AssistantMessage.vue'
-import ChatComposer from './ChatComposer.vue'
-import FilePreview from './FilePreview.vue'
-import UserMessage from './UserMessage.vue'
-import { buildDebugBundle, copyToClipboard } from '../lib/debug-bundle.js'
-import { getRecentEvents, getStreamTrace } from '../lib/api.js'
+import AppIcon from '@/components/AppIcon.vue'
+import AssistantMessage from '@/modules/chat/components/AssistantMessage.vue'
+import ChatComposer from '@/modules/chat/components/ChatComposer.vue'
+import FilePreview from '@/modules/chat/components/FilePreview.vue'
+import UserMessage from '@/modules/chat/components/UserMessage.vue'
+import { buildDebugBundle, copyToClipboard } from '@/lib/debug-bundle.js'
+import { getRecentEvents, getStreamTrace } from '@/lib/api.js'
 import {
   clearActiveSession, currentSession, hideBanner, setModel, state, threadTitle, togglePanel,
-} from '../stores/app.js'
-import { askConfirm } from '../lib/dialog.js'
+} from '@/stores/app.js'
+import { askConfirm } from '@/lib/dialog.js'
 
 const scroller = ref(null)
 const previewFile = ref(null)

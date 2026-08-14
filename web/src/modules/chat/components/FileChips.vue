@@ -1,6 +1,6 @@
 <script setup>
-import AppIcon from './AppIcon.vue'
-import { formatBytes } from '../lib/attachments.js'
+import AppIcon from '@/components/AppIcon.vue'
+import { formatBytes } from '../attachments.js'
 
 /**
  * 附件条。

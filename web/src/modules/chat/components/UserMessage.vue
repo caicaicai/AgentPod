@@ -1,9 +1,9 @@
 <script setup>
-import AppIcon from './AppIcon.vue'
+import AppIcon from '@/components/AppIcon.vue'
 import ElementChip from './ElementChip.vue'
 import FileChips from './FileChips.vue'
-import { copyToClipboard } from '../lib/debug-bundle.js'
-import { formatClock } from '../lib/format.js'
+import { copyToClipboard } from '@/lib/debug-bundle.js'
+import { formatClock } from '@/lib/format.js'
 import { ref } from 'vue'
 
 const props = defineProps({

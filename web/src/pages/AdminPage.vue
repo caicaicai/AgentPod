@@ -1,15 +1,15 @@
 <script setup>
 import { computed, ref } from 'vue'
 
-import AppIcon from './AppIcon.vue'
-import { formatDateTime, formatSince, formatTokens } from '../lib/format.js'
-import { askConfirm } from '../lib/dialog.js'
+import AppIcon from '@/components/AppIcon.vue'
+import { formatDateTime, formatSince, formatTokens } from '@/lib/format.js'
+import { askConfirm } from '@/lib/dialog.js'
 import {
   closeAdmin, createGroup, createModel, createUser, deleteGroup, deleteModel, openUsageRow,
   refreshGroups, refreshModels, refreshUsage, refreshUsers, resetUserPassword, setAdminTab,
   setModelEnabled, setUsageDays, setUsageGroup, setUserDisabled, setUserGroup, setUserRole,
   state, updateGroup, updateModel,
-} from '../stores/app.js'
+} from '@/stores/app.js'
 
 /**
  * 管理员控制台：这个部署里有哪些账号，以及对它们能做什么。

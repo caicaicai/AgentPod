@@ -1,11 +1,11 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
 
-import AppIcon from './AppIcon.vue'
+import AppIcon from '@/components/AppIcon.vue'
 import {
   ARTIFACT_RECIPES, KIND_META, composeArtifactPrompt, findRecipe, kindIcon,
-} from '../lib/artifact-view.js'
-import { closeWizard, setWizardKind, startArtifactFrom, state } from '../stores/app.js'
+} from '../artifact-view.js'
+import { closeWizard, setWizardKind, startArtifactFrom, state } from '@/stores/app.js'
 
 /**
  * 创建向导。

@@ -16,8 +16,8 @@ import {
   isRedirectingToLogin, clearSsoRetryMarker, onNeedLogin,
 } from '../lib/api.js'
 import { formatTurnStats } from '../lib/format.js'
-import { parseInlinedAttachments, toWire } from '../lib/attachments.js'
-import { composeElementPrompt, parsePickedElement } from '../lib/artifact-view.js'
+import { parseInlinedAttachments, toWire } from '../modules/chat/attachments.js'
+import { composeElementPrompt, parsePickedElement } from '../modules/artifacts/artifact-view.js'
 import { ADMIN_TABS, parsePath, pathFor } from '../lib/route.js'
 
 const MODEL_KEY = 'ap.model'

@@ -40,7 +40,7 @@ import { requireStorage } from '../persistence/storage.js'
 
 /**
  * 作品类型。**这个清单等于"界面渲染得出来的东西"**，不是"模型想得到的东西" ——
- * 加一种之前先想清楚 web/src/lib/artifact-view.js 里拿什么画它。
+ * 加一种之前先想清楚 web/src/modules/artifacts/artifact-view.js 里拿什么画它。
  * 加了却画不出来的类型，表现是用户点开一片空白，比不支持更糟。
  *
  *   web       多文件网页（html + css + js），入口 index.html

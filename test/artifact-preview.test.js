@@ -1,7 +1,7 @@
 /**
  * 作品预览的前端规则。
  *
- * 这里钉住的是**两道防线**，它们各挡各的（理由见 web/src/lib/artifact-view.js 文件头）：
+ * 这里钉住的是**两道防线**，它们各挡各的（理由见 web/src/modules/artifacts/artifact-view.js 文件头）：
  *   1. iframe sandbox 绝不含 allow-same-origin —— 防读（模型生成的脚本读不到登录令牌）
  *   2. 文档内 CSP 默认 `default-src 'none'` —— 防写（脚本没法把看到的东西发出去）
  *
@@ -18,9 +18,9 @@ import assert from 'node:assert/strict'
 import {
   ARTIFACT_RECIPES, KIND_META, PREVIEW_SANDBOX, buildPreviewDoc, composeArtifactPrompt,
   composeElementPrompt, filterArtifacts, kindLabel, needsFrame, parsePickedElement, supportsInspect,
-} from '../web/src/lib/artifact-view.js'
-import { resolvePath } from '../web/src/lib/artifact-vue.js'
-import { layoutBlocks, readArtifactCard, toolBrief } from '../web/src/lib/tools.js'
+} from '../web/src/modules/artifacts/artifact-view.js'
+import { resolvePath } from '../web/src/modules/artifacts/artifact-vue.js'
+import { layoutBlocks, readArtifactCard, toolBrief } from '../web/src/modules/chat/tools.js'
 
 const build = (over = {}) => buildPreviewDoc({
   kind: 'web',

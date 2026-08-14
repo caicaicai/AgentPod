@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 
-import AppIcon from './AppIcon.vue'
+import AppIcon from '@/components/AppIcon.vue'
 
 /**
  * 「引用了预览里的某个元素」的那枚 chip。

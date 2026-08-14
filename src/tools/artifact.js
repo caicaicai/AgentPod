@@ -26,7 +26,7 @@ import { ARTIFACT_KINDS } from '../artifacts/store.js'
  * 预览环境的硬约束，要**讲给模型听**。
  *
  * 界面把作品放进一个不带 `allow-same-origin` 的 sandbox iframe 里渲染
- * （见 web/src/lib/artifact-view.js：它是这套设计里唯一挡住"模型生成的脚本读走
+ * （见 web/src/modules/artifacts/artifact-view.js：它是这套设计里唯一挡住"模型生成的脚本读走
  * 用户登录态"的东西）。代价是那个文档处于**不透明源**：`localStorage`、
  * `document.cookie`、`indexedDB` 一碰就抛。
  *

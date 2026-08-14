@@ -153,7 +153,7 @@ Vue 运行时与 mermaid 都**自托管并按需加载**（主包只 +12KB，其
 
 | 防线 | 挡什么 | 在哪 |
 |---|---|---|
-| iframe `sandbox`，**不给 `allow-same-origin`** | 防读：脚本与本页不同源，读不到 localStorage 里的登录令牌 | `web/src/lib/artifact-view.js` |
+| iframe `sandbox`，**不给 `allow-same-origin`** | 防读：脚本与本页不同源，读不到 localStorage 里的登录令牌 | `web/src/modules/artifacts/artifact-view.js` |
 | 文档内 CSP，默认 `default-src 'none'` | 防写：脚本没法把看到的东西发出去 | 同上，白名单由 `ARTIFACT_ALLOWED_ORIGINS` 下发 |
 
 由此得到一条贯穿全局的规则：**模型生成的标记只在沙箱里被解释，父页面只经手字符串。**
@@ -163,7 +163,7 @@ Vue 运行时与 mermaid 都**自托管并按需加载**（主包只 +12KB，其
 **`DATA_DIR` 不能被任何静态服务直接暴露**。
 
 （一个诚实的例外：mermaid 在测量文本时会把图短暂挂进本页 DOM，用
-`securityLevel: 'strict'` 兜。代价与备选见 `web/src/lib/artifact-mermaid.js`。）
+`securityLevel: 'strict'` 兜。代价与备选见 `web/src/modules/artifacts/artifact-mermaid.js`。）
 
 ## 请求时序（一次对话）
 

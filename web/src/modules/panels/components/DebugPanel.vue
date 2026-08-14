@@ -1,8 +1,8 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 
-import SidePanel from './SidePanel.vue'
-import { state } from '../stores/app.js'
+import SidePanel from '@/components/SidePanel.vue'
+import { state } from '@/stores/app.js'
 
 /**
  * 调试信息的兜底展示。

@@ -1,8 +1,8 @@
 <script setup>
 import { onBeforeUnmount, ref, watch } from 'vue'
 
-import AppIcon from './AppIcon.vue'
-import { formatTime } from '../lib/format.js'
+import AppIcon from '@/components/AppIcon.vue'
+import { formatTime } from '@/lib/format.js'
 
 const props = defineProps({
   session: { type: Object, required: true },

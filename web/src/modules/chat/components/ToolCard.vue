@@ -1,8 +1,8 @@
 <script setup>
 import { computed, ref } from 'vue'
 
-import AppIcon from './AppIcon.vue'
-import { TOOL_ICONS, TOOL_LABELS, TOOL_STATUS_TEXT, toolBrief } from '../lib/tools.js'
+import AppIcon from '@/components/AppIcon.vue'
+import { TOOL_ICONS, TOOL_LABELS, TOOL_STATUS_TEXT, toolBrief } from '../tools.js'
 
 const props = defineProps({
   block: { type: Object, required: true },

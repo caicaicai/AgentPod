@@ -2,7 +2,7 @@
 import { nextTick, ref, watch } from 'vue'
 
 import AppIcon from './AppIcon.vue'
-import { cancelDialog, confirmDialog, dialog } from '../lib/dialog.js'
+import { cancelDialog, confirmDialog, dialog } from '@/lib/dialog.js'
 
 /**
  * 询问框：取代 window.prompt / window.confirm。

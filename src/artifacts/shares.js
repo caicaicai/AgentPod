@@ -58,7 +58,7 @@
  * 唯一真的要为分享补一刀的地方，是**沙箱主动往父页面推消息**那条通道
  * （元素拾取器的 postMessage）：访客那一页用不上它，却能被用来弹一张
  * 长得像我们自己界面、文字由攻击者决定的卡片。所以只读宿主整条不接，
- * 见 web/src/components/ArtifactViewer.vue 的 onPreviewMessage。
+ * 见 web/src/modules/artifacts/components/ArtifactViewer.vue 的 onPreviewMessage。
  */
 import { randomBytes } from 'node:crypto'
 

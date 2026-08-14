@@ -32,7 +32,7 @@
  */
 import { compileVueProject, MODULE_TOKEN } from './artifact-vue.js'
 import { renderMermaid, MERMAID_FENCE, hasMermaid } from './artifact-mermaid.js'
-import { escapeHtml, renderMarkdown } from './markdown.js'
+import { escapeHtml, renderMarkdown } from '../../lib/markdown.js'
 
 /** iframe 的 sandbox 属性。**不要加 allow-same-origin**，见文件头 */
 export const PREVIEW_SANDBOX = 'allow-scripts allow-modals allow-forms'
