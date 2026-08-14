@@ -9,6 +9,9 @@
  * 只支持数据库之后它从生产代码里删掉了，原样搬到这儿继续给测试用。
  */
 import { normalizeTitle } from '../../src/sessions/store.js'
+// 游标编解码与真实驱动共用同一份 —— 替身自己实现一套的话，
+// 两边的翻页语义会慢慢长歪，而用例照样全绿
+import { encodeCursor, decodeCursor, normalizeLimit } from '../../src/sessions/cursor.js'
 
 /**
  * 与 src/sessions/store.js 里那个同名函数一致（那边没导出）。
@@ -56,14 +59,40 @@ export function createMemorySessionStore() {
       row.title = normalizeTitle(query.title)
       return true
     },
+    /**
+     * 与 mysql 驱动同契约：回 `{ items, nextCursor, hasMore }`，keyset 翻页。
+     *
+     * 替身也要**真的翻页**，不能图省事一次性全回。契约里"到底了 nextCursor
+     * 才为空"这条，只有替身也照做，用例才有可能发现调用方漏翻页的错 ——
+     * 而漏翻页的表现（删项目时只摘干净了前 50 条）在生产上极难注意到。
+     *
+     * 排序键与真实驱动逐字对齐，包括第三段的决胜键 sessionKey。
+     */
     async list(query) {
       assertScoped(query, 'store.list')
-      return [...rows.values()]
+      const all = [...rows.values()]
         .filter((row) => row.username === query.username)
         .filter((row) => query.projectId === undefined || (row.projectId || '') === (query.projectId || ''))
         .filter((row) => query.includeArchived || !row.archived)
-        .sort((a, b) => (Number(b.pinned) - Number(a.pinned)) || (b.updatedAt - a.updatedAt))
+        .sort((a, b) => (Number(b.pinned) - Number(a.pinned))
+          || (b.updatedAt - a.updatedAt)
+          || b.sessionKey.localeCompare(a.sessionKey))
         .map(({ jsonl, ...rest }) => rest) // 列表不带正文
+
+      const cursor = decodeCursor(query.cursor)
+      const after = cursor
+        ? all.filter((row) => {
+          const pinned = row.pinned ? 1 : 0
+          if (pinned !== cursor.pinned) return pinned < cursor.pinned
+          if (row.updatedAt !== cursor.updatedAt) return row.updatedAt < cursor.updatedAt
+          return row.sessionKey < cursor.sessionKey
+        })
+        : all
+
+      const limit = normalizeLimit(query.limit)
+      const hasMore = after.length > limit
+      const items = after.slice(0, limit)
+      return { items, hasMore, nextCursor: hasMore ? encodeCursor(items[items.length - 1]) : '' }
     },
     async remove(query) {
       assertScoped(query, 'store.remove')

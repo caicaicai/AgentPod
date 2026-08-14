@@ -7,7 +7,6 @@
  */
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
-import { homedir } from 'node:os'
 
 /**
  * 从文件里补齐环境变量。
@@ -92,8 +91,6 @@ const csv = (value, fallback = []) => {
   return parsed.length ? parsed : fallback
 }
 
-const SANDBOX_MODES_OFF_HOST = ['http', 'manager']
-
 export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
   const envFile = loadDotEnv({ cwd, env })
 
@@ -140,8 +137,35 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
          * 全新部署里总得有人能管别人，而那时还没有任何管理员可以来授权。
          */
         allowRegister: bool(env.AUTH_ALLOW_REGISTER, false),
+
+        /**
+         * 登录限流。实现与两种计数口径的理由见 src/http/rate-limit.js。
+         *
+         * 默认值的取法：按 IP 每分钟 20 次，够任何真人（含几个标签页同时登录、
+         * 手滑重试）用，而爆破在这个速率下没有意义；按用户名连续失败 5 次起封，
+         * 从 30s 翻倍到 15 分钟封顶 —— 不设成永久封禁是因为那等于把"锁死别人的
+         * 账号"这个能力免费送给了任何知道用户名的人。
+         */
+        rateLimit: {
+          enabled: bool(env.AUTH_RATE_LIMIT, true),
+          ipWindowMs: num(env.AUTH_RATE_LIMIT_IP_WINDOW_MS, 60 * 1000),
+          ipMax: num(env.AUTH_RATE_LIMIT_IP_MAX, 20),
+          userWindowMs: num(env.AUTH_RATE_LIMIT_USER_WINDOW_MS, 15 * 60 * 1000),
+          userMax: num(env.AUTH_RATE_LIMIT_USER_MAX, 5),
+          baseBlockMs: num(env.AUTH_RATE_LIMIT_BLOCK_MS, 30 * 1000),
+          maxBlockMs: num(env.AUTH_RATE_LIMIT_MAX_BLOCK_MS, 15 * 60 * 1000),
+        },
       },
     },
+
+    /**
+     * 前面是不是有一层自己的反向代理。**默认否。**
+     *
+     * 只影响"客户端 IP 从哪儿取"（见 src/http/rate-limit.js 的 clientIp）。
+     * 默认信任 X-Forwarded-For 是危险的：那样按 IP 的限流一改头就绕过去了，
+     * 等于没有。直接暴露在公网时保持 0，套了 nginx / 网关再打开。
+     */
+    trustProxy: bool(env.TRUST_PROXY, false),
 
     platform: {
       speedApiBase: str(env.SPEED_API_BASE).replace(/\/+$/, ''),
@@ -333,8 +357,9 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
       // 关掉之后接口仍在（能看能改），只是不会自动触发 —— 与"调度副本"分开控制
       enabled: bool(env.CRON_ENABLED, true),
       /**
-       * 本副本是否承担调度。**必须只有一个副本打开**：任务表在盘上，占坑只在
-       * 进程内串行，两个副本同时 tick 会把同一个任务点两次。
+       * 本副本是否承担调度。**多副本可以同时打开** —— 抢占由数据库行锁保证
+       * （见 src/cron/scheduler.js 文件头）。关掉它的用处是让一部分副本
+       * 只服务 HTTP 请求，把定时任务的负载圈在另一部分副本上。
        */
       scheduler: bool(env.CRON_SCHEDULER, true),
       tickMs: num(env.CRON_TICK_MS, 30000),

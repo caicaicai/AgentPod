@@ -172,14 +172,24 @@ export function createUserStore({ config, storage, groups = null, logger = conso
     return { ok: true, user: toPublicUser(record) }
   }
 
-  /** 换一副新盐重新派生。改密与管理员重置共用，别写两遍 */
+  /**
+   * 换一副新盐重新派生。改密与管理员重置共用，别写两遍。
+   *
+   * ⚠️ **必须同时把 tokenVersion 加一**，见文件头关于令牌回收那段：
+   * 不加的话"改密码"只挡住了未来的登录，而已经签发出去的那些令牌
+   * 照样能用到过期（默认 24 小时）—— 也就是说，发现密码泄露之后改密码，
+   * 并不能把已经拿着令牌的人踢下去。这正是改密码的人以为自己做到的事。
+   */
   async function setPassword(name, secret) {
     const salt = crypto.randomBytes(SALT_BYTES).toString('hex')
-    return map.merge(name, {
+    const passwordHash = await derive(secret, salt)
+    return map.update(name, (current) => ({
+      ...current,
       salt,
-      passwordHash: await derive(secret, salt),
+      passwordHash,
+      tokenVersion: (Number(current.tokenVersion) || 0) + 1,
       updatedAt: Date.now(),
-    })
+    }))
   }
 
   async function create({ username, password, role = 'user', groupId, enforcePolicy = true }) {
@@ -204,6 +214,14 @@ export function createUserStore({ config, storage, groups = null, logger = conso
       role: role === 'admin' ? 'admin' : 'user',
       disabled: false,
       groupId: group,
+      /**
+       * 令牌代数。签发时写进 JWT，每次请求比对（见 src/identity/index.js）。
+       * 改密 / 禁用会把它推一格，于是旧令牌当场作废。
+       *
+       * 老账号记录里没有这个字段，读的时候一律当 0 —— 所以这次升级不需要
+       * 数据迁移，也不会把所有人踢下线。
+       */
+      tokenVersion: 0,
       createdAt: now,
       updatedAt: now,
     }
@@ -232,6 +250,29 @@ export function createUserStore({ config, storage, groups = null, logger = conso
       return (await map.all()).length
     },
 
+    /**
+     * 校验令牌时要看的那几样，一次取齐。
+     *
+     * 单独开一个方法而不是复用 `get()`：这条路**每个请求都会走**，
+     * 而 `get()` 回的是给界面看的完整账号。分开之后，将来给公开账号形状
+     * 加字段时不会顺手加到这条热路径上。
+     *
+     * 账号不存在回 null —— 调用方据此把令牌判成失效（删号即下线）。
+     */
+    async authState(username) {
+      const name = String(username || '')
+      if (!USERNAME_RE.test(name)) return null
+      const record = await map.get(name)
+      if (!record) return null
+      return {
+        username: record.username,
+        // 老记录没有这个字段，当 0 —— 见 create() 里的说明
+        tokenVersion: Number(record.tokenVersion) || 0,
+        disabled: Boolean(record.disabled),
+        role: record.role || 'user',
+      }
+    },
+
     verify,
 
     /**
@@ -258,7 +299,21 @@ export function createUserStore({ config, storage, groups = null, logger = conso
      */
     async setDisabled({ username, disabled }) {
       const name = assertUsername(username)
-      const updated = await map.merge(name, { disabled: Boolean(disabled), updatedAt: Date.now() })
+      const off = Boolean(disabled)
+      /**
+       * 禁用要把 tokenVersion 也推一格，理由与改密码相同（见 setPassword）：
+       * 只改 disabled 标记的话，那个人手里的令牌照样能用到过期 ——
+       * 而"禁用某人"要的显然是**现在就把他挡在外面**，不是"最多 24 小时后"。
+       *
+       * 启用不推：那时并没有什么令牌需要作废，推一格只会顺手把这个人在别的
+       * 设备上的登录态一起踢掉，而他什么也没做错。
+       */
+      const updated = await map.update(name, (current) => ({
+        ...current,
+        disabled: off,
+        tokenVersion: (Number(current.tokenVersion) || 0) + (off ? 1 : 0),
+        updatedAt: Date.now(),
+      }))
       return updated ? toPublicUser(updated) : null
     },
 

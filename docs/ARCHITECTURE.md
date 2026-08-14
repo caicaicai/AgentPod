@@ -11,10 +11,13 @@
 ```
 接入面   Web SPA / 定时任务 / OpenAPI
            │
-接入层   src/http/server.js      路由 · SSE · 请求体限流 · 优雅停机
-身份     src/identity/           认证 → 可信 username
+接入层   src/http/server.js      路由总表 · SSE · 请求体限流 · 优雅停机
+         src/http/routes/        按领域拆开的路由块（账号/管理台 · 作品 · 项目 · 定时任务）
+         src/http/rate-limit.js  登录限流：按 IP 挡 DoS，按用户名挡爆破
+身份     src/identity/           认证 → 可信 username（JWT 带 tokenVersion，改密/禁用即失效）
            │
 编排     src/agent/run-service.js  并发预算 · 每用户配额 · 活跃 run · 台账/指标钩子
+         src/agent/run-registry.js run 事件缓冲：断线之后接回还在跑的那一轮
 执行     src/agent/run-turn.js     无状态单轮：水合 → 跑 → 回写 → 清场
            │
 能力     src/agent/tools.js       工具装配（沙盒版 bash + 移植过来的 AP 工具）
@@ -22,12 +25,12 @@
            │
 资源     src/models/              /ap/llminfo → pi Model（含按登录态缓存）
          src/credentials/         Credential Broker（现为透传，将来代持）
-         src/sessions/            会话存储（memory / file / mysql，按 username 强隔离）
-         src/persistence/         无数据库时的落地层（路径收口 + 原子写 + 串行队列）
+         src/sessions/            会话存储（MySQL，按 username 强隔离；列表 keyset 翻页）
+         src/persistence/         结构化存储（MySQL：通用 KV + 文档 + 作品正文 + 用量台账）
          src/memory/              长期记忆 MEMORY.md（个人 / 项目两个作用域）
          src/projects/            项目：会话分组 + 项目级指令与记忆
          src/artifacts/           作品：助手产出的成品，带版本，独立于对话正文
-         src/cron/                定时任务：排期解析 · 存储 · 调度（单副本）
+         src/cron/                定时任务：排期解析 · 存储 · 调度（多副本安全）
          src/sandbox/             执行下沉（http / local / none）
            │
 外部     模型网关 · 沙盒 worker · MySQL

@@ -7,7 +7,7 @@
  *   3. 乐观锁撞车回的是不是 409（而不是 400 或者静默覆盖）
  *   4. 悬空引用：把会话挂到一个不存在的项目上
  */
-import { test, describe, before, after, beforeEach } from 'node:test'
+import { test, describe, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -138,6 +138,10 @@ describe('能力宣告', () => {
       // 也没接用量台账（它的用例在 accounts-api.test.js 里）。同上：字段要在，
       // 管理台靠它决定画不画「Token 用量」那一页
       usage: false,
+      // 这个 harness 的 runService 是个替身，没有 attach —— 也就没有断线重连。
+      // 字段仍然要露面：前端靠它决定流断掉时要不要去试重连，
+      // 少了它就只能盲试一次注定 404 的请求，而那次失败会盖掉真正的断线提示。
+      runResume: false,
     })
   })
 

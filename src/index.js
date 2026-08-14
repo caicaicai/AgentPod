@@ -14,6 +14,7 @@ import { createWorkspaceStore } from './workspace/store.js'
 import { createSkillManager, createDisabledSkillManager } from './workspace/skill-manager.js'
 import { createSandbox } from './sandbox/client.js'
 import { createRunService } from './agent/run-service.js'
+import { createRunRegistry } from './agent/run-registry.js'
 import { createMetrics } from './telemetry/metrics.js'
 import { createUsageStore } from './telemetry/usage-store.js'
 import { createServer } from './http/server.js'
@@ -143,14 +144,22 @@ async function main() {
     broker = createPassthroughBroker({ llmInfoClient, logger })
   }
 
+  /**
+   * run 事件缓冲：断线之后能接回还在跑的那一轮（见 src/agent/run-registry.js）。
+   * 纯内存、只在本副本内有效 —— 多副本下重连要落回同一个副本才接得上。
+   */
+  const runRegistry = createRunRegistry()
+
   const runService = createRunService({
     config, logger, store, sandbox, broker, metrics, workspace, skillManager,
-    memory, memoryCapture, projects, crons, artifacts, usage,
+    memory, memoryCapture, projects, crons, artifacts, usage, registry: runRegistry,
   })
   // 调度器要用 runService，所以只能排在它后面建
   const scheduler = createScheduler({ config, logger, crons, vault: cronVault, runService, sessionStore: store })
   const app = createServer({
-    config, logger, identity, broker, runService, store, llmInfoClient, metrics, workspace, skillManager,
+    // llmInfoClient 不传给 HTTP 层 —— 模型清单是经 broker 拿的（见 /v1/models），
+    // 它只是 passthrough broker 的内部依赖
+    config, logger, identity, broker, runService, store, metrics, workspace, skillManager,
     memory, projects, crons, scheduler, cronVault, artifacts, shares, users, usage, modelStore, groups,
   })
 
@@ -205,8 +214,13 @@ async function main() {
     })
   }
   if (scheduler.enabled) {
-    // 任务表在盘上，占坑只在进程内串行 —— 两个副本同时调度会把同一个任务点两次
-    logger.warn('本副本承担定时任务调度：CRON_SCHEDULER 必须只在一个副本上打开')
+    /**
+     * info 而不是 warn：这句话从前是条告警（"必须只在一个副本上打开"），
+     * 而那个限制随文件存储驱动一起消失了 —— 抢占现在由数据库行锁保证，
+     * 多副本同时调度是安全的（见 src/cron/scheduler.js 文件头）。
+     * 留着这行是因为"这个副本会不会自己点任务"仍然是运维想知道的事。
+     */
+    logger.info('本副本承担定时任务调度（多副本安全：抢占由数据库行锁保证）')
   }
   if (cronVault.enabled) {
     // 与 SANDBOX_INJECT_ME_TOKEN 同一个理由：这类开关一旦被谁顺手打开又忘了，

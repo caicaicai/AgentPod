@@ -459,3 +459,95 @@ describe('调度', () => {
     assert.doesNotMatch(byUsername.zhangsan, /李四/)
   })
 })
+
+/**
+ * 多副本抢占。
+ *
+ * 这一组存在的理由是一段具体的历史：调度器的文件头曾经写着"CRON_ENABLED 只应在
+ * 一个副本上打开"，因为那时还有一个文件存储驱动，读改写只在进程内串行。
+ * 那个驱动后来被整个删掉了，抢占随之落到数据库行锁上（mysql-map 的
+ * `SELECT ... FOR UPDATE`），限制的前提就此消失 —— 但注释、启动告警和 .env 说明
+ * 都留了下来，继续要求运维做一件已经不必要的事。
+ *
+ * **限制比代码活得久。** 所以现在钉一组用例在这儿：抢占的语义一旦被改坏
+ * （比如有人图省事把 claimSlot 从 update 换成 get + put），下面这几条会红。
+ */
+describe('多副本抢占', () => {
+  let root
+  let crons
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), 'ap-claim-'))
+    crons = createCronStore({ storage: testStorage, config: { dataDir: root, cron: { enabled: true } }, logger: silentLogger })
+  })
+  afterEach(async () => { await rm(root, { recursive: true, force: true }) })
+
+  /** 建一条每分钟触发的任务，并回它当前该触发的那一格 */
+  async function dueCron(at) {
+    const created = await crons.create({
+      username: 'zhangsan', title: 'x', task: 'x', schedule: { cron: '* * * * *', timezone: TZ },
+    })
+    const [due] = await crons.due(at)
+    assert.ok(due, '前提：这条任务在这个时刻该触发')
+    assert.equal(due.id, created.id)
+    return due
+  }
+
+  test('两个副本抢同一格，恰好一个抢到', async () => {
+    const at = Date.now() + 10 * 60000
+    const due = await dueCron(at)
+
+    // 两个副本会拿到**同一份** due 快照（它们各自扫库，看到的是同一个 nextFireAt），
+    // 然后同时下手 —— 这正是从前被认为会"点两次"的那个场景
+    const results = await Promise.all([
+      crons.claimSlot({ username: due.username, id: due.id, scheduledAt: due.scheduledAt, at }),
+      crons.claimSlot({ username: due.username, id: due.id, scheduledAt: due.scheduledAt, at }),
+    ])
+
+    assert.equal(results.filter(Boolean).length, 1, `抢到的副本数应为 1，实际 ${results.filter(Boolean).length}`)
+  })
+
+  test('八个副本一起抢，还是只有一个抢到', async () => {
+    const at = Date.now() + 10 * 60000
+    const due = await dueCron(at)
+
+    const results = await Promise.all(Array.from({ length: 8 }, () => crons.claimSlot({
+      username: due.username, id: due.id, scheduledAt: due.scheduledAt, at,
+    })))
+
+    assert.equal(results.filter(Boolean).length, 1)
+  })
+
+  /**
+   * 抢占的判据是"当前该触发的那一格**正好等于**我手里这个 scheduledAt"。
+   * 写成"nextFireAt <= now 就抢"的话，两个副本会各自认为自己抢到了 ——
+   * 这条用例把那种写法挡在门外。
+   */
+  test('拿着过期的 scheduledAt 抢不到 —— 那一格已经被推走了', async () => {
+    const at = Date.now() + 10 * 60000
+    const due = await dueCron(at)
+
+    assert.equal(await crons.claimSlot({ username: due.username, id: due.id, scheduledAt: due.scheduledAt, at }), true)
+
+    // 第二个副本手里还是旧的那一格，此时它已经不是"当前该触发的"了
+    assert.equal(
+      await crons.claimSlot({ username: due.username, id: due.id, scheduledAt: due.scheduledAt, at }),
+      false,
+      '同一格被抢走之后，别的副本必须抢不到',
+    )
+  })
+
+  test('抢占的是单条任务，不同任务之间互不影响', async () => {
+    const at = Date.now() + 10 * 60000
+    const a = await crons.create({ username: 'zhangsan', title: 'a', task: 'a', schedule: { cron: '* * * * *', timezone: TZ } })
+    const b = await crons.create({ username: 'lisi', title: 'b', task: 'b', schedule: { cron: '* * * * *', timezone: TZ } })
+
+    const due = await crons.due(at)
+    const claims = await Promise.all(due.map((cron) => crons.claimSlot({
+      username: cron.username, id: cron.id, scheduledAt: cron.scheduledAt, at,
+    })))
+
+    assert.equal(claims.filter(Boolean).length, 2, '两条不同的任务该各自被抢到一次')
+    assert.deepEqual(due.map((cron) => cron.id).sort(), [a.id, b.id].sort())
+  })
+})

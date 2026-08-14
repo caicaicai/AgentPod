@@ -16,7 +16,6 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import { createHmac } from 'node:crypto'
 import { rm, mkdtemp } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import { loadConfig as loadWorkerConfig } from '../sandbox-worker/src/config.js'

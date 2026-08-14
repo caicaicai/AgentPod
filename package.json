@@ -17,7 +17,15 @@
     "web:dev": "npm --prefix web run dev",
     "test": "node --test",
     "check:isolation": "node scripts/check-isolation-rules.js",
-    "check": "npm run check:isolation && npm test"
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "check": "npm run check:isolation && npm run lint && npm test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "eslint": "^9.0.0",
+    "eslint-plugin-vue": "^10.0.0",
+    "globals": "^16.0.0"
   },
   "dependencies": {
     "@mariozechner/pi-ai": "^0.73.0",

@@ -10,13 +10,15 @@
  * @typedef {Object} SessionStore
  * @property {(q: {username: string, sessionKey: string}) => Promise<{sessionId: string, jsonl: string, entryCount: number, title?: string}|null>} load
  * @property {(row: {username: string, sessionKey: string, sessionId: string, jsonl: string, entryCount: number, title?: string}) => Promise<void>} save
- * @property {(q: {username: string, projectId?: string, includeArchived?: boolean}) => Promise<Array>} list
+ * @property {(q: {username: string, projectId?: string, includeArchived?: boolean, limit?: number, cursor?: string}) => Promise<{items: Array, nextCursor: string, hasMore: boolean}>} list
  * @property {(q: {username: string, sessionKey: string, title: string}) => Promise<boolean>} rename
  * @property {(q: {username: string, sessionKey: string}) => Promise<boolean>} remove
  * @property {(q: {username: string, sessionKey: string, title?: string, pinned?: boolean, archived?: boolean, projectId?: string}) => Promise<object|null>} patch
  * @property {(q: {username: string, q: string, limit?: number}) => Promise<Array>} search
  * @property {() => Promise<void>} [close]
  */
+
+import { encodeCursor, decodeCursor, cursorClause, normalizeLimit } from './cursor.js'
 
 function assertScoped(query, where) {
   if (!query?.username) throw new Error(`${where}: 缺少 username —— 会话读写必须按用户隔离（隔离契约 #4）`)
@@ -132,6 +134,20 @@ export async function createMysqlStore({ config, logger, pool: sharedPool = null
       }
     },
 
+    /**
+     * 会话列表，**keyset 翻页**。
+     *
+     * 从前这里是一句硬编的 `LIMIT 200` 且没有任何续页手段 —— 一个重度用户的
+     * 第 201 条会话就此再也翻不到，而且是**静默的**：界面上没有"没有更多了"，
+     * 也没有"还有更多"，看起来就是他只有 200 条对话。
+     *
+     * 排序键与游标的展开见 ./cursor.js。第三段 session_key 是决胜键，
+     * 少了它，同一秒里更新的两条会在页边界上要么漏、要么重。
+     *
+     * @returns {Promise<{ items, nextCursor, hasMore }>}
+     *   `nextCursor` 为空串 = 到底了。调用方**不要**靠 `items.length < limit`
+     *   判断到底 —— 那在"最后一页恰好装满"时会多问一次空页。
+     */
     async list(query) {
       assertScoped(query, 'store.list')
       const where = ['username = ?']
@@ -141,13 +157,33 @@ export async function createMysqlStore({ config, logger, pool: sharedPool = null
         params.push(String(query.projectId || ''))
       }
       if (!query.includeArchived) where.push('archived = 0')
+
+      const cursor = decodeCursor(query.cursor)
+      const clause = cursorClause(cursor)
+      if (clause.sql) {
+        where.push(clause.sql)
+        params.push(...clause.params)
+      }
+
+      const limit = normalizeLimit(query.limit)
       const [rows] = await pool.query(
         `SELECT session_key, session_id, title, entry_count, project_id, pinned, archived, created_at, updated_at
          FROM ap_cloud_session WHERE ${where.join(' AND ')}
-         ORDER BY pinned DESC, updated_at DESC LIMIT ?`,
-        [...params, Number(query.limit) || 200],
+         ORDER BY pinned DESC, updated_at DESC, session_key DESC LIMIT ?`,
+        // 多取一条**只为了回答"还有没有下一页"**，不下发给调用方。
+        // 靠 count(*) 回答同一个问题要多一次全表扫，而调用方真正想知道的
+        // 从来不是"总共几条"，是"还要不要画那个『加载更多』"。
+        [...params, limit + 1],
       )
-      return rows.map(toListRow(query.username))
+
+      const hasMore = rows.length > limit
+      const page = hasMore ? rows.slice(0, limit) : rows
+      const items = page.map(toListRow(query.username))
+      return {
+        items,
+        hasMore,
+        nextCursor: hasMore ? encodeCursor(page[page.length - 1]) : '',
+      }
     },
 
     /** 置顶 / 归档 / 改项目归属。三样合成一条 UPDATE，避免并发下互相覆盖 */

@@ -14,7 +14,7 @@
  * stdout 缓冲、加 `-u`、重定向到文件、改用 stderr、换 curl、"沙盒禁网了"，
  * 写了七八版脚本 —— 每一步推理都合理，因为唯一能证伪它们的事实被我们藏起来了。
  */
-import { test, describe, before, after } from 'node:test'
+import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 

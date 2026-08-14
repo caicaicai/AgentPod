@@ -149,12 +149,12 @@ describe('会话标题', () => {
   test('用户改过的名字，不会被下一轮对话的自动标题冲掉', async () => {
     const store = createMemoryStore()
     await store.save({ username: 'u1', sessionKey: 'k', sessionId: 's', jsonl: '', entryCount: 1, title: '第一次提问' })
-    assert.equal((await store.list({ username: 'u1' }))[0].title, '第一次提问')
+    assert.equal((await store.list({ username: 'u1' })).items[0].title, '第一次提问')
 
     await store.rename({ username: 'u1', sessionKey: 'k', title: '我自己起的名字' })
     // 又聊了一轮，save 会再带一个候选标题过来
     await store.save({ username: 'u1', sessionKey: 'k', sessionId: 's', jsonl: '', entryCount: 2, title: '第二次提问' })
-    assert.equal((await store.list({ username: 'u1' }))[0].title, '我自己起的名字')
+    assert.equal((await store.list({ username: 'u1' })).items[0].title, '我自己起的名字')
   })
 
   test('重命名不存在的会话返回 false，而不是凭空建一条', async () => {

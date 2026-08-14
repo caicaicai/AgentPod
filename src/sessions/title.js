@@ -90,7 +90,7 @@ export function sanitizeTitle(raw) {
 
   text = text
     .replace(/^(标题|title)\s*[:：]\s*/i, '')
-    .replace(/^[「『"'“”‘’《【\[(]+/, '')
+    .replace(/^[「『"'“”‘’《【[(]+/, '')
     .replace(/[」』"'“”‘’》】\])]+$/, '')
     .replace(/[。.!！?？、,，;；]+$/, '')
     .replace(/\s+/g, ' ')

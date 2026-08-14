@@ -51,11 +51,21 @@ function hmacDigest(value) {
   return crypto.createHmac('sha256', 'credential-compare').update(value).digest()
 }
 
-export function signToken(username, secret, ttlSec) {
+/**
+ * 签发。
+ *
+ * `ver` 是**令牌代数**（账号记录里的 tokenVersion）：改密码或禁用账号会把它
+ * 推一格，于是这之前签出去的令牌在下一次请求时就对不上号了。没有它的话，
+ * JWT 是纯无状态的 —— 签出去就收不回来，"改密码"和"禁用某人"都只能等它过期
+ * （默认 24 小时）。见 src/identity/index.js 的校验那一侧。
+ */
+export function signToken(username, secret, ttlSec, tokenVersion = 0) {
   const now = Math.floor(Date.now() / 1000)
   const exp = now + ttlSec
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url')
-  const payload = Buffer.from(JSON.stringify({ sub: username, iat: now, exp })).toString('base64url')
+  const payload = Buffer.from(JSON.stringify({
+    sub: username, iat: now, exp, ver: Number(tokenVersion) || 0,
+  })).toString('base64url')
   const sig = crypto.createHmac('sha256', secret).update(`${header}.${payload}`).digest('base64url')
   return { token: `${header}.${payload}.${sig}`, expiresAt: exp * 1000 }
 }
@@ -75,7 +85,11 @@ export function verifyToken(token, secret) {
     if (typeof data.sub !== 'string' || !data.sub) return null
     if (typeof data.exp === 'number' && data.exp < Math.floor(Date.now() / 1000)) return null
     if (!USERNAME_RE.test(data.sub)) return null
-    return { username: data.sub }
+    /**
+     * 老令牌（这个功能上线之前签的）没有 ver 字段，当 0 —— 与账号记录里
+     * 缺字段时当 0 对上，于是升级当天没有人被踢下线。
+     */
+    return { username: data.sub, tokenVersion: Number(data.ver) || 0 }
   } catch {
     return null
   }

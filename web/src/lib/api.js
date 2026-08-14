@@ -267,6 +267,13 @@ export const api = {
   me: () => request('/v1/auth/me'),
 
   /**
+   * 这个人手上还有哪些 run 在跑。**刷新页面之后靠它把断掉的那条找回来** ——
+   * 会话正文要等一轮结束才落库，所以刷新后的历史里没有正在生成的那一轮，
+   * 不问一句的话，用户看到的是"我刚发的那句话之后就没了"。
+   */
+  runs: (sessionKey = '') => request(`/v1/runs${sessionKey ? q({ sessionKey }) : ''}`),
+
+  /**
    * 管理员接口。前端画不画入口由 `/v1/auth/me` 回的 `account.role` 决定，
    * 但**真正的判定在服务端** —— 这里少判一次只是界面难看，服务端少判一次是越权。
    */
@@ -400,6 +407,22 @@ export async function streamChat({ prompt, sessionKey, model, projectId, attachm
     throw toApiError(response, payload, text, { method: 'POST', path: '/v1/chat/stream' })
   }
 
+  await readSseStream(response, onFrame, startedAt)
+  streamTrace.endedAt = Math.round(performance.now() - startedAt)
+}
+
+/**
+ * 把一条 SSE 响应读到底，按帧回调。
+ *
+ * 抽出来是因为现在有**两条**流走同一套解析：一条是发起新一轮的
+ * `/v1/chat/stream`（POST），一条是断线之后接回去的 `/v1/runs/:id/events`（GET）。
+ * 复制一份的话，两边迟早只改了其中一边 —— 而"重连回来的那条流少解析了一种帧"
+ * 这种毛病，只会在真的断过线的用户身上出现。
+ *
+ * `id:` 那一行是**断点**（服务端写的是 run 缓冲里的序号，见 src/agent/run-registry.js）。
+ * 从前这一行是被忽略的，因为没有任何东西需要它。
+ */
+async function readSseStream(response, onFrame, startedAt = performance.now()) {
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -416,9 +439,11 @@ export async function streamChat({ prompt, sessionKey, model, projectId, attachm
       const chunk = buffer.slice(0, index)
       buffer = buffer.slice(index + 2)
       let type = 'message'
+      let seq = 0
       const dataLines = []
       for (const line of chunk.split('\n')) {
         if (line.startsWith('event:')) type = line.slice(6).trim()
+        else if (line.startsWith('id:')) seq = Number(line.slice(3).trim()) || 0
         else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
       }
       if (!dataLines.length) continue
@@ -434,11 +459,37 @@ export async function streamChat({ prompt, sessionKey, model, projectId, attachm
         streamTrace.dropped += 1
       }
       try {
-        onFrame(type, JSON.parse(dataLines.join('\n')))
+        onFrame(type, JSON.parse(dataLines.join('\n')), seq)
       } catch {
         // 单帧解析失败不该中断整条流
       }
     }
   }
-  streamTrace.endedAt = Math.round(performance.now() - startedAt)
+}
+
+/**
+ * 断线之后接回一条**还在跑**的流。
+ *
+ * @param {string} runId  从 run_start 帧里拿到的
+ * @param {number} from   已经收到的最后一帧序号；服务端只重放它之后的
+ *
+ * 与 streamChat 是两条不同的路，这一点很要紧：那条是 POST（"跑一轮新的"），
+ * 拿它做重连的话，一次网络抖动就会变成又跑一轮、又烧一份 token。
+ */
+export async function resumeRun({ runId, from = 0, signal }, onFrame) {
+  const response = await fetch(`/v1/runs/${encodeURIComponent(runId)}/events?from=${from}`, {
+    method: 'GET',
+    credentials: 'include',
+    headers: headers(),
+    signal,
+  })
+
+  if (!response.ok || !response.body) {
+    const text = await response.text().catch(() => '')
+    let payload = null
+    try { payload = JSON.parse(text) } catch { /* 非 JSON 就用原文 */ }
+    throw toApiError(response, payload, text, { method: 'GET', path: `/v1/runs/${runId}/events` })
+  }
+
+  await readSseStream(response, onFrame)
 }

@@ -9,7 +9,7 @@
  * vue 装在 web/node_modules 下（前端是独立的 npm 工程），所以从那儿解析。
  * 解析不到就跳过：根目录 `npm test` 不该因为没跑过 `npm run web:install` 就红。
  */
-import { test, describe, skip } from 'node:test'
+import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import path from 'node:path'

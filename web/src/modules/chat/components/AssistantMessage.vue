@@ -74,7 +74,17 @@ async function copy() {
         重试期间盖掉普通的等待提示：这十几秒里"正在思考…"是**假话**，
         真实情况是模型调用失败了、正在退避等待重发。
       -->
-      <div v-if="!props.turn.done && props.turn.retry" class="waiting">
+      <!--
+        断线重连要排在最前面：这时候连"模型调用失败"都不成立 —— 我们根本
+        不知道那边怎么样了，只知道自己这条连接断了。而服务端那一轮**还在跑**，
+        所以不能显示成失败，那会让用户以为白花了一次。
+      -->
+      <div v-if="!props.turn.done && props.turn.reconnecting" class="waiting">
+        <span class="spinner" />
+        连接已断开，正在重连（第 {{ props.turn.reconnecting.attempt }}/{{ props.turn.reconnecting.max }} 次）…
+        <span class="hint">这一轮仍在服务端继续，接回来就能看到</span>
+      </div>
+      <div v-else-if="!props.turn.done && props.turn.retry" class="waiting">
         <span class="spinner" />
         模型调用失败，{{ Math.round(props.turn.retry.delayMs / 1000) }} 秒后重试（第
         {{ props.turn.retry.attempt }}/{{ props.turn.retry.maxAttempts }} 次）…
@@ -185,6 +195,11 @@ async function copy() {
   padding: 6px 0;
   color: var(--muted-foreground);
   font-size: 13.5px;
+}
+/* 重连提示里那句"这一轮仍在服务端继续" —— 比主句轻一档，它是安慰不是状态 */
+.waiting .hint {
+  opacity: 0.7;
+  font-size: 12px;
 }
 .retry-note {
   margin-top: 6px;

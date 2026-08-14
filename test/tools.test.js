@@ -17,7 +17,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 
 import { createToolContext, describeCredential } from '../src/tools/context.js'
-import { createPluginApi, normalizeToolResult, jsonResult } from '../src/tools/plugin-api.js'
+import { createPluginApi, normalizeToolResult } from '../src/tools/plugin-api.js'
 import { buildApTools } from '../src/tools/index.js'
 import { registerTaskPlanTool } from '../src/tools/task-plan.js'
 

@@ -20,10 +20,18 @@ import { generateTitle } from '../sessions/title.js'
 export function createRunService({
   config, logger, store, sandbox, broker, metrics, workspace = null,
   skillManager = null, memory = null, memoryCapture = null, projects = null, crons = null,
-  artifacts = null, usage = null,
+  artifacts = null, usage = null, registry = null,
 }) {
   const active = new Map() // runId -> { username, abort, startedAt, source }
   const perUser = new Map() // username -> count
+
+  /**
+   * 事件缓冲。传了才开断线重连（见 src/agent/run-registry.js）。
+   *
+   * 做成可选依赖而不是内建：定时任务和 OpenAPI 那两条入口没有"客户端"这回事，
+   * 给它们也缓冲一份帧，纯粹是白占内存。今天只有 HTTP 那条路传它进来。
+   */
+  const runRegistry = registry
 
   /**
    * 技能在启动时读一次，不是每 run 读一遍：SKILL_DIRS 指向的是随镜像发布的只读资产，
@@ -237,10 +245,24 @@ export function createRunService({
 
       acquire(username)
       active.set(runId, { username, abort: () => {}, startedAt: Date.now(), source })
+      runRegistry?.open({ runId, username, sessionKey })
+
+      /**
+       * 所有出去的帧都走这里。
+       *
+       * 两件事：**先记进缓冲**（断线的人回来要重放它），**再把序号一起交给
+       * 调用方** —— HTTP 层把它写成 SSE 的 `id:`，客户端据此知道自己收到第几帧了，
+       * 重连时拿它当断点。顺序不能反：先发后记的话，客户端可能拿到一个
+       * 缓冲里还不存在的序号，然后带着它回来问一段谁也给不出的历史。
+       */
+      const emit = (type, data) => {
+        const seq = runRegistry?.append(runId, type, data) || 0
+        onFrame(type, data, seq)
+      }
 
       const startedAt = Date.now()
       try {
-        onFrame('run_start', { runId, sessionKey })
+        emit('run_start', { runId, sessionKey })
 
         const access = await broker.getLlmAccess(subject)
         const llm = pickModel(access.models, modelId)
@@ -267,7 +289,7 @@ export function createRunService({
            */
           maxTokensField: llm.maxTokensField || config.llm?.maxTokensField || '',
         })
-        onFrame('model', { id: model.id, baseUrl: model.baseUrl, contextWindow: model.contextWindow, stale: access.stale })
+        emit('model', { id: model.id, baseUrl: model.baseUrl, contextWindow: model.contextWindow, stale: access.stale })
 
         // 沙盒会话在这里创建而不是在 runTurn 里：工具（如 workstation_browser）也要用它，
         // 两边必须是同一个租约，否则浏览器开在一个副本、bash 跑在另一个副本上。
@@ -380,7 +402,7 @@ export function createRunService({
                 attempt: data.attempt, maxAttempts: data.maxAttempts, delayMs: data.delayMs, model: model.id,
               })
             }
-            onFrame(type, data)
+            emit(type, data)
           },
           onStart: ({ abort }) => {
             const entry = active.get(runId)
@@ -432,7 +454,7 @@ export function createRunService({
           usageInput: result.usage.input,
           usageOutput: result.usage.output,
         })
-        onFrame('final', {
+        emit('final', {
           runId,
           text: result.finalText,
           entryCount: result.entryCount,
@@ -486,11 +508,41 @@ export function createRunService({
         const durationMs = Date.now() - startedAt
         metrics?.recordRun({ username, source, status: error.code || 'ERROR', durationMs })
         runLogger.warn('run 失败', { code: error.code, message: error.message, durationMs })
-        onFrame('error', { runId, code: error.code || 'INTERNAL', message: error.message, retryable: Boolean(error.retryable) })
+        emit('error', { runId, code: error.code || 'INTERNAL', message: error.message, retryable: Boolean(error.retryable) })
         throw error
       } finally {
         release(username, runId)
+        /**
+         * 收掉缓冲要排在 release 之后、且在**所有帧都发完之后** ——
+         * close 会给正在听的重连者推一个"结束了"的信号，早发一步的话，
+         * 他们会在拿到 final 帧之前就被告知这一轮已经结束。
+         *
+         * 缓冲本身不会立刻消失（留 5 分钟，见 run-registry.js）：
+         * 最容易断线的时刻恰恰是这一轮刚跑完。
+         */
+        runRegistry?.close(runId)
       }
+    },
+
+    /**
+     * 断线之后接回一条还在跑的流。HTTP 层用它实现 `GET /v1/runs/:id/events`。
+     *
+     * **归属校验在这里做**：registry 里只有 runId，而 runId 是会出现在
+     * 前端日志、错误上报里的东西 —— 不校验就等于"知道 runId 的人能看这段对话"。
+     */
+    attach({ runId, username, from = 0, listener }) {
+      if (!runRegistry) throw Errors.notFound('本部署未开启 run 重连')
+      const runs = runRegistry.listFor(username)
+      if (!runs.some((run) => run.runId === runId)) {
+        // 不区分"不存在"和"不是你的" —— 区分开就成了一个探测别人 runId 的接口
+        throw Errors.notFound('run 不存在、已过期或不属于你')
+      }
+      return runRegistry.subscribe(runId, from, listener)
+    },
+
+    /** 这个人手上有哪些还在跑（或刚跑完还留着）的 run。界面刷新后靠它找回断掉的那条 */
+    listRuns({ username, sessionKey = '' }) {
+      return runRegistry ? runRegistry.listFor(username, { sessionKey }) : []
     },
   }
 }

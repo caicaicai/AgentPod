@@ -1,0 +1,78 @@
+# 提交与 PR 上跑的检查。
+#
+# ── 为什么这个文件值得存在 ──────────────────────────────────────────────
+#
+# 这个仓库有 1100 多条测试和一个专门的隔离契约校验脚本，在此之前**没有任何东西
+# 自动跑它们** —— 全靠每个人记得在推之前敲一遍 `npm run check`。那种约定的失效
+# 方式很安静：谁赶时间跳过一次，红的那条测试就一路躺到下一个人手里，
+# 而那时已经分不清是谁改坏的了。
+#
+# ── 三个 job 而不是一个 ─────────────────────────────────────────────────
+#
+# 拆开是为了让失败**一眼能归因**：红的是 lint、是服务端测试、还是前端构建，
+# 在列表上直接看得到，不用点进日志翻。三个可以并行，总时长取决于最慢的那个。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一个分支上连着推几次时，把还在跑的旧任务取消掉 —— 没人关心倒数第二次提交
+# 的测试结果，而它们在排队占位置。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: 代码检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.19'
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
+  test:
+    name: 服务端测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # package.json 的 engines 写的是 >=20.11。**按下限跑** ——
+          # 在最新版上跑只能证明"在最新版上能跑"，而部署环境未必是最新版。
+          node-version: '20.19'
+          cache: npm
+      - run: npm ci
+
+      # 隔离契约的静态校验。它排在测试**之前**：这条一旦破了，
+      # 下面那些用例即使全绿也说明不了什么（见 scripts/check-isolation-rules.js）。
+      - name: 隔离契约自检
+        run: npm run check:isolation
+
+      # 测试全程不需要 MySQL —— 存储层在用例里由 test/helpers/memory-storage.js
+      # 顶替。真要连库的那部分属于集成测试，不在这条流水线上。
+      - name: 单元测试
+        run: npm test
+
+  web:
+    name: 前端构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # 前端的 engines 要求比服务端高（Vite 7 的下限）
+          node-version: '20.19'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --prefix web
+
+      # 构建本身就是检查：Vue 单文件组件里的语法错、import 不到的模块，
+      # 都要到这一步才现形 —— 服务端那套测试一个都发现不了。
+      - run: npm run build --prefix web

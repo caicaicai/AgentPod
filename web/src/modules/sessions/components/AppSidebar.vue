@@ -5,7 +5,7 @@ import AppIcon from '@/components/AppIcon.vue'
 import SessionRow from './SessionRow.vue'
 import {
   createProject, deleteSession, getDevUsername, identityName, logout, openSession, patchSession,
-  renameSession, scheduleSearch, setDevUsername, startNewSession, state, switchProject,
+  loadMoreSessions, renameSession, scheduleSearch, setDevUsername, startNewSession, state, switchProject,
   toggleTheme, togglePanel, openLibrary, openMarket, openAdmin, isAdmin,
 } from '@/stores/app.js'
 import { askConfirm, askText } from '@/lib/dialog.js'
@@ -184,6 +184,21 @@ function onDevUsernameChange(event) {
           @open="openSession"
           @action="onRowAction"
         />
+
+        <!--
+          翻页入口。从前没有它 —— 服务端硬编 LIMIT 200 且没有续页手段，
+          第 201 条对话就此再也翻不到，而界面上看起来他就只有 200 条。
+          `hasMore` 由服务端说了算，不靠"这一页装满了没"猜。
+        -->
+        <button
+          v-if="state.sessionsHasMore"
+          type="button"
+          class="load-more"
+          :disabled="state.sessionsLoadingMore"
+          @click="loadMoreSessions"
+        >
+          {{ state.sessionsLoadingMore ? '加载中…' : '加载更早的对话' }}
+        </button>
 
         <div v-if="!state.sessions.length && !state.pendingNew" class="list-empty">
           {{ state.projectId ? '这个项目下还没有对话' : '还没有会话，上面开一个' }}
@@ -506,6 +521,28 @@ function onDevUsernameChange(event) {
   color: var(--muted-foreground);
   font-size: 12.5px;
   line-height: 1.6;
+}
+
+/* 「加载更早的对话」。做得比会话行轻一档：它是个动作，不是列表内容 */
+.load-more {
+  width: 100%;
+  margin: 6px 0 2px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+  text-align: center;
+  cursor: pointer;
+}
+.load-more:hover:not(:disabled) {
+  background: var(--muted);
+  color: var(--foreground);
+}
+.load-more:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 /* 还没落库的「新对话」行：和真会话长得一样，但不可点也没有菜单 */

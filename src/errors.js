@@ -32,6 +32,12 @@ export const Errors = {
   conflict: (message, details) => new AppError(message, { code: 'CONFLICT', status: 409, details }),
   /** 并发预算打满 —— 可重试 */
   busy: (message, details) => new AppError(message, { code: 'BUSY', status: 429, retryable: true, details }),
+  /**
+   * 被限流挡下。与 busy 同为 429 但**分开一个 code**：busy 是"服务器这会儿忙，
+   * 马上重试就行"，这个是"你请求得太频繁，再打还会更久" —— 界面要说的话
+   * 和调用方该做的退避完全不同。details.retryAfterMs 告诉对方等多久。
+   */
+  rateLimited: (message, details) => new AppError(message, { code: 'RATE_LIMITED', status: 429, retryable: true, details }),
   /** 上游（平台后端 / 模型网关 / 沙盒）故障 —— 可重试 */
   upstream: (message, details) => new AppError(message, { code: 'UPSTREAM', status: 502, retryable: true, details }),
   timeout: (message, details) => new AppError(message, { code: 'TIMEOUT', status: 504, retryable: true, details }),

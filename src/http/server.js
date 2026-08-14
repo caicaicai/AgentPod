@@ -13,11 +13,15 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { normalizeAttachments } from '../agent/attachments.js'
-import { artifactFileName, artifactDisposition } from '../artifacts/store.js'
 import { AppError, Errors, toAppError } from '../errors.js'
 import { validateCredentials, signToken } from '../identity/password-auth.js'
-import { assertSegment } from '../persistence/paths.js'
 import { toPublicModels } from '../models/llminfo-client.js'
+import { createRateLimiter, clientIp } from './rate-limit.js'
+import { createAccountRoutes } from './routes/accounts.js'
+import { sendArtifactFile } from './routes/artifact-io.js'
+import { createArtifactRoutes } from './routes/artifacts.js'
+import { createProjectRoutes } from './routes/projects.js'
+import { createCronRoutes } from './routes/crons.js'
 import { parseTranscript } from '../sessions/transcript.js'
 import { describeCredential } from '../tools/context.js'
 import { resolveTraceId } from '../trace.js'
@@ -120,15 +124,26 @@ function openSse(res) {
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   })
-  let seq = 0
+  let fallbackSeq = 0
   let closed = false
   return {
-    send(type, data) {
+    /**
+     * @param {number} [seq] 这一帧在 run 缓冲里的序号。
+     *
+     * 传了就用它当 SSE 的 `id:` —— 这才是客户端断线重连时能带回来的断点
+     * （见 src/agent/run-registry.js）。不传就退回本连接内的自增计数，
+     * 那对不带缓冲的流（没有重连需求的）够用。
+     *
+     * ⚠️ 两者不能混：一条流上一会儿发缓冲序号、一会儿发本地计数，
+     * 客户端拿回来的断点就指不到任何真实的帧上。
+     */
+    send(type, data, seq) {
       // 收尾之后再来的帧直接丢掉，而不是往已经 end 的响应上写（那会抛
       // ERR_STREAM_WRITE_AFTER_END，把一次已经成功的对话变成一条错误日志）
       if (closed) return
-      seq += 1
-      res.write(`id: ${seq}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n`)
+      fallbackSeq += 1
+      const id = Number(seq) > 0 ? Number(seq) : fallbackSeq
+      res.write(`id: ${id}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n`)
     },
     /** 幂等：正常路径上会被调用两次（收到末帧一次、外层 finally 一次） */
     end() {
@@ -181,11 +196,66 @@ async function serveStatic(res, pathname, { webDir, confineTo = webDir } = {}) {
 }
 
 export function createServer({
-  config, logger, identity, broker, runService, store, llmInfoClient, metrics, workspace = null,
+  config, logger, identity, broker, runService, store, metrics, workspace = null,
   skillManager = null, memory = null, projects = null, crons = null, scheduler = null, cronVault = null,
   artifacts = null, shares = null, users = null, usage = null, modelStore = null, groups = null,
 }) {
   const webDir = config.webDir || DEFAULT_WEB_DIR
+
+  /**
+   * 登录限流的两道闸。两者的计数口径不同，理由见 src/http/rate-limit.js 文件头：
+   * 按 IP 的每次尝试都记（挡 DoS，必须在 scrypt 之前），按用户名的只记失败（挡爆破）。
+   *
+   * `enabled=false` 时建成 null 而不是建一个"额度无限"的限流器：后者仍然会为
+   * 每个 key 在 Map 里留一条，关掉限流反而多出一片可以被灌的内存。
+   */
+  const rateLimitConfig = config.auth.password?.rateLimit
+  const loginLimits = rateLimitConfig?.enabled
+    ? {
+      ip: createRateLimiter({
+        windowMs: rateLimitConfig.ipWindowMs,
+        max: rateLimitConfig.ipMax,
+        baseBlockMs: rateLimitConfig.baseBlockMs,
+        maxBlockMs: rateLimitConfig.maxBlockMs,
+      }),
+      user: createRateLimiter({
+        windowMs: rateLimitConfig.userWindowMs,
+        max: rateLimitConfig.userMax,
+        baseBlockMs: rateLimitConfig.baseBlockMs,
+        maxBlockMs: rateLimitConfig.maxBlockMs,
+      }),
+    }
+    : null
+
+  /**
+   * 账号与管理台那一整块（见 ./routes/accounts.js）。
+   * 在这里建一次而不是每个请求建一次 —— 它只是把依赖闭包起来，没有 per-request 状态。
+   */
+  const accountRoutes = createAccountRoutes({ config, identity, users, groups, modelStore, usage })
+  /**
+   * 按领域拆出来的其余几块（见 ./routes/）。
+   *
+   * ⚠️ **调用顺序就是从前 if 链的顺序，不许重排。** 那条链里有几处是靠前后关系
+   * 成立的（前缀匹配谁先谁后、鉴权在哪一行之后），重排不会报错，
+   * 只会让某条路由被别人提前吃掉 —— 而现象是"接口写好了却永远调不通"。
+   */
+  const artifactRoutes = createArtifactRoutes({ artifacts, shares, config })
+  const projectRoutes = createProjectRoutes({ projects, store, config })
+  const cronRoutes = createCronRoutes({ crons, scheduler, cronVault, config })
+
+  /**
+   * 429 要带 `Retry-After` 头 —— 不带的话客户端只能靠猜，而猜出来的多半是
+   * "立刻再试一次"，正好是我们要挡的行为。
+   *
+   * 头在这里 setHeader，body 里的 details 再带一份秒数：头是给代理和 curl 看的，
+   * body 是给前端拿去渲染"请 N 秒后重试"的（与 sendJson 里 requestId 两处都放
+   * 同一个道理）。writeHead 会把先前 setHeader 的合并进去，所以这里设了就带得上。
+   */
+  function rejectRateLimited(res, message, retryAfterMs) {
+    const retryAfterSec = Math.max(1, Math.ceil(retryAfterMs / 1000))
+    res.setHeader('Retry-After', String(retryAfterSec))
+    throw Errors.rateLimited(message, { retryAfterMs, retryAfterSec })
+  }
 
   /**
    * 读一份作品的正文，把 store 抛出来的两类失败翻译成对应的 HTTP 语义。
@@ -205,39 +275,6 @@ export function createServer({
     return current
   }
 
-  /**
-   * 下发作品里的**单个文件的原文**。登录态那条路和分享那条路共用这一份。
-   *
-   * ⚠️ **无论什么后缀，一律 `text/plain`。** 这里躺着的是模型生成的 HTML：
-   * 用 `text/html` 回，这个 URL 就成了一个**同源**的、内容由模型（也就可能由
-   * 一封诱导邮件）决定的页面 —— 它能读走 localStorage 里的登录令牌。
-   * 预览走的是另一条路：文件进 JSON，由前端拼好后塞进不带 allow-same-origin 的
-   * sandbox iframe（见 web/src/modules/artifacts/artifact-view.js）。
-   * 所以这条不变量很值钱：**本服务从不以 HTML 的身份吐出任何模型生成的内容。**
-   *
-   * 抽成一个函数正是为了守住它：分享功能上线时这段逻辑差点被复制一份，
-   * 而复制出来的那份迟早只改了其中一边 —— 那种漏洞从日志里一点也看不出来。
-   */
-  function sendArtifactFile(res, { current, wanted, download }) {
-    const target = wanted || current.meta.entry
-    const file = current.files.find((item) => item.path === target)
-    if (!file) throw Errors.notFound(`第 ${current.version} 版没有 ${target}`)
-
-    const body = Buffer.from(file.content, 'utf8')
-    res.writeHead(200, {
-      'Content-Type': 'text/plain; charset=utf-8',
-      'Content-Length': body.length,
-      // 没有它，浏览器会去嗅探内容，一段 HTML 照样能被当页面渲染 ——
-      // 上面那条不变量就白写了
-      'X-Content-Type-Options': 'nosniff',
-      'Content-Disposition': artifactDisposition({
-        fileName: artifactFileName({ title: current.meta.title, entry: file.path }),
-        download: Boolean(download),
-      }),
-      'Cache-Control': 'no-store',
-    })
-    return res.end(body)
-  }
 
   const server = http.createServer(async (req, res) => {
     const requestId = randomUUID().slice(0, 8)
@@ -293,6 +330,12 @@ export function createServer({
           // 管理台的「Token 用量」那一页。只有管理员看得到那一页，但这个宣告是公开的：
           // 它说的是"这个部署记不记账"，不是"谁用了多少"
           usage: Boolean(usage?.enabled),
+          /**
+           * 断线之后能不能接回还在跑的那一轮。前端据此决定要不要在流断掉时
+           * 去试重连 —— 没有这个宣告的话，它只能盲试一次注定 404 的请求，
+           * 而那次失败会盖掉真正该显示的"连接断了"。
+           */
+          runResume: typeof runService.attach === 'function',
         },
         // 只有 mysql 一种，报出来是给运维确认"我确实连着库"
         storage: 'mysql',
@@ -319,6 +362,22 @@ export function createServer({
         return sendJson(res, 404, { error: 'NOT_FOUND', message: '当前 AUTH_MODE 不支持密码登录' })
       }
 
+      /**
+       * ⚠️ 按 IP 的闸必须是这一块的**第一件事** —— 早于读请求体，更早于 scrypt。
+       *
+       * 顺序在这里就是全部意义所在：密码校验一次要烧 100ms CPU 和 16MB 内存
+       * （见 rate-limit.js 文件头），放到校验之后再限流，等于每个被拒的请求
+       * 也已经把那份代价付掉了，闸门形同虚设。
+       */
+      if (loginLimits) {
+        const ip = clientIp(req, { trustProxy: config.trustProxy })
+        const gate = loginLimits.ip.consume(`${ip}|${url.pathname}`)
+        if (!gate.ok) {
+          reqLogger.warn('登录请求过于频繁，按 IP 拒绝', { ip, path: url.pathname, retryAfterMs: gate.retryAfterMs })
+          rejectRateLimited(res, '请求过于频繁，请稍后再试', gate.retryAfterMs)
+        }
+      }
+
       /** 用户名和密码两个字段的取法一模一样，别写三遍 */
       async function readCredentials() {
         const body = await readJsonBody(req, config.limits.bodyLimitBytes)
@@ -332,6 +391,23 @@ export function createServer({
       if (req.method === 'POST' && url.pathname === '/v1/auth/login') {
         const { body, username } = await readCredentials()
         if (typeof body.password !== 'string' || !body.password) throw Errors.badRequest('密码必填')
+
+        /**
+         * 按用户名的闸。key 统一小写：大小写换着写就换一个额度桶的话，
+         * 这道闸绕起来太便宜了。
+         *
+         * 这里是 peek（只问在不在封禁中，不计数）—— 计数要留到**知道成没成功
+         * 之后**再做，见下面。放在 scrypt 之前是同一个理由：被封的用户名不该
+         * 还能让我们去跑一次密钥派生。
+         */
+        const userKey = username.toLowerCase()
+        if (loginLimits) {
+          const gate = loginLimits.user.peek(userKey)
+          if (!gate.ok) {
+            reqLogger.warn('该账号失败次数过多，暂时锁定', { username, retryAfterMs: gate.retryAfterMs })
+            rejectRateLimited(res, '登录失败次数过多，该账号已被暂时锁定，请稍后再试', gate.retryAfterMs)
+          }
+        }
 
         /**
          * 账号来自存储（见 src/identity/user-store.js）。没接 users 时才退回
@@ -357,6 +433,19 @@ export function createServer({
         }
 
         if (!ok) {
+          /**
+           * 失败才计数。用"尝试数"计会误伤 —— 一个人在几个标签页里同时登录是
+           * 正常的，而连续失败五次不是（见 rate-limit.js 文件头）。
+           *
+           * `disabled` 也照记：被禁用的账号更是不该被人拿来反复试密码。
+           */
+          if (loginLimits) {
+            const gate = loginLimits.user.consume(userKey)
+            if (!gate.ok) {
+              reqLogger.warn('密码登录失败次数达到上限，锁定该账号', { username, reason, retryAfterMs: gate.retryAfterMs })
+              rejectRateLimited(res, '登录失败次数过多，该账号已被暂时锁定，请稍后再试', gate.retryAfterMs)
+            }
+          }
           // 日志里记下真实原因（禁用 / 密码错 / 无此人），**响应里一律同一句** ——
           // 区分开就等于告诉撞库的人"这个用户名是对的，继续猜密码"
           reqLogger.warn('密码登录失败', { username, reason })
@@ -364,7 +453,14 @@ export function createServer({
           throw Errors.unauthenticated('用户名或密码错误')
         }
 
-        const { token, expiresAt } = signToken(username, identity.passwordSecret, ttlSec)
+        // 成功就清零：之前那几次手滑不该留在账上，否则"错三次再输对"的人
+        // 下一次登录会莫名其妙地更接近被锁
+        loginLimits?.user.reset(userKey)
+
+        // 令牌里要带上当前代数，之后每个请求据此判断它还算不算数
+        // （见 src/identity/index.js）。没接账号存储时是 0，行为与从前一致。
+        const version = users ? (await users.authState(username))?.tokenVersion || 0 : 0
+        const { token, expiresAt } = signToken(username, identity.passwordSecret, ttlSec, version)
         reqLogger.info('密码登录成功', { username })
         return sendJson(res, 200, { ok: true, token, expiresAt, username })
       }
@@ -387,7 +483,10 @@ export function createServer({
           // 而那时还没有任何管理员可以来授权
           const first = (await users.count()) === 0
           const user = await users.create({ username, password: body.password, role: first ? 'admin' : 'user' })
-          const { token, expiresAt } = signToken(username, identity.passwordSecret, ttlSec)
+          // 新账号的代数就是 0，但还是从存储里取 —— 免得将来 create 改了初值，
+          // 这里签出一张一进门就对不上号的令牌
+          const version = (await users.authState(username))?.tokenVersion || 0
+          const { token, expiresAt } = signToken(username, identity.passwordSecret, ttlSec, version)
           reqLogger.info('注册成功', { username, role: user.role })
           return sendJson(res, 201, { ok: true, user, token, expiresAt, username })
         } catch (error) {
@@ -533,353 +632,12 @@ export function createServer({
     }
 
     /* ─────────────── 账号（改密 / 管理）─────────────── */
-
     /**
-     * `/v1/admin/` 整个前缀都收在这一块里（管人、看用量）。
-     *
-     * 前缀匹配在这儿是安全的，而在鉴权**之前**那块 auth 路由里不行 ——
-     * 区别在于：那边前缀一宽就会把需要登录的路由当成匿名的未知接口吃掉（真发生过，
-     * 见下面 /v1/auth/password 那段的注释）；这边前缀一宽只会让新的 /v1/admin/*
-     * 自动继承"必须是管理员"这条判定，而那正是我们要的默认值。
+     * 这一整块（改密 + `/v1/admin/*`）搬到了 ./routes/accounts.js。
+     * **位置不能动**：它要在鉴权之后（每条都要 subject），
+     * 而 `/v1/admin/` 的前缀匹配又要早于下面那些具体路径。
      */
-    if (url.pathname === '/v1/auth/password' || url.pathname.startsWith('/v1/admin/')) {
-      if (!users) throw Errors.notFound('本部署未启用账号存储（AUTH_MODE 不是 password）')
-
-      /**
-       * 改自己的密码。**必须带旧密码**。
-       *
-       * 令牌可能是从别人电脑上、从一次共享屏幕里拿到的；只凭令牌就能改密，
-       * 等于把"临时借用"直接变成"永久接管"，而真正的主人连登录都做不到了。
-       */
-      if (req.method === 'POST' && url.pathname === '/v1/auth/password') {
-        const body = await readJsonBody(req, config.limits.bodyLimitBytes)
-        try {
-          const result = await users.changePassword({
-            username: subject.username,
-            oldPassword: body.oldPassword,
-            newPassword: body.newPassword,
-          })
-          if (!result.ok) throw Errors.badRequest(result.error || '改密失败')
-          reqLogger.info('用户改密成功', { username: subject.username })
-          /**
-           * 已签发的令牌**不会失效** —— 签名密钥没变，旧令牌到期前照样能用。
-           * 如实告诉调用方，别让人以为改完密码就把别处的登录踢掉了。
-           */
-          return sendJson(res, 200, { ok: true, tokensRevoked: false })
-        } catch (error) {
-          if (error instanceof AppError) throw error
-          throw Errors.badRequest(error.message)
-        }
-      }
-
-      /* ── 以下要管理员 ── */
-      const me = await users.get(subject.username)
-      if (me?.role !== 'admin') throw Errors.forbidden('需要管理员权限')
-
-      if (req.method === 'GET' && url.pathname === '/v1/admin/users') {
-        return sendJson(res, 200, { users: await users.list() })
-      }
-
-      if (req.method === 'POST' && url.pathname === '/v1/admin/users') {
-        const body = await readJsonBody(req, config.limits.bodyLimitBytes)
-        try {
-          // groupId 不传 = 进默认分组（user-store 去查）；传空串 = 明确不进任何分组
-          if (typeof body.groupId === 'string' && body.groupId && !(await groups?.get(body.groupId))) {
-            throw Errors.badRequest('分组不存在')
-          }
-          const created = await users.create({
-            username: body.username,
-            password: body.password,
-            role: body.role,
-            ...(typeof body.groupId === 'string' ? { groupId: body.groupId } : {}),
-          })
-          reqLogger.info('管理员创建账号', { by: subject.username, username: created.username, group: created.groupId })
-          return sendJson(res, 201, { ok: true, user: created })
-        } catch (error) {
-          throw Errors.badRequest(error.message)
-        }
-      }
-
-      /* ── Token 用量 ── */
-
-      /**
-       * 谁在用多少 token、花在哪个模型上。
-       *
-       * 只回聚合数：次数、输入/输出/缓存读入的 token、最近一次的时间。
-       * **一个字的对话内容都不经过这里** —— 管理员该看得见成本，不该顺带看见
-       * 别人写了什么，而"顺带能看见"迟早会有人真的去看。
-       *
-       *   days   时间窗（默认 30，0 = 全部）
-       *   group  `user`（默认）每个账号一行、带他用过的模型；`model` 每个模型一行、
-       *          带用了它的人。同一份交叉表的两种转置，所以两页合计相等。
-       *
-       * 台账里没有的账号也会出现在 `group=user` 的清单里（一行 0），否则"没用过"
-       * 和"不存在"在界面上长得一样。模型那一维没有这层补零：服务端没有"本部署有
-       * 哪些模型"的权威清单（每个用户的可用模型是各自从 llminfo 拿的）。
-       */
-      if (req.method === 'GET' && url.pathname === '/v1/admin/usage') {
-        if (!usage?.enabled) return sendJson(res, 200, { enabled: false, users: [], models: [], total: null })
-        return sendJson(res, 200, await usage.summary({
-          accounts: await users.list(),
-          days: url.searchParams.get('days'),
-          group: url.searchParams.get('group') || 'user',
-        }))
-      }
-
-      /**
-       * 展开一行看趋势（按天）。
-       *
-       * 路径分成 `.../usage/user/<名字>` 与 `.../usage/model/<模型>` 两条，而不是
-       * 共用一个 `.../usage/<谁>`：模型 id 和用户名住在同一层的话，一个叫 `model`
-       * 的账号就能把另一条路由遮掉。多一段前缀换掉这类**取决于命名巧合**的歧义。
-       *
-       * 汇总不在这两条路由上 —— 它已经在总表每一行里带下来了，展开时不再打一次，
-       * 也就不会出现"表里 450,092、展开后 450,091"这种对不上。
-       */
-      if (req.method === 'GET' && url.pathname.startsWith('/v1/admin/usage/user/')) {
-        /**
-         * 名字先过一遍字符集再往下传。
-         *
-         * 用的是**存储层那一个** assertSegment，不是账号那一个 assertUsername：
-         * 后者允许 `..`（当用户名它没问题），而存储层会拒绝它并抛一个普通 Error ——
-         * 于是一个打错的名字会表现成 500。两处用同一个判据，过了这里就一定过那边。
-         */
-        let who
-        try {
-          who = assertSegment(decodeURIComponent(url.pathname.slice('/v1/admin/usage/user/'.length) || ''), '用户名')
-        } catch (error) {
-          throw Errors.badRequest(error.message)
-        }
-        if (!usage?.enabled) return sendJson(res, 200, { enabled: false, username: who, daily: [] })
-        const trend = await usage.trend({
-          username: who,
-          // 带上模型就只看他在这个模型上的曲线（换模型前后的对比）
-          modelId: url.searchParams.get('modelId') || '',
-          days: url.searchParams.get('days'),
-        })
-        /**
-         * 名字既不是一个账号、台账里也一行都没有 → 404。
-         *
-         * 不能只判"是不是账号"：账号删掉之后它的账还在台账里（总表上那一行标着
-         * orphan），点开来该看得到明细。也不能不判：那样一个打错的名字会回一张
-         * 全是 0 的表，看起来像"这个人没用过"。
-         */
-        if (!trend.total.runs && !(await users.get(who))) throw Errors.notFound('用户不存在')
-        return sendJson(res, 200, trend)
-      }
-
-      if (req.method === 'GET' && url.pathname.startsWith('/v1/admin/usage/model/')) {
-        /**
-         * 模型 id **不过 assertSegment**：那是给路径段用的（≤64 字符、不许有 `/`），
-         * 而模型 id 是网关给的一个字符串，`vendor/name:tag` 这种写法完全合法。
-         * 它在这里只当查询参数用（参数化 SQL，不拼路径），所以只收口长度。
-         */
-        const modelId = decodeURIComponent(url.pathname.slice('/v1/admin/usage/model/'.length) || '')
-        if (!modelId || modelId.length > 128) throw Errors.badRequest('模型 id 不合法')
-        if (!usage?.enabled) return sendJson(res, 200, { enabled: false, modelId, daily: [] })
-        const trend = await usage.trend({ modelId, days: url.searchParams.get('days') })
-        // 模型没有"账号表"可以对照，所以判据只有一条：台账里有没有它
-        if (!trend.total.runs) throw Errors.notFound('这个模型在该时间窗内没有用量')
-        return sendJson(res, 200, trend)
-      }
-
-      /* ══════════ 模型配置（LLM_MODE=db 的那份清单）══════════ */
-
-      /**
-       * 这一组接口在**任何 LLM_MODE 下都开着**，但只有 db 模式下配的东西才生效。
-       *
-       * 反过来（非 db 模式就 404）会逼出一个没必要的停机：管理员得先把 LLM_MODE
-       * 切到 db、重启、发现一个模型都没有、所有人的对话一起断，然后才能开始配。
-       * 现在是先配好、再切模式。`effective` 这个字段就是给界面写那句提示用的。
-       */
-      if (url.pathname === '/v1/admin/models' || url.pathname.startsWith('/v1/admin/models/')) {
-        if (!modelStore) throw Errors.notFound('本部署没有启用模型配置')
-        const modelId = url.pathname.startsWith('/v1/admin/models/')
-          ? decodeURIComponent(url.pathname.slice('/v1/admin/models/'.length))
-          : ''
-
-        if (req.method === 'GET' && !modelId) {
-          return sendJson(res, 200, {
-            models: await modelStore.list(),
-            // 现在这份清单起不起作用。界面据此在顶部写一条提示，而不是让管理员
-            // 配完之后才发现 LLM_MODE 还指着别处
-            effective: config.llm.mode === 'db',
-            llmMode: config.llm.mode,
-            // key 是不是加密入库的。没加密时界面上要说一句，别让人以为它天然安全
-            encrypted: Boolean(config.llm.configSecret),
-          })
-        }
-
-        if (req.method === 'POST' && !modelId) {
-          const body = await readJsonBody(req, config.limits.bodyLimitBytes)
-          try {
-            const created = await modelStore.create(body)
-            reqLogger.info('管理员新增模型', { by: subject.username, model: created.model })
-            return sendJson(res, 201, { ok: true, model: created })
-          } catch (error) {
-            throw Errors.badRequest(error.message)
-          }
-        }
-
-        if (req.method === 'PATCH' && modelId) {
-          const body = await readJsonBody(req, config.limits.bodyLimitBytes)
-          try {
-            const updated = await modelStore.update(modelId, body)
-            if (!updated) throw Errors.notFound('模型配置不存在')
-            reqLogger.info('管理员修改模型', { by: subject.username, model: updated.model })
-            return sendJson(res, 200, { ok: true, model: updated })
-          } catch (error) {
-            if (error instanceof AppError) throw error
-            throw Errors.badRequest(error.message)
-          }
-        }
-
-        if (req.method === 'DELETE' && modelId) {
-          if (!(await modelStore.remove(modelId))) throw Errors.notFound('模型配置不存在')
-          reqLogger.info('管理员删除模型', { by: subject.username, id: modelId })
-          /**
-           * **用量台账不动。** 那些行按 model_id 记着，模型配置删了不代表历史用量
-           * 不存在了 —— 账单还要对。管理台的用量页照样列得出它（与"账号已删除"
-           * 那一行同一个道理）。
-           */
-          return sendJson(res, 200, { ok: true })
-        }
-
-        throw Errors.notFound('没有这个接口')
-      }
-
-      /* ══════════ 用户分组 ══════════ */
-
-      if (url.pathname === '/v1/admin/groups' || url.pathname.startsWith('/v1/admin/groups/')) {
-        if (!groups) throw Errors.notFound('本部署没有启用用户分组')
-        const groupId = url.pathname.startsWith('/v1/admin/groups/')
-          ? decodeURIComponent(url.pathname.slice('/v1/admin/groups/'.length))
-          : ''
-
-        if (req.method === 'GET' && !groupId) {
-          const list = await groups.list()
-          /**
-           * 顺带回每个分组**有多少人、能用几个模型**。
-           *
-           * 这两个数是管理员看这一页时真正要问的问题（"这个分组是空的吗"、
-           * "这个分组的人有模型可用吗"），而它们各自要遍历另外两个集合 ——
-           * 让界面自己去算的话，那两份清单得在前端各拉一次再对齐，
-           * 而分组页本来不需要知道模型和账号长什么样。
-           */
-          const accounts = users ? await users.list() : []
-          const models = modelStore ? await modelStore.list() : []
-          return sendJson(res, 200, {
-            groups: list.map((group) => ({
-              ...group,
-              userCount: accounts.filter((account) => account.groupId === group.id).length,
-              modelCount: models.filter(
-                (model) => model.enabled && (!model.groups.length || model.groups.includes(group.id)),
-              ).length,
-            })),
-            // 无分组的人也要有个地方看得见 —— 否则"人数加起来对不上"没法解释
-            ungrouped: accounts.filter((account) => !account.groupId).length,
-          })
-        }
-
-        if (req.method === 'POST' && !groupId) {
-          const body = await readJsonBody(req, config.limits.bodyLimitBytes)
-          try {
-            const created = await groups.create(body)
-            reqLogger.info('管理员新建分组', { by: subject.username, group: created.name })
-            return sendJson(res, 201, { ok: true, group: created })
-          } catch (error) {
-            throw Errors.badRequest(error.message)
-          }
-        }
-
-        if (req.method === 'PATCH' && groupId) {
-          const body = await readJsonBody(req, config.limits.bodyLimitBytes)
-          try {
-            const updated = await groups.update(groupId, body)
-            if (!updated) throw Errors.notFound('分组不存在')
-            return sendJson(res, 200, { ok: true, group: updated })
-          } catch (error) {
-            if (error instanceof AppError) throw error
-            throw Errors.badRequest(error.message)
-          }
-        }
-
-        if (req.method === 'DELETE' && groupId) {
-          if (!(await groups.get(groupId))) throw Errors.notFound('分组不存在')
-          /**
-           * 删分组要**把引用一起摘干净**，顺序是先摘引用再删本体。
-           *
-           * 反过来（先删本体）中间那一刻里，模型和账号指着一个已经不存在的 id：
-           * 那些人能用的模型会**突然从"分组内可见"退化成"只剩公开的"**，
-           * 而如果这时候摘引用的那几步失败了，库里就永久留着一批悬空 id。
-           * 先摘引用的话，最坏情况是分组还在、引用没了 —— 一个能重试的状态。
-           */
-          const detachedUsers = users ? await users.clearGroup(groupId) : 0
-          const detachedModels = modelStore ? await modelStore.dropGroup(groupId) : 0
-          await groups.remove(groupId)
-          reqLogger.info('管理员删除分组', { by: subject.username, id: groupId, detachedUsers, detachedModels })
-          return sendJson(res, 200, { ok: true, detachedUsers, detachedModels })
-        }
-
-        throw Errors.notFound('没有这个接口')
-      }
-
-      /* ── 单个账号（改角色 / 禁用 / 重置密码 / 改分组）── */
-
-      const target = url.pathname.startsWith('/v1/admin/users/')
-        ? decodeURIComponent(url.pathname.slice('/v1/admin/users/'.length))
-        : ''
-      if (req.method === 'PATCH' && target && !target.includes('/')) {
-        const body = await readJsonBody(req, config.limits.bodyLimitBytes)
-        try {
-          let updated = null
-          if (typeof body.disabled === 'boolean') {
-            /**
-             * 不许把自己禁掉。
-             *
-             * 这不是洁癖：唯一的管理员一旦禁了自己，就**没有任何人**能再进来把它打开 ——
-             * 只能去数据库里手工改一行。挡住这一步比事后补救便宜得多。
-             */
-            if (body.disabled && target === subject.username) {
-              throw Errors.badRequest('不能禁用自己 —— 那样就再没人能把它打开了')
-            }
-            updated = await users.setDisabled({ username: target, disabled: body.disabled })
-          }
-          if (typeof body.role === 'string') {
-            if (target === subject.username && body.role !== 'admin') {
-              throw Errors.badRequest('不能撤销自己的管理员身份')
-            }
-            updated = await users.setRole({ username: target, role: body.role })
-          }
-          if (typeof body.newPassword === 'string') {
-            if (!(await users.resetPassword({ username: target, newPassword: body.newPassword }))) {
-              throw Errors.notFound('用户不存在')
-            }
-            updated = await users.get(target)
-            reqLogger.info('管理员重置密码', { by: subject.username, username: target })
-          }
-          if (typeof body.groupId === 'string') {
-            /**
-             * 空串是合法的（退出分组），非空则**必须真的存在**。
-             *
-             * 不校验的话，一个手滑打错的 id 会安静地写进去，而现象是那个人
-             * 能用的模型变少了 —— 界面上他有个分组名显示不出来，
-             * 但谁也不会立刻把这两件事联系起来。
-             */
-            if (body.groupId && !(await groups?.get(body.groupId))) throw Errors.badRequest('分组不存在')
-            updated = await users.setGroup({ username: target, groupId: body.groupId })
-            if (!updated) throw Errors.notFound('用户不存在')
-          }
-          if (!updated) throw Errors.badRequest('没有可更新的字段（disabled / role / newPassword / groupId）')
-          return sendJson(res, 200, { ok: true, user: updated })
-        } catch (error) {
-          if (error instanceof AppError) throw error
-          throw Errors.badRequest(error.message)
-        }
-      }
-
-      throw Errors.notFound('没有这个接口')
-    }
+    if (await accountRoutes({ req, res, url, reqLogger, subject, sendJson, readJsonBody })) return
 
     // 模型清单：只回可公开字段，llmToken 永不下发
     if (req.method === 'GET' && url.pathname === '/v1/models') {
@@ -979,14 +737,25 @@ export function createServer({
     // 会话列表（强制按 username 过滤）
     if (req.method === 'GET' && url.pathname === '/v1/sessions') {
       const projectId = url.searchParams.get('projectId')
-      const sessions = await store.list({
+      const page = await store.list({
         username: subject.username,
         // 不传 = 全部；传空串 = 只要"未归入项目"的那些。两者是不同的意思，
         // 用 `??` 会把空串也吃掉，所以显式判 null
         ...(projectId === null ? {} : { projectId }),
         includeArchived: url.searchParams.get('includeArchived') === '1',
+        limit: url.searchParams.get('limit'),
+        cursor: url.searchParams.get('cursor') || '',
       })
-      return sendJson(res, 200, { sessions })
+      /**
+       * `sessions` 这个字段名保持不变（前端和 OpenAPI 调用方都在读它），
+       * 翻页信息作为**并列的新字段**加上去 —— 换成 `{ items }` 会是一次
+       * 没有必要的破坏性改动，而它换不来任何东西。
+       */
+      return sendJson(res, 200, {
+        sessions: page.items,
+        nextCursor: page.nextCursor,
+        hasMore: page.hasMore,
+      })
     }
 
     /**
@@ -1077,190 +846,12 @@ export function createServer({
     }
 
     /* ─────────────── 作品 ─────────────── */
-
-    if (url.pathname === '/v1/artifacts' || url.pathname.startsWith('/v1/artifacts/')) {
-      if (!artifacts?.enabled) throw Errors.notFound('本部署未启用作品功能（ARTIFACTS_ENABLED=0）')
-
-      if (req.method === 'GET' && url.pathname === '/v1/artifacts') {
-        return sendJson(res, 200, {
-          artifacts: await artifacts.list({
-            username: subject.username,
-            // 不传 sessionKey = 这个人的全部作品。界面默认只看当前会话的，
-            // 但"我上周做的那个报表在哪"要有地方能翻
-            sessionKey: url.searchParams.get('sessionKey') || '',
-          }),
-          /**
-           * 预览环境的约束一并回给前端。
-           *
-           * 它得拿这个拼预览 iframe 的 CSP —— 前端自己硬编一份的话，改了服务端
-           * 配置而前端没跟上，表现是"配了 CDN 却还是加载不到"，两边谁也看不出来。
-           */
-          preview: { allowedOrigins: config.artifacts.allowedOrigins },
-        })
-      }
-
-      const rest = decodeURIComponent(url.pathname.slice('/v1/artifacts/'.length) || '')
-      const isRaw = rest.endsWith('/raw')
-      const isShare = rest.endsWith('/share')
-      const artifactId = isRaw ? rest.slice(0, -'/raw'.length)
-        : isShare ? rest.slice(0, -'/share'.length)
-          : rest
-      if (!artifactId || artifactId.includes('/')) throw Errors.notFound('没有这个接口')
-
-      /**
-       * ── 作者侧的分享开关 ──
-       *
-       * 三个动词分得很开，因为它们是三件不同的事：
-       *   POST   生成分享链接（幂等，已有就回已有的 —— 见 shares.create）
-       *   PATCH  上/下市场、改简介
-       *   DELETE 撤销，链接立刻失效
-       *
-       * 注意 **username 一律取自 subject**，请求体里那个（如果有）看都不看。
-       * 反面教材见下面 PATCH /v1/sessions 那段：`{...body}` 把登录态解析出来的
-       * username 覆盖掉，于是"改自己的东西"变成了"改任何人的东西"。
-       */
-      if (isShare) {
-        if (!shares?.enabled) throw Errors.notFound('本部署未启用作品分享（ARTIFACT_SHARING_ENABLED=0）')
-
-        if (req.method === 'POST') {
-          const meta = await shares.create({ username: subject.username, artifactId })
-          if (!meta) throw Errors.notFound('作品不存在')
-          reqLogger.info('生成作品分享链接', { username: subject.username, id: artifactId })
-          return sendJson(res, 200, { ok: true, artifact: meta })
-        }
-
-        if (req.method === 'PATCH') {
-          const body = await readJsonBody(req, config.limits.bodyLimitBytes)
-          let meta
-          try {
-            meta = await shares.setMarket({
-              username: subject.username,
-              artifactId,
-              market: body.market,
-              summary: body.summary,
-            })
-          } catch (error) {
-            throw Errors.badRequest(error.message)
-          }
-          if (!meta) throw Errors.notFound('作品不存在')
-          return sendJson(res, 200, { ok: true, artifact: meta })
-        }
-
-        if (req.method === 'DELETE') {
-          const revoked = await shares.revoke({ username: subject.username, artifactId })
-          if (!revoked) throw Errors.notFound('这份作品没有在分享')
-          reqLogger.info('撤销作品分享', { username: subject.username, id: artifactId })
-          return sendJson(res, 200, { ok: true })
-        }
-
-        throw Errors.notFound('没有这个接口')
-      }
-
-      /** 单个文件的原文。`?path=` 指定哪一个，不传取入口文件。头的讲究见 sendArtifactFile */
-      if (req.method === 'GET' && isRaw) {
-        return sendArtifactFile(res, {
-          current: await readArtifactOr404({
-            username: subject.username, id: artifactId, version: url.searchParams.get('v'),
-          }),
-          wanted: url.searchParams.get('path'),
-          download: url.searchParams.get('download') === '1',
-        })
-      }
-
-      if (req.method === 'GET') {
-        const current = await readArtifactOr404({
-          username: subject.username, id: artifactId, version: url.searchParams.get('v'),
-        })
-        return sendJson(res, 200, current)
-      }
-
-      if (req.method === 'DELETE') {
-        // 分享指针在**删之前**清掉 —— 删完就查不到 share.token 了。
-        // 漏了也不会漏数据（公开读那一关会核对作品还在不在），只是盘上多一个孤儿
-        await shares?.revokeForArtifact?.({ username: subject.username, artifactId }).catch((error) => {
-          reqLogger.warn('作品分享指针清理失败', { id: artifactId, err: error?.message })
-        })
-        const removed = await artifacts.remove({ username: subject.username, id: artifactId })
-        if (!removed) throw Errors.notFound('作品不存在')
-        return sendJson(res, 200, { ok: true })
-      }
-    }
+    // 这一块搬到了 ./routes/artifacts.js（顺序保持不变）
+    if (await artifactRoutes({ req, res, url, reqLogger, subject, sendJson, readJsonBody, readArtifactOr404 })) return
 
     /* ─────────────── 项目 ─────────────── */
-
-    if (url.pathname === '/v1/projects' || url.pathname.startsWith('/v1/projects/')) {
-      if (!projects?.enabled) throw Errors.notFound('本部署未启用项目功能（PROJECTS_ENABLED=0）')
-
-      if (req.method === 'GET' && url.pathname === '/v1/projects') {
-        return sendJson(res, 200, {
-          projects: await projects.list({
-            username: subject.username,
-            includeArchived: url.searchParams.get('includeArchived') === '1',
-          }),
-        })
-      }
-
-      if (req.method === 'POST' && url.pathname === '/v1/projects') {
-        const body = await readJsonBody(req, config.limits.bodyLimitBytes)
-        try {
-          const project = await projects.create({
-            username: subject.username,
-            name: body.name,
-            description: body.description,
-            instructions: body.instructions,
-          })
-          return sendJson(res, 201, { ok: true, project })
-        } catch (error) {
-          throw Errors.badRequest(error.message)
-        }
-      }
-
-      const projectId = decodeURIComponent(url.pathname.slice('/v1/projects/'.length) || '')
-      if (projectId.includes('/')) throw Errors.notFound('没有这个接口')
-
-      if (req.method === 'GET') {
-        const project = await projects.get({ username: subject.username, projectId })
-        if (!project) throw Errors.notFound('项目不存在')
-        return sendJson(res, 200, { project })
-      }
-
-      if (req.method === 'PATCH') {
-        const body = await readJsonBody(req, config.limits.bodyLimitBytes)
-        try {
-          // 逐字段取，理由同会话的 PATCH
-          const project = await projects.update({
-            username: subject.username,
-            projectId,
-            name: body.name,
-            description: body.description,
-            instructions: body.instructions,
-            archived: body.archived,
-          })
-          if (!project) throw Errors.notFound('项目不存在')
-          return sendJson(res, 200, { ok: true, project })
-        } catch (error) {
-          if (error.status) throw error
-          throw Errors.badRequest(error.message)
-        }
-      }
-
-      if (req.method === 'DELETE') {
-        const removed = await projects.remove({ username: subject.username, projectId })
-        if (!removed) throw Errors.notFound('项目不存在')
-        /**
-         * 把它下面的会话退回"未分组"，而不是跟着删。
-         *
-         * 用户删项目想删的是这个分组；连着几十轮对话一起删是不可逆的，
-         * 而且没有任何提示能让人预料到。
-         */
-        let released = 0
-        for (const session of await store.list({ username: subject.username, projectId, includeArchived: true })) {
-          await store.patch({ username: subject.username, sessionKey: session.sessionKey, projectId: '' }).catch(() => {})
-          released += 1
-        }
-        return sendJson(res, 200, { ok: true, releasedSessions: released })
-      }
-    }
+    // 这一块搬到了 ./routes/projects.js（顺序保持不变）
+    if (await projectRoutes({ req, res, url, subject, sendJson, readJsonBody })) return
 
     /* ─────────────── 长期记忆 ─────────────── */
 
@@ -1295,99 +886,8 @@ export function createServer({
     }
 
     /* ─────────────── 定时任务 ─────────────── */
-
-    if (url.pathname === '/v1/crons' || url.pathname.startsWith('/v1/crons/')) {
-      if (!crons?.enabled) throw Errors.notFound('本部署未启用定时任务（CRON_ENABLED=0）')
-
-      /**
-       * 每次写操作都刷新一次留存的登录态。
-       *
-       * 时机是有讲究的：用户此刻**正在浏览器里**（我们确实拿着他的登录态），而且
-       * 刚刚表达了"我要这个任务在我不在的时候跑"的意图。放在别处（比如每个请求都刷）
-       * 会让"到底存了谁的凭据、什么时候存的"变成一件说不清的事。
-       * CRON_CREDENTIAL_MODE=none 时这里是个空操作。
-       */
-      const rememberCredential = () => cronVault?.remember({ username: subject.username, credential: subject.credential || '' })
-        .catch((error) => reqLogger.warn('定时任务凭据留存失败', { err: error?.message }))
-
-      if (req.method === 'GET' && url.pathname === '/v1/crons') {
-        return sendJson(res, 200, {
-          crons: await crons.list({ username: subject.username, includeArchived: url.searchParams.get('includeArchived') === '1' }),
-          scheduler: { running: Boolean(scheduler?.enabled), credentialMode: config.cron.credentialMode },
-        })
-      }
-
-      if (req.method === 'POST' && url.pathname === '/v1/crons') {
-        const body = await readJsonBody(req, config.limits.bodyLimitBytes)
-        try {
-          const cron = await crons.create({
-            username: subject.username,
-            title: body.title,
-            task: body.task,
-            schedule: body.schedule,
-            sessionMode: body.sessionMode,
-            projectId: body.projectId,
-            enabled: body.enabled,
-          })
-          await rememberCredential()
-          return sendJson(res, 201, { ok: true, cron })
-        } catch (error) {
-          throw Errors.badRequest(error.message)
-        }
-      }
-
-      const rest = decodeURIComponent(url.pathname.slice('/v1/crons/'.length) || '')
-      const isRun = rest.endsWith('/run')
-      const cronId = isRun ? rest.slice(0, -'/run'.length) : rest
-      if (cronId.includes('/')) throw Errors.notFound('没有这个接口')
-
-      // 立即执行一次。不占排期格，也不影响 nextFireAt —— 它是"试一下对不对"，
-      // 不是"提前触发这一拍"
-      if (req.method === 'POST' && isRun) {
-        if (!scheduler) throw Errors.notFound('本副本没有调度能力')
-        await rememberCredential()
-        const outcome = await scheduler.runNow({ username: subject.username, id: cronId })
-        return sendJson(res, 200, { ok: outcome.ok, status: outcome.status || 'ok' })
-      }
-
-      if (req.method === 'GET') {
-        const cron = await crons.get({ username: subject.username, id: cronId })
-        if (!cron) throw Errors.notFound('定时任务不存在')
-        return sendJson(res, 200, { cron })
-      }
-
-      if (req.method === 'PATCH') {
-        const body = await readJsonBody(req, config.limits.bodyLimitBytes)
-        try {
-          const cron = await crons.update({
-            username: subject.username,
-            id: cronId,
-            title: body.title,
-            task: body.task,
-            schedule: body.schedule,
-            sessionMode: body.sessionMode,
-            projectId: body.projectId,
-            enabled: body.enabled,
-            archived: body.archived,
-          })
-          if (!cron) throw Errors.notFound('定时任务不存在')
-          await rememberCredential()
-          return sendJson(res, 200, { ok: true, cron })
-        } catch (error) {
-          if (error.status) throw error
-          throw Errors.badRequest(error.message)
-        }
-      }
-
-      if (req.method === 'DELETE') {
-        await crons.remove({ username: subject.username, id: cronId })
-        // 最后一条任务被删掉之后，留着的登录态就没有任何用途了 —— 顺手清掉，
-        // 别让它在盘上一直躺到过期
-        const left = await crons.list({ username: subject.username, includeArchived: true })
-        if (!left.length) await cronVault?.forget({ username: subject.username }).catch(() => {})
-        return sendJson(res, 200, { ok: true })
-      }
-    }
+    // 这一块搬到了 ./routes/crons.js（顺序保持不变）
+    if (await cronRoutes({ req, res, url, reqLogger, subject, sendJson, readJsonBody })) return
 
     // 中止
     if (req.method === 'POST' && /^\/v1\/runs\/[^/]+\/abort$/.test(url.pathname)) {
@@ -1435,8 +935,9 @@ export function createServer({
            * 收尾之后不会再有帧：final 之后只剩 store.patch 和抓记忆，两个都自带
            * `.catch`，走不到会发 error 帧的那条路。
            */
-          onFrame: (type, data) => {
-            stream.send(type, data)
+          // seq 来自 run 缓冲，写成 SSE 的 id —— 断线的人带着它回来接着听
+          onFrame: (type, data, seq) => {
+            stream.send(type, data, seq)
             if (type === 'final' || type === 'error') stream.end()
           },
         })
@@ -1447,6 +948,88 @@ export function createServer({
       } finally {
         stream.end()
       }
+      return
+    }
+
+    /* ─────────────── 断线重连 ─────────────── */
+
+    /**
+     * 这个人手上还有哪些 run 在跑。
+     *
+     * 界面刷新之后靠它把断掉的那条找回来：会话正文要等这一轮**结束**才落库，
+     * 所以刷新后的历史里根本没有正在生成的这一轮 —— 不问一句的话，
+     * 用户看到的是"我刚才那句话发出去之后就没了"。
+     */
+    if (req.method === 'GET' && url.pathname === '/v1/runs') {
+      const sessionKey = url.searchParams.get('sessionKey') || ''
+      if (sessionKey) assertSessionKey(sessionKey)
+      return sendJson(res, 200, { runs: runService.listRuns({ username: subject.username, sessionKey }) })
+    }
+
+    /**
+     * 接回一条流。`from` 是客户端收到的最后一帧序号（SSE 的 `id:`）。
+     *
+     * GET + SSE 而不是复用 `/v1/chat/stream`：那条是 POST，语义是"跑一轮新的"。
+     * 拿同一个端点做重连，一次网络抖动导致的重发就会变成又跑一轮、又烧一份 token。
+     */
+    if (req.method === 'GET' && url.pathname.startsWith('/v1/runs/') && url.pathname.endsWith('/events')) {
+      const runId = decodeURIComponent(url.pathname.slice('/v1/runs/'.length, -'/events'.length))
+      if (!runId || runId.includes('/')) throw Errors.badRequest('runId 不合法')
+      const from = Number(url.searchParams.get('from')) || 0
+
+      /**
+       * 订阅要在 openSse **之前**完成 —— 一旦写下 200，就再也回不了 404 了。
+       * run 不存在（或不是你的）时，这里还能是一条正正经经的错误响应。
+       */
+      const stream = { current: null }
+      const pending = []
+      const subscription = runService.attach({
+        runId,
+        username: subject.username,
+        from,
+        listener: (frame) => {
+          // 订阅成功到 openSse 之间可能已经来了新帧，先攒着，别丢
+          if (!stream.current) { pending.push(frame); return }
+          if (frame === null) { stream.current.end(); return }
+          stream.current.send(frame.type, frame.data, frame.seq)
+        },
+      })
+      if (!subscription) throw Errors.notFound('run 不存在或已过期')
+
+      stream.current = openSse(res)
+
+      /**
+       * 中间有帧被丢掉了（缓冲撑爆过），接不回来。
+       *
+       * 这时**必须说出来**：少掉的那几帧里可能有整段文本，装作接上了继续发，
+       * 用户看到的是一段中间缺了几句的回答，而没有任何迹象表明它缺过。
+       * 前端收到这一帧就去重新加载会话。
+       */
+      if (subscription.truncated) {
+        stream.current.send('resync', { runId, reason: 'buffer-truncated' })
+        stream.current.end()
+        subscription.unsubscribe()
+        return
+      }
+
+      for (const frame of subscription.replay) stream.current.send(frame.type, frame.data, frame.seq)
+      for (const frame of pending) {
+        if (frame === null) { stream.current.end(); break }
+        stream.current.send(frame.type, frame.data, frame.seq)
+      }
+
+      if (subscription.done) {
+        stream.current.end()
+        subscription.unsubscribe()
+        return
+      }
+
+      // 客户端又断了就别再往一个没人听的连接上写
+      req.on('close', () => {
+        subscription.unsubscribe()
+        stream.current?.end()
+      })
+      // 这条请求到这里就"挂着"了 —— 后续由 listener 推帧，直到 run 结束或客户端断开
       return
     }
 

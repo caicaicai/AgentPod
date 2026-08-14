@@ -102,7 +102,7 @@ function normalizeReplace(content) {
  * @param {object} params
  * @param {object} params.config  需要 config.memory.enabled / config.dataDir
  */
-export function createMemoryStore({ config, storage, logger = console }) {
+export function createMemoryStore({ config, storage }) {
   requireStorage(storage, 'createMemoryStore')
   const enabled = config.memory?.enabled !== false
 

@@ -22,27 +22,27 @@
 
 -- ── 账号 ────────────────────────────────────────────────────────────────
 --
--- ⚠️ 只存 scrypt 的派生结果与盐，**不存明文也不存可逆密文**。
--- CONSOLE_USERS 那条路（明文写在环境变量里）在 mysql 驱动下只用于**首次播种**。
-CREATE TABLE IF NOT EXISTS `ap_user` (
-  `username`      VARCHAR(64)  NOT NULL,
-  `password_hash` VARCHAR(255) NOT NULL COMMENT 'scrypt 派生结果，hex',
-  `salt`          VARCHAR(64)  NOT NULL COMMENT '每个用户独立的随机盐，hex',
-  `role`          VARCHAR(16)  NOT NULL DEFAULT 'user' COMMENT 'user | admin',
-  `disabled`      TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '禁用后不能登录，数据保留',
-  `created_at`    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at`    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (`username`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='控制台账号';
+-- **账号没有自己的表**，它和项目、定时任务一样住在下面的 `ap_kv` 里
+-- （collection='accounts'，owner=''）——  见 src/identity/user-store.js。
+--
+-- 这里曾经有一张 `ap_user` 表，字段齐全、注释也写得像模像样，但**全库没有一处
+-- 读写它**：账号存储从一开始走的就是 globalMap('accounts')。留着它比没有更糟 ——
+-- 运维照着 schema 去备份、迁移、查"这个人存不存在"，看到的会是一张永远空着的表，
+-- 而真正的数据在另一个地方。所以删掉，把事实写在这儿。
+--
+-- 账号记录里存的是：scrypt 派生结果 + 每人独立的盐（**不存明文也不存可逆密文**）、
+-- role、disabled、groupId，以及 tokenVersion —— 令牌代数，改密或禁用时加一，
+-- 让已经签发出去的 JWT 当场作废（见 src/identity/index.js）。
+-- CONSOLE_USERS 那条路（明文写在环境变量里）只用于**首次播种**。
 
--- ── 通用 KV（项目 / 定时任务 / 作品元信息 / 分享指针）────────────────────
+-- ── 通用 KV（账号 / 项目 / 定时任务 / 作品元信息 / 分享指针）──────────────
 --
 -- `owner` 就是 username。**分享指针表是唯一 owner='' 的集合** —— 访客手里只有
 -- token，服务端必须能不带 username 查到它属于谁，那是这个功能的前提。
 -- 它存的只是"token → 谁的哪份作品"这个指向，不含作品任何内容；
 -- 权威状态在作品记录自己的 share 字段上（见 src/artifacts/shares.js 文件头）。
 CREATE TABLE IF NOT EXISTS `ap_kv` (
-  `collection` VARCHAR(32)  NOT NULL COMMENT 'projects | cron | artifacts | shares',
+  `collection` VARCHAR(32)  NOT NULL COMMENT 'accounts | projects | cron | artifacts | shares',
   `owner`      VARCHAR(64)  NOT NULL COMMENT 'username；全局集合为空串',
   `id`         VARCHAR(128) NOT NULL,
   `payload`    MEDIUMTEXT   NOT NULL COMMENT '记录本体（JSON 字符串）',
