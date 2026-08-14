@@ -70,6 +70,65 @@ export function createDirectBroker({ config }) {
   }
 }
 
+/**
+ * 模型来自**数据库里管理员配的那份清单**（LLM_MODE=db）。
+ *
+ * ── 与 direct 的区别 ────────────────────────────────────────────────────
+ *
+ * 两者都用"部署自己的 key"而不是用户的 llmToken，但 direct 被生产拒绝，
+ * 这个不。区别不在 key 上，在**能不能回答"这次调用是谁发起的"**：
+ *
+ *   direct  一个 base URL + 一把 key 写在环境变量里，全体共用，改要重启；
+ *   db      一条记录一个模型、各自带 key，可用范围按用户分组收口，
+ *           而每一次 run 的用量都按 username + model_id 落进 ap_usage。
+ *
+ * 也就是说，分账、审计、限流的**主体仍然是用户**，只有上游那一侧看到的是
+ * 一把共享的 key。这个残留边界写在 src/models/model-store.js 的文件头里。
+ *
+ * ── 为什么不缓存 ────────────────────────────────────────────────────────
+ *
+ * llminfo 那条路上的缓存是为了不让每条消息都去打一次外部 HTTP。这里的"上游"
+ * 是本地数据库里十几行记录，一次查询是亚毫秒级 —— 加缓存换不到什么，
+ * 却会带来一个真实的坏处：管理员在控制台停用一个模型之后，
+ * **它还能被继续用上几分钟**，而那恰恰是停用这个动作最需要立刻生效的场景
+ * （配错了、key 泄了、上游欠费了）。
+ *
+ * @param {object} params.modelStore src/models/model-store.js
+ * @param {object} params.users      账号 store（拿这个人的 groupId）
+ */
+export function createDbBroker({ modelStore, users, logger }) {
+  return {
+    async getLlmAccess(subject) {
+      /**
+       * 分组取不到就按"无分组"处理，而不是抛错。
+       *
+       * 走到这儿的主体不一定是账号库里的人 —— AUTH_MODE 不是 password 时
+       * （比如平台 SSO 透传），username 是外部给的，账号库里根本没有这条记录。
+       * 那种部署照样应该能用"没有限制可用范围"的那些模型。
+       */
+      const account = await users?.get(subject.username).catch(() => null)
+      const models = await modelStore.resolveForGroup(account?.groupId || '')
+
+      if (!models.length) {
+        logger?.warn?.('这个用户没有任何可用模型', {
+          username: subject.username,
+          groupId: account?.groupId || '(无分组)',
+        })
+      }
+
+      return {
+        models,
+        // 每条记录自己带 key，这个字段只是 run-service 的兜底（`llm.key || access.apiKey`）
+        apiKey: models[0]?.key || '',
+        user: null,
+      }
+    },
+
+    /** 没有缓存，也就没有什么要失效的。留着这个方法是为了满足 broker 的契约 */
+    invalidate() {},
+  }
+}
+
 /** 离线开发用：不碰任何外部服务 */
 export function createFauxBroker({ fauxModel }) {
   return {

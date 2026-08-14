@@ -150,8 +150,20 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
     },
 
     llm: {
-      mode: str(env.LLM_MODE, 'platform'), // platform | direct | faux
+      mode: str(env.LLM_MODE, 'platform'), // platform | db | direct | faux
       cacheTtlMs: num(env.LLM_CACHE_TTL_MS, 5 * 60 * 1000),
+
+      /**
+       * LLM_MODE=db 时，模型配置里的 API Key 入库前用它加密（AES-256-GCM）。
+       *
+       * **留空 = 明文入库**，与 cron 的凭据金库同一个取舍：挡它的是数据库的访问
+       * 控制。配上之后挡住的是"拿到了库、但没拿到进程环境"的那个人 ——
+       * 一份被拖走的备份、一个开着的只读从库。完整边界见 src/credentials/secret-box.js。
+       *
+       * ⚠️ 换掉或丢掉它，已经加密的那些 key 就解不开了（管理台上会标"Key 解不开"，
+       * 那几条模型会被跳过而不是让所有人的对话一起失败）。
+       */
+      configSecret: str(env.LLM_CONFIG_SECRET),
 
       /**
        * 强制认为支持读图的模型（逗号分隔，大小写敏感）。
@@ -540,7 +552,7 @@ function validate(config) {
   const errors = []
 
   if (!['password', 'dev'].includes(config.auth.mode)) errors.push(`AUTH_MODE 只能是 password|dev，当前 ${config.auth.mode}`)
-  if (!['platform', 'direct', 'faux'].includes(config.llm.mode)) errors.push(`LLM_MODE 只能是 platform|direct|faux，当前 ${config.llm.mode}`)
+  if (!['platform', 'db', 'direct', 'faux'].includes(config.llm.mode)) errors.push(`LLM_MODE 只能是 platform|db|direct|faux，当前 ${config.llm.mode}`)
   if (!['none', 'stored'].includes(config.cron.credentialMode)) {
     errors.push(`CRON_CREDENTIAL_MODE 只能是 none|stored，当前 ${config.cron.credentialMode}`)
   }

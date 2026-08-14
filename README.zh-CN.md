@@ -196,7 +196,8 @@ sandbox-worker/bin/check-namespace-caps.sh
 | 变量 | 取值 | 说明 |
 |------|------|------|
 | `AUTH_MODE` | `password` \| `dev` | `password`：内置账号密码 + JWT 会话。`dev`：信任 `X-Username` 头（仅本地开发） |
-| `LLM_MODE` | `platform` \| `direct` \| `faux` | 模型提供方式。`platform`：从平台后端获取。`direct`：直连 OpenAI 兼容端点。`faux`：假模型 |
+| `LLM_MODE` | `platform` \| `db` \| `direct` \| `faux` | 模型提供方式。`platform`：从平台后端按用户取清单与 llmToken。`db`：管理员在控制台里配的那份清单（存数据库，按用户分组开放，见下面「模型配置与用户分组」）。`direct`：直连 OpenAI 兼容端点（仅本地联调）。`faux`：假模型 |
+| `LLM_CONFIG_SECRET` | 一段口令 | 只在 `LLM_MODE=db` 下有用：模型 Key 的加密密钥。留空 = 明文入库 |
 | `SANDBOX_MODE` | `manager` \| `http` \| `local` \| `none` | 执行后端。`manager`：集群模式 + 票据鉴权（推荐）。`http`：直连 Worker。`local`：进程内执行（仅开发） |
 | `MYSQL_HOST` 等 | — | **必填**。会话、项目、长期记忆、作品、分享/市场、定时任务、账号全存数据库，见下面「MySQL」一节 |
 
@@ -258,6 +259,36 @@ docker compose up -d      # 自带 mysql 服务，agent 等它健康检查通过
 ⚠️ 有一样**不进库**：会话工作区与用户技能（`USER_WORKSPACE_ROOT`）。
 它们要被整目录 stage 进沙盒、大小没有上限，属于共享文件系统的活。
 
+### 模型配置与用户分组（`LLM_MODE=db`）
+
+模型清单存在数据库里，由管理员在**管理员控制台 → 模型**页维护，改完**立刻生效，不用重启**：
+
+| 字段 | 说明 |
+|------|------|
+| 名称 | 给人看的名字（对话框的模型下拉里显示它） |
+| 模型 ID | 发给上游的那个名字，如 `claude-sonnet-5`。**在整个部署里唯一** —— 用户选模型传的是它，用量台账也按它记账 |
+| 接口地址 | OpenAI 兼容端点，如 `https://api.example.com/v1`。结尾的 `/chat/completions` 会被自动去掉（SDK 自己会拼） |
+| API Key | 只在服务端流转，接口只回掩码（`sk-1a••••••cd9f`）。修改时留空 = 不动它 |
+| 上下文长度 / 单次输出上限 | 后者留 0 = 这个字段整个不发，让上游用自己的默认值 |
+| 支持读图 / 思维链 | 前者没标对的话，工具结果里的截图会被**静默丢掉**，模型只收到一行"Screenshot captured: N bytes" |
+| 可用分组 | 一个都不勾 = 所有人可用；勾了就只有组里的人看得见 |
+| 排序 | 小的在前。**启用的第一个就是默认模型**（用户不选模型时用的那个） |
+
+**用户分组**在「分组」页维护，一个人一个组，只决定他能用哪些模型 —— 它不是角色（能不能管别人是 `role`），
+也不是隔离边界（会话、作品、记忆一直按账号隔离）。标了「默认」的那个组，新建的账号会自动进去。
+没有分组的人能用的是那些**不限可用范围**的模型。删掉一个分组时，组里的人退回「无分组」，
+模型的可用范围里也会把它摘掉 —— 账号和模型本身都不删。
+
+⚠️ **这个模式下的 Key 是部署自己的一把**，同一个模型上所有人共用（与 `direct` 模式同类）。
+它没有像 `direct` 那样被生产拒绝，是因为代价补上了：用量仍按 `username + model_id` 落进 `ap_usage`
+（管理台的 Token 用量页照常分得清谁烧了多少），可用范围按分组收口，Key 不下发浏览器。
+仍然做不到的是**上游侧的分账** —— 上游看到的是一把 key，它那边的账单只有一行。
+需要上游按人分账的部署，用 `LLM_MODE=platform`。
+
+配上 `LLM_CONFIG_SECRET` 后，新保存的 Key 会用 AES-256-GCM 加密入库；留空则明文入库
+（挡它的只有数据库的访问控制，启动时会 warn 一次）。换掉或丢掉这个密钥，已加密的那几条会在
+管理台上标「解不开」并被跳过 —— 而不是让所有人的对话一起失败。
+
 ### 直连模型（Direct 模式）
 
 本地开发时直连真实模型（无需平台后端）：
@@ -309,7 +340,15 @@ docker compose up -d      # 自带 mysql 服务，agent 等它健康检查通过
 | POST | `/v1/auth/password` | 改自己的密码。**必须带旧密码** —— 只凭令牌就能改密，等于把"临时借用"变成"永久接管" |
 | GET | `/v1/admin/users` | 列出全部账号（要管理员） |
 | POST | `/v1/admin/users` | 管理员建号 |
-| PATCH | `/v1/admin/users/:name` | `{ disabled, role, newPassword }`。禁用**不删数据**；不许禁用自己或撤销自己的管理员身份（否则可能没人再进得来） |
+| PATCH | `/v1/admin/users/:name` | `{ disabled, role, newPassword, groupId }`。禁用**不删数据**；不许禁用自己或撤销自己的管理员身份（否则可能没人再进得来）。`groupId` 空串 = 退出分组，非空则必须真的存在 |
+| GET | `/v1/admin/models` | 模型清单（要管理员）。**Key 只回掩码**。`effective` 说明这份清单当前生不生效（`LLM_MODE=db` 才生效），`encrypted` 说明 Key 是不是加密入库的 |
+| POST | `/v1/admin/models` | 加一个模型。`{ name, model, baseUrl, key, contextWindow, maxTokens, input, reasoning, groups, enabled, sort }` |
+| PATCH | `/v1/admin/models/:id` | 改一条。**不传 `key` = 不动它**，传 `key: null` 才是清空 |
+| DELETE | `/v1/admin/models/:id` | 删一条。**历史用量记录保留** —— 账还要对得上 |
+| GET | `/v1/admin/groups` | 分组清单，每个组带 `userCount` 与 `modelCount`；`ungrouped` 是没有分组的人数 |
+| POST | `/v1/admin/groups` | 建分组。`{ name, description, isDefault }`，最多一个默认分组（设了新的旧的自动取消） |
+| PATCH | `/v1/admin/groups/:id` | 改名 / 改说明 / 设为默认 |
+| DELETE | `/v1/admin/groups/:id` | 删分组：组里的人退回「无分组」，模型的可用范围里也摘掉它，回 `{ detachedUsers, detachedModels }` |
 | GET | `/v1/admin/usage` | token 用量（要管理员）。`?days=30` 是时间窗（`days=0` = 全部历史）；`?group=user`（默认）每个账号一行、带他用过的模型，`?group=model` 每个模型一行、带用了它的账号。两者是同一份**账号 × 模型**交叉表的转置，所以合计一定相等。一次没跑过的账号也有一行 0 —— 否则"没用过"和"不存在"长得一样 |
 | GET | `/v1/admin/usage/user/:name` | 单个账号的按天曲线；`?modelId=` 可以只看某一个模型 |
 | GET | `/v1/admin/usage/model/:modelId` | 单个模型的按天曲线（全体账号合起来） |
@@ -439,8 +478,8 @@ my-skill/
 src/                    Agent 主服务
 ├── agent/              运行编排、工具装配、技能装载
 ├── http/               路由、SSE 流、优雅停机
-├── identity/           身份认证（密码 JWT / dev 头信任）
-├── models/             大模型客户端、模型工厂、重试逻辑
+├── identity/           身份认证（密码 JWT / dev 头信任）+ 用户分组
+├── models/             大模型客户端、模型工厂、重试逻辑、管理台配的模型清单
 ├── sessions/           会话存储（memory / file / mysql）
 ├── memory/             长期记忆（MEMORY.md + 乐观锁）
 ├── projects/           项目管理（分组 + 指令）
@@ -449,7 +488,7 @@ src/                    Agent 主服务
 ├── workspace/          用户工作空间（共享存储）
 ├── tools/              扩展工具（任务规划、浏览器、记忆、定时任务）
 ├── persistence/        文件存储原语
-├── credentials/        凭据代理
+├── credentials/        凭据代理 + 模型 Key 的加密入库
 └── telemetry/          进程内指标 + 落库的按人 token 用量台账
 
 web/                    对话界面（Vue 3 + Vite）

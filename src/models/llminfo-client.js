@@ -80,6 +80,11 @@ export function createLlmInfoClient({ config, platform, logger }) {
 export function toPublicModels(llms) {
   return (llms || []).map((llm) => ({
     id: llm.model,
+    /**
+     * 给人看的名字，只有 LLM_MODE=db 那条路上才有（管理员在控制台起的）。
+     * 空的时候界面退回显示 id —— 平台/direct 模式下本来就只有 id 这一个名字。
+     */
+    name: llm.label || '',
     reasoning: Boolean(llm.reasoning),
     input: Array.isArray(llm.input) ? llm.input : ['text'],
     contextWindow: Number(llm.contextWindow) || 0,

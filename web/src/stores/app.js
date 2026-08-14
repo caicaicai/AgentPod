@@ -177,8 +177,34 @@ export const state = reactive({
   adminBusy: false,
   adminNote: '',
   adminNoteWarn: false,
-  /** 管理台的两页：'users' 管人，'usage' 看 token 用量 */
+  /**
+   * 管理台的四页：
+   *   users   管人（含每个人属于哪个分组）
+   *   models  这个部署有哪些模型（LLM_MODE=db 时生效）
+   *   groups  用户分组 —— 模型按分组开放，所以它排在模型后面
+   *   usage   token 用量
+   */
   adminTab: 'users',
+
+  /**
+   * 模型配置。
+   *
+   * `adminModelsMeta` 装的是"这份清单现在生不生效"（服务端回的 effective/llmMode/
+   * encrypted）。它必须和清单一起来：一个配得好好的模型在 LLM_MODE=platform 的
+   * 部署上是**完全不起作用**的，而界面上看不出任何区别 —— 那句提示是这一页
+   * 唯一能防住"配完了以为好了"的东西。
+   */
+  adminModels: [],
+  adminModelsMeta: { effective: false, llmMode: '', encrypted: false },
+  adminModelsLoading: false,
+  /** 正在编辑的那条的 id；'new' 表示在新建 */
+  adminModelEditing: '',
+
+  /** 分组。`adminUngrouped` 是没有分组的人数，否则各分组人数加起来对不上账号总数 */
+  adminGroups: [],
+  adminUngrouped: 0,
+  adminGroupsLoading: false,
+  adminGroupEditing: '',
 
   /**
    * Token 用量。
@@ -1192,7 +1218,12 @@ export async function refreshUsers() {
 export async function openAdmin() {
   state.view = 'admin'
   state.panel = ''
-  await refreshUsers()
+  /**
+   * 分组和账号一起取：账号表里那一列要显示**分组名**，而账号记录上存的是 id。
+   * 等切到分组页才取的话，账号表会先显示一串 `grp_8f2c…`，然后突然变成中文名 ——
+   * 一个纯粹由加载顺序造成的、看起来像 bug 的闪烁。
+   */
+  await Promise.all([refreshUsers(), refreshGroups()])
 }
 
 export function closeAdmin() {
@@ -1274,10 +1305,148 @@ export async function openUsageRow(key) {
   }
 }
 
-/** 切页。用量那一页第一次进来才取数，来回切不重复请求 */
+/* ── 模型配置 ── */
+
+export async function refreshModels() {
+  state.adminModelsLoading = true
+  try {
+    const data = await api.adminListModels()
+    state.adminModels = data.models || []
+    state.adminModelsMeta = {
+      effective: Boolean(data.effective),
+      llmMode: data.llmMode || '',
+      encrypted: Boolean(data.encrypted),
+    }
+    state.adminNote = ''
+    state.adminNoteWarn = false
+  } catch (error) {
+    state.adminNote = `模型清单加载失败：${error.message}`
+    state.adminNoteWarn = true
+  } finally {
+    state.adminModelsLoading = false
+  }
+}
+
+/**
+ * 模型的增删改都走这里：跑完重取清单。
+ *
+ * 与 runAdminAction 分开只因为它刷的是另一份清单 —— 共用一个的话，
+ * 改一次模型会顺带把账号清单也拉一遍，而那一页可能根本没打开过。
+ */
+async function runModelAction(call, okNote) {
+  state.adminBusy = true
+  state.adminNote = ''
+  state.adminNoteWarn = false
+  try {
+    await call()
+    await refreshModels()
+    state.adminNote = okNote
+    return true
+  } catch (error) {
+    state.adminNote = error.message
+    state.adminNoteWarn = true
+    return false
+  } finally {
+    state.adminBusy = false
+  }
+}
+
+export function createModel(body) {
+  return runModelAction(() => api.adminCreateModel(body), `已添加模型 ${body.model}`)
+}
+
+export function updateModel(id, body) {
+  return runModelAction(() => api.adminPatchModel(id, body), '模型配置已保存')
+}
+
+export function setModelEnabled(id, enabled) {
+  return runModelAction(
+    () => api.adminPatchModel(id, { enabled }),
+    enabled ? '模型已启用' : '模型已停用（立刻生效，正在进行的对话不受影响）',
+  )
+}
+
+export function deleteModel(id, name) {
+  return runModelAction(() => api.adminDeleteModel(id), `已删除模型 ${name}（历史用量记录保留）`)
+}
+
+/* ── 用户分组 ── */
+
+export async function refreshGroups() {
+  state.adminGroupsLoading = true
+  try {
+    const data = await api.adminListGroups()
+    state.adminGroups = data.groups || []
+    state.adminUngrouped = data.ungrouped || 0
+    state.adminNote = ''
+    state.adminNoteWarn = false
+  } catch (error) {
+    state.adminNote = `分组加载失败：${error.message}`
+    state.adminNoteWarn = true
+  } finally {
+    state.adminGroupsLoading = false
+  }
+}
+
+/**
+ * 分组的增删改。
+ *
+ * 跑完**三份清单一起重取**：删一个分组会同时改到账号（那些人退回无分组）
+ * 和模型（可用范围里摘掉它）。只刷分组的话，另外两页会停在删之前的样子，
+ * 而用户要等到切过去才发现不对。
+ */
+async function runGroupAction(call, okNote) {
+  state.adminBusy = true
+  state.adminNote = ''
+  state.adminNoteWarn = false
+  try {
+    await call()
+    await Promise.all([refreshGroups(), refreshModels(), refreshUsers()])
+    state.adminNote = okNote
+    state.adminNoteWarn = false
+    return true
+  } catch (error) {
+    state.adminNote = error.message
+    state.adminNoteWarn = true
+    return false
+  } finally {
+    state.adminBusy = false
+  }
+}
+
+export function createGroup(body) {
+  return runGroupAction(() => api.adminCreateGroup(body), `已新建分组 ${body.name}`)
+}
+
+export function updateGroup(id, body) {
+  return runGroupAction(() => api.adminPatchGroup(id, body), '分组已保存')
+}
+
+export function deleteGroup(id, name) {
+  return runGroupAction(
+    () => api.adminDeleteGroup(id),
+    `已删除分组 ${name}：组里的人退回「无分组」，模型的可用范围里也已摘掉它`,
+  )
+}
+
+export function setUserGroup(username, groupId) {
+  return runAdminAction(
+    () => api.adminPatchUser(username, { groupId }),
+    groupId ? `${username} 的分组已更新` : `${username} 已退出分组`,
+  )
+}
+
+/** 切页。每一页第一次进来才取数，来回切不重复请求 */
 export async function setAdminTab(tab) {
   state.adminTab = tab
   if (tab === 'usage' && !state.adminUsage) await refreshUsage()
+  /**
+   * 模型页和分组页**互相需要对方的清单**：模型要按分组勾可用范围，
+   * 分组要显示"这个组能用几个模型"。所以进任一页都把两份都备齐，
+   * 而不是等切过去才发现勾选框里是一串陌生的 id。
+   */
+  if ((tab === 'models' || tab === 'groups') && !state.adminGroups.length) await refreshGroups()
+  if ((tab === 'models' || tab === 'groups') && !state.adminModels.length) await refreshModels()
 }
 
 /**
@@ -1305,8 +1474,15 @@ async function runAdminAction(call, okNote) {
   }
 }
 
-export function createUser({ username, password, role }) {
-  return runAdminAction(() => api.adminCreateUser({ username, password, role }), `已创建账号 ${username}`)
+/**
+ * 建账号。`groupId` 不传 = 进默认分组（服务端去查哪个组标了默认），
+ * 传空串 = 明确不进任何分组。两者不能混成一个值 —— 混了就没法表达"就是不要分组"。
+ */
+export function createUser({ username, password, role, groupId }) {
+  return runAdminAction(
+    () => api.adminCreateUser({ username, password, role, ...(groupId === undefined ? {} : { groupId }) }),
+    `已创建账号 ${username}`,
+  )
 }
 
 export function setUserDisabled(username, disabled) {

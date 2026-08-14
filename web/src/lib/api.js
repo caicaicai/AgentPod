@@ -283,6 +283,25 @@ export const api = {
    * 每行都带着另一维的拆分（用户行带 `models`、模型行带 `users`），所以展开一行
    * 不需要再请求一次；下面两个只用来取**按天曲线**。
    */
+  /**
+   * 模型配置（LLM_MODE=db 的那份清单）。
+   *
+   * **key 只回掩码**（`keyMask` / `hasKey`），完整的 key 从来不下发；
+   * 修改时不传 `key` 就是"不动它"，传 `key: null` 才是清空 —— 服务端如此，
+   * 因为界面上那个输入框平时本来就是空的，空串当清空的话每次改个上下文长度
+   * 都会顺手把 key 抹掉。
+   */
+  adminListModels: () => request('/v1/admin/models'),
+  adminCreateModel: (body) => request('/v1/admin/models', { method: 'POST', body }),
+  adminPatchModel: (id, body) => request(`/v1/admin/models/${encodeURIComponent(id)}`, { method: 'PATCH', body }),
+  adminDeleteModel: (id) => request(`/v1/admin/models/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  /** 用户分组。它只决定"能用哪些模型"，与角色（能不能管别人）是两回事 */
+  adminListGroups: () => request('/v1/admin/groups'),
+  adminCreateGroup: (body) => request('/v1/admin/groups', { method: 'POST', body }),
+  adminPatchGroup: (id, body) => request(`/v1/admin/groups/${encodeURIComponent(id)}`, { method: 'PATCH', body }),
+  adminDeleteGroup: (id) => request(`/v1/admin/groups/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
   adminUsage: (days, group) => request(`/v1/admin/usage${q({ days, group })}`),
   adminUserTrend: (username, days, modelId) =>
     request(`/v1/admin/usage/user/${encodeURIComponent(username)}${q({ days, modelId })}`),

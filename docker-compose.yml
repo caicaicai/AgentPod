@@ -2,7 +2,11 @@
 #
 # 默认配置面向本地开发（NODE_ENV=development, LLM_MODE=faux, AUTH_MODE=dev）。
 # 生产部署时通过 .env 或环境变量覆盖，例如：
-#   NODE_ENV=production AUTH_MODE=password LLM_MODE=direct docker compose up -d
+#   NODE_ENV=production AUTH_MODE=password LLM_MODE=db docker compose up -d
+#
+# ⚠️ LLM_MODE=direct 在 NODE_ENV=production 下会被**拒绝启动**（一把共用的静态 key，
+# 用户之间的计费与审计边界会消失）。自己接模型网关用 LLM_MODE=db：
+# 模型清单存数据库、管理台维护、按用户分组开放，用量仍按人记账。
 #
 # 启动全部服务：
 #   docker compose up -d
@@ -29,6 +33,11 @@ services:
       - NODE_ENV=${NODE_ENV:-development}
       - PORT=${PORT:-8787}
       - LLM_MODE=${LLM_MODE:-faux}
+      # LLM_MODE=db 时模型 Key 的加密密钥。**必须显式透传** ——
+      # 这个 environment 块会盖过 env_file，只写在 .env 里而这里不列的话，
+      # 容器里读到的是空值：现象是管理台上一排「Key 解不开」的模型，
+      # 而 .env 里那一行明明写着。留空 = 明文入库（启动日志会 warn 一次）。
+      - LLM_CONFIG_SECRET=${LLM_CONFIG_SECRET:-}
       - AUTH_MODE=${AUTH_MODE:-dev}
       - DEV_CONSOLE=1
       # 集群模式：通过 manager 调度 worker

@@ -245,14 +245,27 @@ export function createRunService({
         const access = await broker.getLlmAccess(subject)
         const llm = pickModel(access.models, modelId)
         if (!llm) {
+          /**
+           * 空清单的原因随 LLM_MODE 而不同，报错也要跟着不同 ——
+           * db 模式下说"平台没有返回可用模型"会把管理员支到一个根本没在用的
+           * 上游去查，而真正要做的只是在控制台里加一个模型、或者把它开给这个分组。
+           */
+          const emptyReason = config.llm?.mode === 'db'
+            ? '你所在的分组没有可用模型，请让管理员在控制台的「模型」页配置'
+            : '平台没有返回可用模型'
           throw Errors.badRequest(
-            modelId ? `模型 ${modelId} 不在你可用的清单里` : '平台没有返回可用模型',
+            modelId ? `模型 ${modelId} 不在你可用的清单里` : emptyReason,
             { available: access.models.map((m) => m.model) },
           )
         }
         const model = buildModel(llm, {
           imageCapableModels: config.llm?.imageCapableModels || [],
-          maxTokensField: config.llm?.maxTokensField || '',
+          /**
+           * 单条记录上的设置**盖过全局的那个环境变量**：db 模式下一个部署可以同时
+           * 接好几个上游，而 max_tokens / max_completion_tokens 这件事恰恰是**按上游
+           * 不同**的（老 schema 的只认前者）。全局开关在那种部署里必然有一半是错的。
+           */
+          maxTokensField: llm.maxTokensField || config.llm?.maxTokensField || '',
         })
         onFrame('model', { id: model.id, baseUrl: model.baseUrl, contextWindow: model.contextWindow, stale: access.stale })
 

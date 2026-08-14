@@ -6,7 +6,9 @@ import { createLogger } from './logger.js'
 import { createPlatformClient } from './platform/http.js'
 import { createIdentityResolver } from './identity/index.js'
 import { createLlmInfoClient } from './models/llminfo-client.js'
-import { createPassthroughBroker, createFauxBroker, createDirectBroker } from './credentials/broker.js'
+import { createPassthroughBroker, createFauxBroker, createDirectBroker, createDbBroker } from './credentials/broker.js'
+import { createModelStore } from './models/model-store.js'
+import { createGroupStore } from './identity/group-store.js'
 import { createSessionStore } from './sessions/store.js'
 import { createWorkspaceStore } from './workspace/store.js'
 import { createSkillManager, createDisabledSkillManager } from './workspace/skill-manager.js'
@@ -45,10 +47,20 @@ async function main() {
   const store = await createSessionStore({ config, logger, pool: storage.pool || null })
 
   /**
+   * 模型清单与用户分组。
+   *
+   * 两者**与 LLM_MODE 无关地建起来**：管理员在任何模式下都该能预先把模型配好，
+   * 再切 LLM_MODE=db 让它生效 —— 反过来（先切模式，起来发现一个模型都没有，
+   * 所有人的对话一起断）是一次没有必要的停机。管理台上会写清当前生不生效。
+   */
+  const groups = createGroupStore({ storage, logger })
+  const modelStore = createModelStore({ config, storage, logger })
+
+  /**
    * 账号。password 模式才需要 —— dev 模式信任 X-Username，没有"账号"这回事。
    * 首次启动把 CONSOLE_USERS 里的账号播种进去（已存在的不动）。
    */
-  const users = config.auth.mode === 'password' ? createUserStore({ config, storage, logger }) : null
+  const users = config.auth.mode === 'password' ? createUserStore({ config, storage, groups, logger }) : null
   if (users) await users.seedFromEnv()
 
   const identity = createIdentityResolver({ config, logger, users })
@@ -106,6 +118,20 @@ async function main() {
     }
     faux.setResponses([responder])
     broker = createFauxBroker({ fauxModel: faux.getModel() })
+  } else if (config.llm.mode === 'db') {
+    broker = createDbBroker({ modelStore, users, logger })
+    const count = await modelStore.count()
+    if (!count) {
+      logger.warn('LLM_MODE=db，但数据库里一个模型都没有：先在管理员控制台的「模型」页加一个，否则任何对话都会失败')
+    }
+    /**
+     * 明文存 key 的部署要在启动日志里说一次 —— 与 cron 凭据金库同级的一道口子，
+     * 只是这里的默认值更温和（那边是 error，因为存的是**用户的登录态**；
+     * 这里存的是部署自己的 key，泄露的后果是被人白嫖模型，不是被人冒充用户）。
+     */
+    if (!config.llm.configSecret) {
+      logger.warn('模型 Key 以明文存在数据库里：设 LLM_CONFIG_SECRET 可加密入库（AES-256-GCM）', { models: count })
+    }
   } else if (config.llm.mode === 'direct') {
     broker = createDirectBroker({ config })
     logger.warn('LLM_MODE=direct：正在直连外部模型端点，用的是一把共用的静态 key，仅限本地联调', {
@@ -125,7 +151,7 @@ async function main() {
   const scheduler = createScheduler({ config, logger, crons, vault: cronVault, runService, sessionStore: store })
   const app = createServer({
     config, logger, identity, broker, runService, store, llmInfoClient, metrics, workspace, skillManager,
-    memory, projects, crons, scheduler, cronVault, artifacts, shares, users, usage,
+    memory, projects, crons, scheduler, cronVault, artifacts, shares, users, usage, modelStore, groups,
   })
 
   await app.listen(config.port)

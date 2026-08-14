@@ -197,7 +197,8 @@ See [`.env.example`](.env.example) for the complete annotated reference.
 | Variable | Values | Description |
 |----------|--------|-------------|
 | `AUTH_MODE` | `password` \| `dev` | `password`: built-in username/password + JWT sessions. `dev`: trusts `X-Username` header (local only) |
-| `LLM_MODE` | `platform` \| `direct` \| `faux` | Model provider. `platform`: fetch from backend. `direct`: connect to any OpenAI-compatible endpoint. `faux`: mock model |
+| `LLM_MODE` | `platform` \| `db` \| `direct` \| `faux` | Model provider. `platform`: fetch the list and each user's llmToken from the backend. `db`: the list admins configure in the console, stored in MySQL and scoped by user group (see [Model configuration and user groups](#model-configuration-and-user-groups)). `direct`: connect to any OpenAI-compatible endpoint (local integration only). `faux`: mock model |
+| `LLM_CONFIG_SECRET` | passphrase | Only meaningful under `LLM_MODE=db`: encrypts model API keys at rest. Empty = stored in plaintext |
 | `SANDBOX_MODE` | `manager` \| `http` \| `local` \| `none` | Execution backend. `manager`: cluster with ticket-based auth (recommended). `http`: direct worker connection. `local`: in-process (dev only) |
 | `MYSQL_HOST` etc. | — | **Required.** Sessions, projects, long-term memory, artifacts, shares/market, cron and accounts all live in the database — see the MySQL section below |
 
@@ -265,6 +266,40 @@ around to export.
 (`USER_WORKSPACE_ROOT`). Those get staged into sandboxes as whole directories with no size ceiling —
 that is a shared-filesystem job.
 
+### Model configuration and user groups
+
+Under `LLM_MODE=db` the model list lives in MySQL and admins maintain it from **Admin console → Models**.
+Changes take effect **immediately, no restart**:
+
+| Field | Notes |
+|-------|-------|
+| Name | Human-readable label, shown in the model picker |
+| Model ID | The name sent upstream, e.g. `claude-sonnet-5`. **Unique across the deployment** — it is what users select and what the usage ledger bills against |
+| Base URL | OpenAI-compatible endpoint. A trailing `/chat/completions` is stripped (the SDK appends it itself) |
+| API key | Server-side only; the API returns a mask (`sk-1a••••••cd9f`). Leaving it blank on edit means "don't touch it" |
+| Context window / max output | Max output `0` means the field is omitted entirely so the upstream default applies |
+| Image input / reasoning | Getting image input wrong makes pi **silently drop** screenshots from tool results — the model only sees "Screenshot captured: N bytes" |
+| Allowed groups | None checked = available to everyone; otherwise only members of those groups see it |
+| Sort | Ascending. **The first enabled model is the default** — the one used when the user picks nothing |
+
+**User groups** are maintained on the Groups page. A group only decides which models a person can use —
+it is not a role (that is `role`) and not an isolation boundary (sessions, artifacts and memory have always
+been isolated per account). New accounts join whichever group is marked default. Users with no group get the
+models that have no group restriction. Deleting a group returns its members to "no group" and detaches it
+from every model's allow list — neither accounts nor models are deleted.
+
+⚠️ **The key in this mode belongs to the deployment**, shared by everyone using that model — the same property
+that gets `direct` rejected in production. It is allowed here because the cost is covered: usage is still
+recorded per `username + model_id` in `ap_usage` (the admin usage page still answers "who burned what"),
+visibility is scoped by group, and keys never reach the browser. What it still cannot do is **split billing
+upstream** — the upstream sees one key and bills one line. Deployments that need per-user upstream accounting
+should use `LLM_MODE=platform`.
+
+Set `LLM_CONFIG_SECRET` to encrypt newly saved keys at rest with AES-256-GCM; leave it empty and they are
+stored in plaintext (guarded only by database access control, with a startup warning). Change or lose that
+secret and the affected rows are flagged "cannot decrypt" in the console and skipped — rather than taking
+everyone's conversations down with them.
+
 ### Direct LLM Mode
 
 For local development with real models (without a platform backend):
@@ -316,7 +351,15 @@ otherwise "does this username exist" leaks through response timing, which is ste
 | POST | `/v1/auth/password` | Change your own password. **Requires the old password** — letting a token alone change it turns "borrowed for a minute" into permanent takeover |
 | GET | `/v1/admin/users` | List accounts (admin only) |
 | POST | `/v1/admin/users` | Admin creates an account |
-| PATCH | `/v1/admin/users/:name` | `{ disabled, role, newPassword }`. Disabling **keeps the data**; you cannot disable yourself or drop your own admin role (nobody might be left who can undo it) |
+| PATCH | `/v1/admin/users/:name` | `{ disabled, role, newPassword, groupId }`. Disabling **keeps the data**; you cannot disable yourself or drop your own admin role (nobody might be left who can undo it). An empty `groupId` leaves the group; a non-empty one must actually exist |
+| GET | `/v1/admin/models` | Model list (admin only). **Keys come back masked.** `effective` says whether this list is currently in use (only under `LLM_MODE=db`); `encrypted` says whether keys are encrypted at rest |
+| POST | `/v1/admin/models` | Add a model: `{ name, model, baseUrl, key, contextWindow, maxTokens, input, reasoning, groups, enabled, sort }` |
+| PATCH | `/v1/admin/models/:id` | Edit one. **Omitting `key` leaves it alone**; pass `key: null` to clear it |
+| DELETE | `/v1/admin/models/:id` | Delete one. **Historical usage rows are kept** — the bill still has to add up |
+| GET | `/v1/admin/groups` | Groups, each with `userCount` and `modelCount`; `ungrouped` counts accounts with no group |
+| POST | `/v1/admin/groups` | Create a group: `{ name, description, isDefault }`. At most one default (setting a new one clears the old) |
+| PATCH | `/v1/admin/groups/:id` | Rename, re-describe, or make default |
+| DELETE | `/v1/admin/groups/:id` | Delete: members fall back to "no group", every model's allow list drops it. Returns `{ detachedUsers, detachedModels }` |
 | GET | `/v1/admin/usage` | Token usage, admin only. `?days=30` is the window (`days=0` = all time); `?group=user` (default) gives a row per account carrying the models it used, `?group=model` gives a row per model carrying the accounts that used it. Both are transposes of one **account × model** cross-tab, so the totals are identical either way. Accounts that never ran anything still get a row of zeros — otherwise "never used it" and "doesn't exist" look identical |
 | GET | `/v1/admin/usage/user/:name` | One account's per-day series; `?modelId=` narrows it to a single model |
 | GET | `/v1/admin/usage/model/:modelId` | One model's per-day series across all accounts |
@@ -449,8 +492,8 @@ Only `workspace/` content is synced back from the sandbox. This prevents runaway
 src/                    Core agent service
 ├── agent/              Run orchestration, tool assembly, skill loading
 ├── http/               Routes, SSE streaming, graceful shutdown
-├── identity/           Authentication (password JWT / dev header)
-├── models/             LLM provider client, model factory, retry logic
+├── identity/           Authentication (password JWT / dev header) + user groups
+├── models/             LLM provider client, model factory, retry logic, admin-configured model list
 ├── sessions/           Session store (memory / file / mysql)
 ├── artifacts/          Versioned multi-file artifacts (metadata + per-version file tree)
 ├── memory/             Long-term memory (MEMORY.md + optimistic locking)
@@ -460,7 +503,7 @@ src/                    Core agent service
 ├── workspace/          User workspace (shared storage)
 ├── tools/              Extended tools (task plan, browser, memory, cron)
 ├── persistence/        File-based storage primitives
-├── credentials/        Credential broker
+├── credentials/        Credential broker + encryption-at-rest for model keys
 └── telemetry/          In-process metrics + the persisted per-user token usage ledger
 
 web/                    Chat UI (Vue 3 + Vite)

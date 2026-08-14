@@ -167,7 +167,7 @@ async function serveStatic(res, pathname, { webDir, confineTo = webDir } = {}) {
 export function createServer({
   config, logger, identity, broker, runService, store, llmInfoClient, metrics, workspace = null,
   skillManager = null, memory = null, projects = null, crons = null, scheduler = null, cronVault = null,
-  artifacts = null, shares = null, users = null, usage = null,
+  artifacts = null, shares = null, users = null, usage = null, modelStore = null, groups = null,
 }) {
   const webDir = config.webDir || DEFAULT_WEB_DIR
 
@@ -567,8 +567,17 @@ export function createServer({
       if (req.method === 'POST' && url.pathname === '/v1/admin/users') {
         const body = await readJsonBody(req, config.limits.bodyLimitBytes)
         try {
-          const created = await users.create({ username: body.username, password: body.password, role: body.role })
-          reqLogger.info('管理员创建账号', { by: subject.username, username: created.username })
+          // groupId 不传 = 进默认分组（user-store 去查）；传空串 = 明确不进任何分组
+          if (typeof body.groupId === 'string' && body.groupId && !(await groups?.get(body.groupId))) {
+            throw Errors.badRequest('分组不存在')
+          }
+          const created = await users.create({
+            username: body.username,
+            password: body.password,
+            role: body.role,
+            ...(typeof body.groupId === 'string' ? { groupId: body.groupId } : {}),
+          })
+          reqLogger.info('管理员创建账号', { by: subject.username, username: created.username, group: created.groupId })
           return sendJson(res, 201, { ok: true, user: created })
         } catch (error) {
           throw Errors.badRequest(error.message)
@@ -658,7 +667,148 @@ export function createServer({
         return sendJson(res, 200, trend)
       }
 
-      /* ── 单个账号（改角色 / 禁用 / 重置密码）── */
+      /* ══════════ 模型配置（LLM_MODE=db 的那份清单）══════════ */
+
+      /**
+       * 这一组接口在**任何 LLM_MODE 下都开着**，但只有 db 模式下配的东西才生效。
+       *
+       * 反过来（非 db 模式就 404）会逼出一个没必要的停机：管理员得先把 LLM_MODE
+       * 切到 db、重启、发现一个模型都没有、所有人的对话一起断，然后才能开始配。
+       * 现在是先配好、再切模式。`effective` 这个字段就是给界面写那句提示用的。
+       */
+      if (url.pathname === '/v1/admin/models' || url.pathname.startsWith('/v1/admin/models/')) {
+        if (!modelStore) throw Errors.notFound('本部署没有启用模型配置')
+        const modelId = url.pathname.startsWith('/v1/admin/models/')
+          ? decodeURIComponent(url.pathname.slice('/v1/admin/models/'.length))
+          : ''
+
+        if (req.method === 'GET' && !modelId) {
+          return sendJson(res, 200, {
+            models: await modelStore.list(),
+            // 现在这份清单起不起作用。界面据此在顶部写一条提示，而不是让管理员
+            // 配完之后才发现 LLM_MODE 还指着别处
+            effective: config.llm.mode === 'db',
+            llmMode: config.llm.mode,
+            // key 是不是加密入库的。没加密时界面上要说一句，别让人以为它天然安全
+            encrypted: Boolean(config.llm.configSecret),
+          })
+        }
+
+        if (req.method === 'POST' && !modelId) {
+          const body = await readJsonBody(req, config.limits.bodyLimitBytes)
+          try {
+            const created = await modelStore.create(body)
+            reqLogger.info('管理员新增模型', { by: subject.username, model: created.model })
+            return sendJson(res, 201, { ok: true, model: created })
+          } catch (error) {
+            throw Errors.badRequest(error.message)
+          }
+        }
+
+        if (req.method === 'PATCH' && modelId) {
+          const body = await readJsonBody(req, config.limits.bodyLimitBytes)
+          try {
+            const updated = await modelStore.update(modelId, body)
+            if (!updated) throw Errors.notFound('模型配置不存在')
+            reqLogger.info('管理员修改模型', { by: subject.username, model: updated.model })
+            return sendJson(res, 200, { ok: true, model: updated })
+          } catch (error) {
+            if (error instanceof AppError) throw error
+            throw Errors.badRequest(error.message)
+          }
+        }
+
+        if (req.method === 'DELETE' && modelId) {
+          if (!(await modelStore.remove(modelId))) throw Errors.notFound('模型配置不存在')
+          reqLogger.info('管理员删除模型', { by: subject.username, id: modelId })
+          /**
+           * **用量台账不动。** 那些行按 model_id 记着，模型配置删了不代表历史用量
+           * 不存在了 —— 账单还要对。管理台的用量页照样列得出它（与"账号已删除"
+           * 那一行同一个道理）。
+           */
+          return sendJson(res, 200, { ok: true })
+        }
+
+        throw Errors.notFound('没有这个接口')
+      }
+
+      /* ══════════ 用户分组 ══════════ */
+
+      if (url.pathname === '/v1/admin/groups' || url.pathname.startsWith('/v1/admin/groups/')) {
+        if (!groups) throw Errors.notFound('本部署没有启用用户分组')
+        const groupId = url.pathname.startsWith('/v1/admin/groups/')
+          ? decodeURIComponent(url.pathname.slice('/v1/admin/groups/'.length))
+          : ''
+
+        if (req.method === 'GET' && !groupId) {
+          const list = await groups.list()
+          /**
+           * 顺带回每个分组**有多少人、能用几个模型**。
+           *
+           * 这两个数是管理员看这一页时真正要问的问题（"这个分组是空的吗"、
+           * "这个分组的人有模型可用吗"），而它们各自要遍历另外两个集合 ——
+           * 让界面自己去算的话，那两份清单得在前端各拉一次再对齐，
+           * 而分组页本来不需要知道模型和账号长什么样。
+           */
+          const accounts = users ? await users.list() : []
+          const models = modelStore ? await modelStore.list() : []
+          return sendJson(res, 200, {
+            groups: list.map((group) => ({
+              ...group,
+              userCount: accounts.filter((account) => account.groupId === group.id).length,
+              modelCount: models.filter(
+                (model) => model.enabled && (!model.groups.length || model.groups.includes(group.id)),
+              ).length,
+            })),
+            // 无分组的人也要有个地方看得见 —— 否则"人数加起来对不上"没法解释
+            ungrouped: accounts.filter((account) => !account.groupId).length,
+          })
+        }
+
+        if (req.method === 'POST' && !groupId) {
+          const body = await readJsonBody(req, config.limits.bodyLimitBytes)
+          try {
+            const created = await groups.create(body)
+            reqLogger.info('管理员新建分组', { by: subject.username, group: created.name })
+            return sendJson(res, 201, { ok: true, group: created })
+          } catch (error) {
+            throw Errors.badRequest(error.message)
+          }
+        }
+
+        if (req.method === 'PATCH' && groupId) {
+          const body = await readJsonBody(req, config.limits.bodyLimitBytes)
+          try {
+            const updated = await groups.update(groupId, body)
+            if (!updated) throw Errors.notFound('分组不存在')
+            return sendJson(res, 200, { ok: true, group: updated })
+          } catch (error) {
+            if (error instanceof AppError) throw error
+            throw Errors.badRequest(error.message)
+          }
+        }
+
+        if (req.method === 'DELETE' && groupId) {
+          if (!(await groups.get(groupId))) throw Errors.notFound('分组不存在')
+          /**
+           * 删分组要**把引用一起摘干净**，顺序是先摘引用再删本体。
+           *
+           * 反过来（先删本体）中间那一刻里，模型和账号指着一个已经不存在的 id：
+           * 那些人能用的模型会**突然从"分组内可见"退化成"只剩公开的"**，
+           * 而如果这时候摘引用的那几步失败了，库里就永久留着一批悬空 id。
+           * 先摘引用的话，最坏情况是分组还在、引用没了 —— 一个能重试的状态。
+           */
+          const detachedUsers = users ? await users.clearGroup(groupId) : 0
+          const detachedModels = modelStore ? await modelStore.dropGroup(groupId) : 0
+          await groups.remove(groupId)
+          reqLogger.info('管理员删除分组', { by: subject.username, id: groupId, detachedUsers, detachedModels })
+          return sendJson(res, 200, { ok: true, detachedUsers, detachedModels })
+        }
+
+        throw Errors.notFound('没有这个接口')
+      }
+
+      /* ── 单个账号（改角色 / 禁用 / 重置密码 / 改分组）── */
 
       const target = url.pathname.startsWith('/v1/admin/users/')
         ? decodeURIComponent(url.pathname.slice('/v1/admin/users/'.length))
@@ -692,7 +842,19 @@ export function createServer({
             updated = await users.get(target)
             reqLogger.info('管理员重置密码', { by: subject.username, username: target })
           }
-          if (!updated) throw Errors.badRequest('没有可更新的字段（disabled / role / newPassword）')
+          if (typeof body.groupId === 'string') {
+            /**
+             * 空串是合法的（退出分组），非空则**必须真的存在**。
+             *
+             * 不校验的话，一个手滑打错的 id 会安静地写进去，而现象是那个人
+             * 能用的模型变少了 —— 界面上他有个分组名显示不出来，
+             * 但谁也不会立刻把这两件事联系起来。
+             */
+            if (body.groupId && !(await groups?.get(body.groupId))) throw Errors.badRequest('分组不存在')
+            updated = await users.setGroup({ username: target, groupId: body.groupId })
+            if (!updated) throw Errors.notFound('用户不存在')
+          }
+          if (!updated) throw Errors.badRequest('没有可更新的字段（disabled / role / newPassword / groupId）')
           return sendJson(res, 200, { ok: true, user: updated })
         } catch (error) {
           if (error instanceof AppError) throw error

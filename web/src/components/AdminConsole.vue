@@ -5,8 +5,10 @@ import AppIcon from './AppIcon.vue'
 import { formatDateTime, formatSince, formatTokens } from '../lib/format.js'
 import { askConfirm } from '../lib/dialog.js'
 import {
-  closeAdmin, createUser, openUsageRow, refreshUsage, refreshUsers, resetUserPassword,
-  setAdminTab, setUsageDays, setUsageGroup, setUserDisabled, setUserRole, state,
+  closeAdmin, createGroup, createModel, createUser, deleteGroup, deleteModel, openUsageRow,
+  refreshGroups, refreshModels, refreshUsage, refreshUsers, resetUserPassword, setAdminTab,
+  setModelEnabled, setUsageDays, setUsageGroup, setUserDisabled, setUserGroup, setUserRole,
+  state, updateGroup, updateModel,
 } from '../stores/app.js'
 
 /**
@@ -25,12 +27,17 @@ import {
  * `/v1/admin/users` 那段：先 users.get(subject.username) 再判 role）——
  * 谁都可以直接 curl 那个地址。
  *
- * ── 两页而不是一张更宽的表 ──────────────────────────────────────────────
+ * ── 四页而不是一张更宽的表 ──────────────────────────────────────────────
  *
  * 「Token 用量」没有并进账号表里多加三列，因为两页问的是不同的问题：
  * 管人是**对某一行做一件事**（禁用他、重置他的密码），看用量是**把所有人排个序**
  * （谁在烧钱）。前者要按用户名找人，后者要按数字找人 —— 塞进一张表的话，
  * 操作列和数字列会互相挤，而两种任务都变难。
+ *
+ * 「模型」与「分组」是后来加的两页。它们本可以合成一页（分组就是拿来开模型的），
+ * 但那样每加一个模型都要在同一片区域里同时读两张表。分开之后各自回答一个问题：
+ * 模型页是"这个部署能用什么"，分组页是"谁属于哪一拨人"，
+ * 两者在**模型的可用范围**那一格上交汇。
  */
 
 const me = computed(() => state.account?.username || '')
@@ -46,7 +53,12 @@ const admins = computed(() => state.adminUsers.filter((user) => user.role === 'a
 /* ═══════════════ 新建账号 ═══════════════ */
 
 const creating = ref(false)
-const form = ref({ username: '', password: '', role: 'user' })
+/**
+ * `groupId: undefined` 而不是 `''`：两者在接口上是**不同的意思** ——
+ * 不传表示"用默认分组"（服务端去查哪个组标了默认），传空串表示"明确不进任何分组"。
+ * 表单里那个下拉的第一项就是"默认分组"，选它就是不传。
+ */
+const form = ref({ username: '', password: '', role: 'user', groupId: undefined })
 
 async function onCreate() {
   const username = form.value.username.trim()
@@ -55,12 +67,20 @@ async function onCreate() {
     state.adminNoteWarn = true
     return
   }
-  const ok = await createUser({ username, password: form.value.password, role: form.value.role })
+  const ok = await createUser({
+    username,
+    password: form.value.password,
+    role: form.value.role,
+    ...(form.value.groupId === undefined ? {} : { groupId: form.value.groupId }),
+  })
   if (ok) {
-    form.value = { username: '', password: '', role: 'user' }
+    form.value = { username: '', password: '', role: 'user', groupId: undefined }
     creating.value = false
   }
 }
+
+/** 默认分组的名字，写在新建表单那个下拉的第一项里 —— 别让人去别的页面查 */
+const defaultGroupName = computed(() => state.adminGroups.find((group) => group.isDefault)?.name || '')
 
 /* ═══════════════ 行内动作 ═══════════════ */
 
@@ -130,6 +150,181 @@ async function onReset(username) {
 const isMe = (user) => user.username === me.value
 /** 最后一个管理员不能被降级或禁用 —— 降完就没人能再把它改回来了 */
 const isLastAdmin = (user) => user.role === 'admin' && !user.disabled && admins.value.length <= 1
+
+/* ═══════════════ 分组（账号页与模型页共用的查表） ═══════════════ */
+
+/** id → 分组名。两张表都要把存着的 id 显示成人看得懂的名字 */
+const groupName = (id) => state.adminGroups.find((group) => group.id === id)?.name || ''
+/**
+ * 指着一个已经不存在的分组时不显示空白。
+ *
+ * 正常路径上不会出现（删分组时服务端把引用一起摘了），但只要出现过一次，
+ * 空白格会让人以为"这个人没分组"，而实际上他的可用模型与无分组的人相同却
+ * 显示不同 —— 写出来比藏起来好排查。
+ */
+const groupLabel = (id) => (id ? (groupName(id) || `未知分组（${id}）`) : '')
+
+/* ═══════════════ 模型 ═══════════════ */
+
+/**
+ * 新建时的初值。
+ *
+ * contextWindow 给 128000 而不是留空：绝大多数当代模型都在这个量级，
+ * 填错了只是浪费一点上下文预算；而 maxTokens 留 0（= 这个字段整个不发，
+ * 让上游用自己的默认值）—— 编一个偏小的上限会把模型的输出在**工具参数中间**
+ * 截断，现象是模型"犯傻"而不是"被掐了"，极难认。
+ */
+const emptyModel = () => ({
+  name: '',
+  model: '',
+  baseUrl: '',
+  key: '',
+  contextWindow: 128000,
+  maxTokens: 0,
+  image: false,
+  reasoning: false,
+  maxTokensField: '',
+  groups: [],
+  enabled: true,
+  sort: 0,
+})
+
+const modelForm = ref(emptyModel())
+
+function startCreateModel() {
+  state.adminModelEditing = state.adminModelEditing === 'new' ? '' : 'new'
+  modelForm.value = emptyModel()
+}
+
+function startEditModel(model) {
+  if (state.adminModelEditing === model.id) {
+    state.adminModelEditing = ''
+    return
+  }
+  state.adminModelEditing = model.id
+  modelForm.value = {
+    ...emptyModel(),
+    ...model,
+    // 界面上「支持读图」是一个开关，存储里是 input 数组。text 永远在，不给它开关
+    image: (model.input || []).includes('image'),
+    /**
+     * key 一律留空。服务端只回掩码，把掩码填进输入框会让它在保存时**被当成新 key
+     * 写回去** —— 那时候库里存的就是一串 `sk-••••1234`，而模型开始报 401。
+     */
+    key: '',
+    groups: [...(model.groups || [])],
+  }
+}
+
+/** 表单 → 接口 body。`input` 在这一层拼，别让存储层去猜界面上的开关 */
+function modelBody() {
+  const form = modelForm.value
+  return {
+    name: form.name.trim(),
+    model: form.model.trim(),
+    baseUrl: form.baseUrl.trim(),
+    contextWindow: Number(form.contextWindow) || 0,
+    maxTokens: Number(form.maxTokens) || 0,
+    input: form.image ? ['text', 'image'] : ['text'],
+    reasoning: Boolean(form.reasoning),
+    maxTokensField: form.maxTokensField || '',
+    groups: [...form.groups],
+    enabled: Boolean(form.enabled),
+    sort: Number(form.sort) || 0,
+    // 空 = 不动（新建时服务端按"没配 key"处理），见 api.js 上的说明
+    ...(form.key.trim() ? { key: form.key.trim() } : {}),
+  }
+}
+
+async function onSubmitModel() {
+  const form = modelForm.value
+  if (!form.name.trim() || !form.model.trim() || !form.baseUrl.trim()) {
+    state.adminNote = '名称、模型 ID、接口地址都要填'
+    state.adminNoteWarn = true
+    return
+  }
+  const ok = state.adminModelEditing === 'new'
+    ? await createModel(modelBody())
+    : await updateModel(state.adminModelEditing, modelBody())
+  if (ok) state.adminModelEditing = ''
+}
+
+async function onDeleteModel(model) {
+  const ok = await askConfirm({
+    title: `删除模型 ${model.name}`,
+    message: '正在用它的对话会立刻失败（下一条消息就报"模型不在你可用的清单里"）。'
+      + '**历史用量记录会保留** —— 账还要对得上。只是想临时停用的话，用「停用」。',
+    confirmText: '删除',
+    danger: true,
+  })
+  if (ok) await deleteModel(model.id, model.name)
+}
+
+/** 勾一个分组进/出可用范围。表单内的操作，保存时才写回服务端 */
+function toggleModelGroup(groupId) {
+  const list = modelForm.value.groups
+  const index = list.indexOf(groupId)
+  if (index >= 0) list.splice(index, 1)
+  else list.push(groupId)
+}
+
+/** 一条模型的可用范围，写成一句话。空 = 所有分组（与服务端 visibleTo 的约定一致） */
+const modelScope = (model) => (model.groups.length
+  ? model.groups.map((id) => groupLabel(id) || id).join('、')
+  : '所有分组')
+
+const shownModels = computed(() => {
+  const keyword = state.adminSearch.trim().toLowerCase()
+  if (!keyword) return state.adminModels
+  return state.adminModels.filter((model) => `${model.name} ${model.model} ${model.baseUrl}`
+    .toLowerCase().includes(keyword))
+})
+
+/* ═══════════════ 分组的增删改 ═══════════════ */
+
+const groupForm = ref({ name: '', description: '', isDefault: false })
+
+function startCreateGroup() {
+  state.adminGroupEditing = state.adminGroupEditing === 'new' ? '' : 'new'
+  groupForm.value = { name: '', description: '', isDefault: false }
+}
+
+function startEditGroup(group) {
+  if (state.adminGroupEditing === group.id) {
+    state.adminGroupEditing = ''
+    return
+  }
+  state.adminGroupEditing = group.id
+  groupForm.value = { name: group.name, description: group.description, isDefault: group.isDefault }
+}
+
+async function onSubmitGroup() {
+  if (!groupForm.value.name.trim()) {
+    state.adminNote = '分组名不能为空'
+    state.adminNoteWarn = true
+    return
+  }
+  const body = {
+    name: groupForm.value.name.trim(),
+    description: groupForm.value.description.trim(),
+    isDefault: Boolean(groupForm.value.isDefault),
+  }
+  const ok = state.adminGroupEditing === 'new'
+    ? await createGroup(body)
+    : await updateGroup(state.adminGroupEditing, body)
+  if (ok) state.adminGroupEditing = ''
+}
+
+async function onDeleteGroup(group) {
+  const ok = await askConfirm({
+    title: `删除分组 ${group.name}`,
+    message: `组里的 ${group.userCount} 个人会退回「无分组」，只剩下那些不限可用范围的模型；`
+      + '模型的可用范围里也会把它摘掉。**账号和模型本身都不会被删。**',
+    confirmText: '删除分组',
+    danger: true,
+  })
+  if (ok) await deleteGroup(group.id, group.name)
+}
 
 /* ═══════════════ Token 用量 ═══════════════ */
 
@@ -225,23 +420,32 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
 
       <nav class="tabs">
         <button type="button" :class="{ on: state.adminTab === 'users' }" @click="setAdminTab('users')">账号</button>
+        <button type="button" :class="{ on: state.adminTab === 'models' }" @click="setAdminTab('models')">模型</button>
+        <button type="button" :class="{ on: state.adminTab === 'groups' }" @click="setAdminTab('groups')">分组</button>
         <button type="button" :class="{ on: state.adminTab === 'usage' }" @click="setAdminTab('usage')">Token 用量</button>
       </nav>
 
       <span v-if="state.adminTab === 'users'" class="head-count">
         {{ state.adminUsers.length }} 个账号 · {{ admins.length }} 个管理员
       </span>
+      <span v-else-if="state.adminTab === 'models'" class="head-count">
+        {{ state.adminModels.filter((m) => m.enabled).length }} 个启用 · 共 {{ state.adminModels.length }} 个
+      </span>
+      <span v-else-if="state.adminTab === 'groups'" class="head-count">
+        {{ state.adminGroups.length }} 个分组 · {{ state.adminUngrouped }} 人无分组
+      </span>
       <span v-else-if="state.adminUsage?.enabled" class="head-count">
         合计 {{ formatTokens(state.adminUsage.total.tokens) }} tokens · {{ listedNote }}
       </span>
 
       <div class="head-right">
-        <div class="search">
+        <div v-if="state.adminTab !== 'groups'" class="search">
           <AppIcon name="search" :size="14" />
           <input
             v-model="state.adminSearch"
             type="search"
-            :placeholder="state.adminTab === 'usage' ? '搜用户名或模型' : '搜用户名'"
+            :placeholder="state.adminTab === 'usage' ? '搜用户名或模型'
+              : state.adminTab === 'models' ? '搜模型名 / ID / 地址' : '搜用户名'"
           />
         </div>
         <!-- 维度与时间窗紧挨着刷新：它们是同一类动作（换一份要看的数） -->
@@ -271,12 +475,20 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
           type="button"
           class="icon-btn"
           title="刷新"
-          @click="state.adminTab === 'usage' ? refreshUsage() : refreshUsers()"
+          @click="state.adminTab === 'usage' ? refreshUsage()
+            : state.adminTab === 'models' ? refreshModels()
+              : state.adminTab === 'groups' ? refreshGroups() : refreshUsers()"
         >
           <AppIcon name="refresh" :size="16" />
         </button>
         <button v-if="state.adminTab === 'users'" type="button" class="primary-btn" @click="creating = !creating">
           <AppIcon name="plus" :size="14" />新建账号
+        </button>
+        <button v-else-if="state.adminTab === 'models'" type="button" class="primary-btn" @click="startCreateModel">
+          <AppIcon name="plus" :size="14" />添加模型
+        </button>
+        <button v-else-if="state.adminTab === 'groups'" type="button" class="primary-btn" @click="startCreateGroup">
+          <AppIcon name="plus" :size="14" />新建分组
         </button>
       </div>
     </header>
@@ -304,6 +516,17 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
                 <option value="admin">管理员</option>
               </select>
             </label>
+            <label class="narrow">
+              <span>分组</span>
+              <select v-model="form.groupId">
+                <!-- :value="undefined" = 不传这个字段，由服务端落到默认分组 -->
+                <option :value="undefined">
+                  {{ defaultGroupName ? `默认（${defaultGroupName}）` : '默认（暂无默认分组）' }}
+                </option>
+                <option value="">不进任何分组</option>
+                <option v-for="group in state.adminGroups" :key="group.id" :value="group.id">{{ group.name }}</option>
+              </select>
+            </label>
           </div>
           <div class="create-foot">
             <!--
@@ -322,11 +545,12 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
           <span class="spinner" />正在加载…
         </div>
 
-        <table v-else-if="shown.length" class="users">
+        <table v-else-if="shown.length" class="users accounts">
           <thead>
             <tr>
               <th>用户名</th>
               <th>角色</th>
+              <th>分组</th>
               <th>状态</th>
               <th>创建时间</th>
               <th class="acts-col">操作</th>
@@ -342,6 +566,28 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
                 <td>
                   <span v-if="user.role === 'admin'" class="tag admin">管理员</span>
                   <span v-else class="muted">普通用户</span>
+                </td>
+                <!--
+                  分组直接在行里改，不用进另一个页面。
+                  它是这一列**唯一**的动作，而且是可逆的（改错了再改回来，
+                  代价只是那个人的可选模型变了一次），所以不值得一次确认对话框。
+                -->
+                <td>
+                  <select
+                    class="row-select"
+                    :value="user.groupId"
+                    :disabled="state.adminBusy"
+                    @change="setUserGroup(user.username, $event.target.value)"
+                  >
+                    <option value="">无分组</option>
+                    <option v-for="group in state.adminGroups" :key="group.id" :value="group.id">
+                      {{ group.name }}
+                    </option>
+                    <!-- 指着一个已删除的分组时，别让 select 显示成空 -->
+                    <option v-if="user.groupId && !groupName(user.groupId)" :value="user.groupId">
+                      {{ groupLabel(user.groupId) }}
+                    </option>
+                  </select>
                 </td>
                 <td>
                   <span v-if="user.disabled" class="tag off-tag">已禁用</span>
@@ -373,7 +619,7 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
                 </td>
               </tr>
               <tr v-if="resetting === user.username" class="reset-row">
-                <td colspan="5">
+                <td colspan="6">
                   <form class="reset" @submit.prevent="onReset(user.username)">
                     <span class="reset-label">给 <strong>{{ user.username }}</strong> 设一个新密码：</span>
                     <input
@@ -411,6 +657,363 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
             <div><dt>并发上限</dt><dd>{{ state.health.budget ?? '—' }}</dd></div>
           </dl>
         </section>
+      </template>
+
+      <!-- ══════════ 模型 ══════════ -->
+      <template v-else-if="state.adminTab === 'models'">
+        <!--
+          ── 这份清单现在生不生效 ──
+          一个配得完全正确的模型，在 LLM_MODE≠db 的部署上是**一点作用都没有**的，
+          而界面上看不出任何区别。这条提示是唯一能防住"配完了以为好了"的东西，
+          所以它排在最上面，而不是折在某个说明文字里。
+        -->
+        <p v-if="!state.adminModelsMeta.effective" class="note warn">
+          本部署当前的模型来源是 <strong>LLM_MODE={{ state.adminModelsMeta.llmMode || '未知' }}</strong>，
+          这里配置的模型<strong>不会生效</strong>。改成 <code>LLM_MODE=db</code> 并重启后，
+          用户能用的就是下面这份清单。现在可以先把模型配好，再切换 —— 顺序反过来会有一段
+          「所有人都没有模型可用」的空窗。
+        </p>
+        <p v-else-if="!state.adminModelsMeta.encrypted" class="note">
+          模型的 API Key 以<strong>明文</strong>存在数据库里，挡住它的只有数据库的访问控制。
+          配置 <code>LLM_CONFIG_SECRET</code> 后新保存的 Key 会加密入库（AES-256-GCM）；
+          换掉或丢掉这个密钥，已加密的 Key 就解不开了。
+        </p>
+
+        <!-- ── 新建 / 编辑（同一个表单，只有提交去处不同）── -->
+        <form v-if="state.adminModelEditing === 'new'" class="create" @submit.prevent="onSubmitModel">
+          <div class="create-row">
+            <label>
+              <span>名称</span>
+              <input v-model="modelForm.name" placeholder="给人看的名字，如「生产 Claude」" autocomplete="off" />
+            </label>
+            <label>
+              <span>模型 ID</span>
+              <input v-model="modelForm.model" placeholder="发给上游的那个名字，如 claude-sonnet-5" autocomplete="off" />
+            </label>
+          </div>
+          <div class="create-row">
+            <label class="wide">
+              <span>接口地址</span>
+              <input
+                v-model="modelForm.baseUrl"
+                placeholder="OpenAI 兼容端点，如 https://api.example.com/v1（不要带 /chat/completions）"
+                autocomplete="off"
+              />
+            </label>
+            <label>
+              <span>API Key</span>
+              <input v-model="modelForm.key" type="password" placeholder="留空表示这个端点不需要 Key" autocomplete="new-password" />
+            </label>
+          </div>
+          <div class="create-row">
+            <label class="narrow">
+              <span>上下文长度</span>
+              <input v-model="modelForm.contextWindow" type="number" min="1024" />
+            </label>
+            <label class="narrow">
+              <span>单次输出上限</span>
+              <input v-model="modelForm.maxTokens" type="number" min="0" placeholder="0 = 不发这个字段" />
+            </label>
+            <label class="narrow">
+              <span>上限字段名</span>
+              <select v-model="modelForm.maxTokensField">
+                <option value="">自动探测</option>
+                <option value="max_tokens">max_tokens</option>
+                <option value="max_completion_tokens">max_completion_tokens</option>
+              </select>
+            </label>
+            <label class="narrow">
+              <span>排序</span>
+              <input v-model="modelForm.sort" type="number" />
+            </label>
+          </div>
+          <div class="create-row switches">
+            <label class="switch"><input v-model="modelForm.image" type="checkbox" /><span>支持读图</span></label>
+            <label class="switch"><input v-model="modelForm.reasoning" type="checkbox" /><span>思维链模型</span></label>
+            <label class="switch"><input v-model="modelForm.enabled" type="checkbox" /><span>启用</span></label>
+          </div>
+          <!--
+            ── 可用范围 ──
+            一个都不勾 = 所有分组可用。这个默认值是有取舍的：管理员配第一个模型时
+            多半还没建任何分组，如果"不勾 = 谁也用不了"，他配完之后打开对话框会
+            发现一个模型都没有，而界面上完全看不出问题在哪。
+          -->
+          <div class="scope">
+            <span class="scope-label">可用分组</span>
+            <div class="scope-list">
+              <label v-for="group in state.adminGroups" :key="group.id" class="switch">
+                <input
+                  type="checkbox"
+                  :checked="modelForm.groups.includes(group.id)"
+                  @change="toggleModelGroup(group.id)"
+                />
+                <span>{{ group.name }}</span>
+              </label>
+              <span v-if="!state.adminGroups.length" class="hint">
+                还没有任何分组。不建分组也能用 —— 那样所有人都能用所有启用的模型。
+              </span>
+            </div>
+            <p class="hint">一个都不勾 = 所有分组（含没有分组的人）都能用。</p>
+          </div>
+          <div class="create-foot">
+            <p class="hint">保存后<strong>立刻生效</strong>，不需要重启。</p>
+            <button type="button" class="ghost-btn" @click="state.adminModelEditing = ''">取消</button>
+            <button type="submit" class="primary-btn" :disabled="state.adminBusy">添加</button>
+          </div>
+        </form>
+
+        <div v-if="state.adminModelsLoading && !state.adminModels.length" class="empty">
+          <span class="spinner" />正在加载…
+        </div>
+
+        <table v-else-if="shownModels.length" class="users models">
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>模型 ID</th>
+              <th>接口地址</th>
+              <th>Key</th>
+              <th>可用分组</th>
+              <th>状态</th>
+              <th class="acts-col">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template v-for="model in shownModels" :key="model.id">
+              <tr :class="{ off: !model.enabled }">
+                <td class="name">
+                  <AppIcon name="sparkle" :size="13" filled />{{ model.name }}
+                  <span v-if="model.reasoning" class="tag">思维链</span>
+                  <span v-if="model.input.includes('image')" class="tag">读图</span>
+                </td>
+                <td class="mono">{{ model.model }}</td>
+                <td class="muted mono url">{{ model.baseUrl }}</td>
+                <td>
+                  <!--
+                    只显示掩码。管理员在这一列要回答的问题只有"配没配、是不是我以为
+                    的那一把"，前四位加后四位足够 —— 而完整的 Key 一旦渲染出来，
+                    就会进浏览器缓存、进截图、进录屏。
+                  -->
+                  <span v-if="model.keyBroken" class="tag off-tag" title="LLM_CONFIG_SECRET 与写入时不一致，或这条记录被改过">
+                    解不开
+                  </span>
+                  <span v-else-if="model.hasKey" class="mono muted">{{ model.keyMask }}</span>
+                  <span v-else class="muted">—</span>
+                </td>
+                <td class="muted">{{ modelScope(model) }}</td>
+                <td>
+                  <span v-if="model.enabled" class="muted">已启用</span>
+                  <span v-else class="tag off-tag">已停用</span>
+                </td>
+                <td class="acts">
+                  <button type="button" class="ghost-btn" :disabled="state.adminBusy" @click="startEditModel(model)">
+                    {{ state.adminModelEditing === model.id ? '收起' : '编辑' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="ghost-btn"
+                    :disabled="state.adminBusy"
+                    @click="setModelEnabled(model.id, !model.enabled)"
+                  >{{ model.enabled ? '停用' : '启用' }}</button>
+                  <button
+                    type="button"
+                    class="ghost-btn danger"
+                    :disabled="state.adminBusy"
+                    @click="onDeleteModel(model)"
+                  >删除</button>
+                </td>
+              </tr>
+
+              <!-- 就地展开编辑：上一行就是它的名字，不会出现"弹框弹出来忘了点的是谁" -->
+              <tr v-if="state.adminModelEditing === model.id" class="reset-row">
+                <td colspan="7">
+                  <form class="create" @submit.prevent="onSubmitModel">
+                    <div class="create-row">
+                      <label><span>名称</span><input v-model="modelForm.name" autocomplete="off" /></label>
+                      <label><span>模型 ID</span><input v-model="modelForm.model" autocomplete="off" /></label>
+                    </div>
+                    <div class="create-row">
+                      <label class="wide"><span>接口地址</span><input v-model="modelForm.baseUrl" autocomplete="off" /></label>
+                      <label>
+                        <span>API Key</span>
+                        <input
+                          v-model="modelForm.key"
+                          type="password"
+                          :placeholder="model.hasKey ? `留空 = 不改（当前 ${model.keyMask}）` : '留空 = 不配 Key'"
+                          autocomplete="new-password"
+                        />
+                      </label>
+                    </div>
+                    <div class="create-row">
+                      <label class="narrow"><span>上下文长度</span><input v-model="modelForm.contextWindow" type="number" min="1024" /></label>
+                      <label class="narrow"><span>单次输出上限</span><input v-model="modelForm.maxTokens" type="number" min="0" /></label>
+                      <label class="narrow">
+                        <span>上限字段名</span>
+                        <select v-model="modelForm.maxTokensField">
+                          <option value="">自动探测</option>
+                          <option value="max_tokens">max_tokens</option>
+                          <option value="max_completion_tokens">max_completion_tokens</option>
+                        </select>
+                      </label>
+                      <label class="narrow"><span>排序</span><input v-model="modelForm.sort" type="number" /></label>
+                    </div>
+                    <div class="create-row switches">
+                      <label class="switch"><input v-model="modelForm.image" type="checkbox" /><span>支持读图</span></label>
+                      <label class="switch"><input v-model="modelForm.reasoning" type="checkbox" /><span>思维链模型</span></label>
+                      <label class="switch"><input v-model="modelForm.enabled" type="checkbox" /><span>启用</span></label>
+                    </div>
+                    <div class="scope">
+                      <span class="scope-label">可用分组</span>
+                      <div class="scope-list">
+                        <label v-for="group in state.adminGroups" :key="group.id" class="switch">
+                          <input
+                            type="checkbox"
+                            :checked="modelForm.groups.includes(group.id)"
+                            @change="toggleModelGroup(group.id)"
+                          />
+                          <span>{{ group.name }}</span>
+                        </label>
+                        <span v-if="!state.adminGroups.length" class="hint">还没有任何分组。</span>
+                      </div>
+                      <p class="hint">一个都不勾 = 所有分组（含没有分组的人）都能用。</p>
+                    </div>
+                    <div class="create-foot">
+                      <p class="hint">保存后立刻生效。</p>
+                      <button type="button" class="ghost-btn" @click="state.adminModelEditing = ''">取消</button>
+                      <button type="submit" class="primary-btn" :disabled="state.adminBusy">保存</button>
+                    </div>
+                  </form>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+
+        <p v-else class="empty">
+          {{ state.adminSearch.trim() ? '没有匹配的模型。'
+            : '还没有配置任何模型。点右上角「添加模型」，填上 OpenAI 兼容端点的地址与 Key 即可。' }}
+        </p>
+
+        <!--
+          排序不是装饰：**列表里的第一个就是用户没有指定模型时用的那个**。
+          这句话必须写在页面上，否则"默认模型是哪个"只能靠试。
+        -->
+        <p v-if="state.adminModels.length" class="hint">
+          排序值小的排在前面。<strong>启用的第一个就是默认模型</strong> ——
+          用户在对话框里不选模型时用的就是它。
+        </p>
+      </template>
+
+      <!-- ══════════ 分组 ══════════ -->
+      <template v-else-if="state.adminTab === 'groups'">
+        <p class="note">
+          分组只决定<strong>一个人能用哪些模型</strong>。它不是角色（能不能管别人那是「账号」页的管理员开关），
+          也不是隔离边界 —— 会话、作品、记忆一直是按账号隔离的，与分组无关。
+          没有分组的人能用的是那些<strong>没有限制可用范围</strong>的模型。
+        </p>
+
+        <form v-if="state.adminGroupEditing === 'new'" class="create" @submit.prevent="onSubmitGroup">
+          <div class="create-row">
+            <label>
+              <span>分组名</span>
+              <input v-model="groupForm.name" placeholder="如「研发」「试用」" autocomplete="off" />
+            </label>
+            <label class="wide">
+              <span>说明（可选）</span>
+              <input v-model="groupForm.description" placeholder="这个分组是给谁的、为什么这么分" autocomplete="off" />
+            </label>
+          </div>
+          <div class="create-row switches">
+            <label class="switch">
+              <input v-model="groupForm.isDefault" type="checkbox" />
+              <span>设为默认分组（新建的账号自动进这里）</span>
+            </label>
+          </div>
+          <div class="create-foot">
+            <p class="hint">最多只有一个默认分组：设了新的，旧的会自动取消。</p>
+            <button type="button" class="ghost-btn" @click="state.adminGroupEditing = ''">取消</button>
+            <button type="submit" class="primary-btn" :disabled="state.adminBusy">新建</button>
+          </div>
+        </form>
+
+        <div v-if="state.adminGroupsLoading && !state.adminGroups.length" class="empty">
+          <span class="spinner" />正在加载…
+        </div>
+
+        <table v-else-if="state.adminGroups.length" class="users groups">
+          <thead>
+            <tr>
+              <th>分组</th>
+              <th>说明</th>
+              <th class="num">人数</th>
+              <th class="num">可用模型</th>
+              <th class="acts-col">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template v-for="group in state.adminGroups" :key="group.id">
+              <tr>
+                <td class="name">
+                  <AppIcon name="user" :size="13" />{{ group.name }}
+                  <span v-if="group.isDefault" class="tag admin">默认</span>
+                </td>
+                <td class="muted">{{ group.description || '—' }}</td>
+                <td class="num">{{ group.userCount }}</td>
+                <!--
+                  这一格回答的是"这个组的人现在有没有模型可用"。0 要显眼：
+                  那个组里的人打开对话框会是空的，而他们不会知道为什么。
+                -->
+                <td class="num" :class="{ warnnum: !group.modelCount }">{{ group.modelCount }}</td>
+                <td class="acts">
+                  <button type="button" class="ghost-btn" :disabled="state.adminBusy" @click="startEditGroup(group)">
+                    {{ state.adminGroupEditing === group.id ? '收起' : '编辑' }}
+                  </button>
+                  <button
+                    type="button"
+                    class="ghost-btn"
+                    :disabled="state.adminBusy || group.isDefault"
+                    :title="group.isDefault ? '默认分组不能直接设回非默认：把别的分组设为默认即可' : ''"
+                    @click="updateGroup(group.id, { isDefault: true })"
+                  >设为默认</button>
+                  <button type="button" class="ghost-btn danger" :disabled="state.adminBusy" @click="onDeleteGroup(group)">
+                    删除
+                  </button>
+                </td>
+              </tr>
+              <tr v-if="state.adminGroupEditing === group.id" class="reset-row">
+                <td colspan="5">
+                  <form class="create" @submit.prevent="onSubmitGroup">
+                    <div class="create-row">
+                      <label><span>分组名</span><input v-model="groupForm.name" autocomplete="off" /></label>
+                      <label class="wide"><span>说明</span><input v-model="groupForm.description" autocomplete="off" /></label>
+                    </div>
+                    <div class="create-foot">
+                      <p class="hint">改名不影响成员：模型和账号存的是分组 id，不是名字。</p>
+                      <button type="button" class="ghost-btn" @click="state.adminGroupEditing = ''">取消</button>
+                      <button type="submit" class="primary-btn" :disabled="state.adminBusy">保存</button>
+                    </div>
+                  </form>
+                </td>
+              </tr>
+            </template>
+            <!--
+              无分组的人也占一行。不列的话，各分组人数加起来对不上账号总数，
+              而那个差额没有任何地方解释得了。
+            -->
+            <tr v-if="state.adminUngrouped" class="ungrouped">
+              <td class="name muted"><AppIcon name="user" :size="13" />无分组</td>
+              <td class="muted">只能用那些不限可用范围的模型</td>
+              <td class="num">{{ state.adminUngrouped }}</td>
+              <td class="num">{{ state.adminModels.filter((m) => m.enabled && !m.groups.length).length }}</td>
+              <td />
+            </tr>
+          </tbody>
+        </table>
+
+        <p v-else class="empty">
+          还没有分组。不建分组也能用 —— 那样所有人都能用所有启用的模型。
+          要区别对待时（比如只给一部分人开贵的模型），在这里建一个。
+        </p>
       </template>
 
       <!-- ══════════ Token 用量 ══════════ -->
@@ -772,6 +1375,56 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
   flex: 0 0 140px;
   min-width: 0;
 }
+/* 接口地址比别的字段长得多，给它两倍的份额，否则 URL 永远只看得见前半截 */
+.create label.wide {
+  flex: 2;
+  min-width: 260px;
+}
+
+/* ── 开关一排 ── */
+.create-row.switches {
+  gap: 18px;
+  align-items: center;
+}
+.switch {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--foreground);
+  cursor: pointer;
+}
+.switch input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--brand-accent);
+}
+
+/* ── 可用分组 ── */
+.scope {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--background);
+}
+.scope-label {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.scope-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+.scope .hint {
+  flex: none;
+}
 .create input,
 .create select {
   padding: 7px 9px;
@@ -841,8 +1494,44 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
 .tag {
   padding: 1px 7px;
   border-radius: 999px;
+  background: var(--secondary);
+  color: var(--muted-foreground);
   font-size: 11px;
   white-space: nowrap;
+}
+
+/* ── 行内下拉（账号表里的分组）── */
+.row-select {
+  max-width: 150px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 12.5px;
+}
+.row-select:disabled {
+  opacity: 0.6;
+}
+
+/* 模型 ID 和地址是要一个字一个字核对的东西，等宽字体让"看错一位"变难 */
+.mono {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+}
+.url {
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 「可用模型 0」要显眼：那个分组的人打开对话框是空的，而他们不会知道为什么 */
+.warnnum {
+  color: var(--warning);
+  font-weight: 600;
+}
+.ungrouped td {
+  border-top: 1px dashed var(--border);
 }
 .tag.admin {
   background: color-mix(in srgb, var(--brand-accent) 16%, transparent);
@@ -965,6 +1654,7 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
 }
 
 /* 数字列右对齐 + 等宽数字：位数对齐之后，长短本身就是"谁多谁少" */
+.users .num,
 .usage .num {
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -1150,8 +1840,19 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
   .time {
     display: none;
   }
-  /* 账号表：藏掉「创建时间」。`:not(.usage)` 是必须的 —— 用量表的第 4 列是「输出」 */
-  .users:not(.usage) th:nth-child(4) {
+  /*
+    账号表：藏掉「创建时间」（第 5 列，分组那一列插进来之后它往后挪了一位）。
+    表格的类名必须写具体 —— 靠 `:not(.usage)` 排除的写法在多了模型表和分组表
+    之后就不成立了：那两张表的第 5 列分别是「可用分组」和「操作」。
+  */
+  .users.accounts th:nth-child(5) {
+    display: none;
+  }
+  /* 模型表窄屏砍掉「接口地址」和「Key」：核对配置是坐下来做的事，不是路上做的 */
+  .users.models th:nth-child(3),
+  .users.models td:nth-child(3):not([colspan]),
+  .users.models th:nth-child(4),
+  .users.models td:nth-child(4):not([colspan]) {
     display: none;
   }
   /*

@@ -139,7 +139,13 @@ function useSample(sample) {
 
         <div v-if="state.models.length" class="select-wrap">
           <select :value="state.modelId" title="选择模型" @change="setModel($event.target.value)">
-            <option v-for="model in state.models" :key="model.id" :value="model.id">{{ model.id }}</option>
+            <!--
+              有管理员起的名字就显示名字（LLM_MODE=db 那条路上才有），否则显示模型 id。
+              `title` 里始终是 id：换模型排查问题时要报的是 id，不是"生产 Claude"。
+            -->
+            <option v-for="model in state.models" :key="model.id" :value="model.id" :title="model.id">
+              {{ model.name || model.id }}
+            </option>
           </select>
           <AppIcon name="chevron-down" :size="13" class="select-caret" />
         </div>

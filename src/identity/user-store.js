@@ -82,6 +82,12 @@ export function toPublicUser(record) {
     username: record.username,
     role: record.role || 'user',
     disabled: Boolean(record.disabled),
+    /**
+     * 所属分组，决定他能用哪些模型（见 src/identity/group-store.js）。
+     * **空串是合法状态**（"没分组"），不是"数据缺失" —— 老账号升级上来全是空的，
+     * 而它们照样能用那些没有限制可用范围的模型。
+     */
+    groupId: record.groupId || '',
     createdAt: record.createdAt || 0,
     updatedAt: record.updatedAt || 0,
   }
@@ -92,8 +98,12 @@ export function toPublicUser(record) {
  * @param {object} params.storage 结构化存储后端。账号用 **globalMap** —— 它按定义
  *   就不属于某一个用户，而是"这个部署有哪些用户"。这是隔离契约那条
  *   "只能拿某个人的表"的合理例外，与分享指针表同理。
+ * @param {object} [params.groups] 分组 store。传了的话，**新账号自动进默认分组**。
+ *   做成依赖而不是让每个调用方自己查一次：建账号的入口有三个（管理员创建、
+ *   自助注册、CONSOLE_USERS 播种），漏掉任何一个的表现都是"那个人打开对话框
+ *   一个模型都没有"，而那个现象完全看不出是在哪儿漏的。
  */
-export function createUserStore({ config, storage, logger = console }) {
+export function createUserStore({ config, storage, groups = null, logger = console }) {
   /**
    * 集合名是 `accounts` 而不是 `users`。
    *
@@ -172,10 +182,18 @@ export function createUserStore({ config, storage, logger = console }) {
     })
   }
 
-  async function create({ username, password, role = 'user', enforcePolicy = true }) {
+  async function create({ username, password, role = 'user', groupId, enforcePolicy = true }) {
     const name = assertUsername(username)
     const secret = enforcePolicy ? assertPassword(password) : String(password ?? '')
     if (!secret) throw new Error('密码不能为空')
+
+    /**
+     * 没显式指定分组就用默认分组。**取不到默认分组不是错误** ——
+     * 一个还没建过任何分组的部署里，所有人都是无分组，那是合法状态。
+     */
+    const group = groupId === undefined
+      ? (await groups?.defaultGroupId().catch(() => '')) || ''
+      : String(groupId || '')
 
     const salt = crypto.randomBytes(SALT_BYTES).toString('hex')
     const now = Date.now()
@@ -185,6 +203,7 @@ export function createUserStore({ config, storage, logger = console }) {
       salt,
       role: role === 'admin' ? 'admin' : 'user',
       disabled: false,
+      groupId: group,
       createdAt: now,
       updatedAt: now,
     }
@@ -247,6 +266,38 @@ export function createUserStore({ config, storage, logger = console }) {
       const name = assertUsername(username)
       const updated = await map.merge(name, { role: role === 'admin' ? 'admin' : 'user', updatedAt: Date.now() })
       return updated ? toPublicUser(updated) : null
+    },
+
+    /**
+     * 换分组（空串 = 退出分组）。
+     *
+     * **不校验这个分组存不存在** —— 那是 HTTP 层的事，它才知道要回 400 还是 404。
+     * 这里校验的话，"分组刚被别的管理员删掉"会让一次正常的改组抛一个存储层的
+     * 裸 Error，最后表现成 500。
+     */
+    async setGroup({ username, groupId }) {
+      const name = assertUsername(username)
+      const updated = await map.merge(name, { groupId: String(groupId || ''), updatedAt: Date.now() })
+      return updated ? toPublicUser(updated) : null
+    },
+
+    /**
+     * 这个分组没了：把所有属于它的人退回无分组。
+     *
+     * 不这么做的话，库里会留下一批指向不存在分组的账号 —— 他们能用的模型
+     * 与无分组的人**碰巧**一样（因为按 id 匹配匹配不上），
+     * 但界面上会显示一个空白的分组名，谁也说不清那是什么。
+     */
+    async clearGroup(groupId) {
+      const target = String(groupId || '')
+      if (!target) return 0
+      let touched = 0
+      for (const record of await map.all()) {
+        if (record.groupId !== target) continue
+        await map.merge(record.username, { groupId: '', updatedAt: Date.now() })
+        touched += 1
+      }
+      return touched
     },
   }
 }
