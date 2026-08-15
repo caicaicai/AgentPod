@@ -407,7 +407,68 @@ export async function login(username, password) {
     state.loginError = ''
     await bootAfterLogin()
   } catch (error) {
+    /**
+     * 密码是对的，只是账号还没激活（服务端回 403 + details.activationRequired）。
+     *
+     * 这**不是**一次登录失败，是流程还差一步：回给调用方，让登录框切到
+     * 填验证码那一屏。当成普通错误显示的话，用户会对着一个正确的密码反复重试。
+     */
+    if (error?.details?.activationRequired) {
+      return { needActivation: true, username, email: error.details.email || '' }
+    }
     state.loginError = error.message || '登录失败'
+  }
+  return { ok: !state.loginError }
+}
+
+/**
+ * 注册。
+ *
+ * 两种结局，由**服务端**决定（前端不猜）：
+ *   - 直接发了令牌  → 当场登进去，与登录一条路；
+ *   - pendingActivation → 账号建好了但没激活，得再填一次验证码。
+ */
+export async function register(username, password, email = '') {
+  state.loginError = ''
+  try {
+    const data = await api.register(username, password, email)
+    if (data.pendingActivation) {
+      return { pendingActivation: true, username, email: data.email || '', expiresAt: data.expiresAt || 0 }
+    }
+    setAuthToken(data.token)
+    state.needLogin = false
+    await bootAfterLogin()
+    return { ok: true }
+  } catch (error) {
+    state.loginError = error.message || '注册失败'
+    return { ok: false }
+  }
+}
+
+/** 拿验证码换激活。成功即登入 —— 服务端在这一步就把令牌发了 */
+export async function activateAccount(username, code) {
+  state.loginError = ''
+  try {
+    const data = await api.activateAccount(username, code)
+    setAuthToken(data.token)
+    state.needLogin = false
+    await bootAfterLogin()
+    return { ok: true }
+  } catch (error) {
+    state.loginError = error.message || '激活失败'
+    return { ok: false }
+  }
+}
+
+/** 重发验证码。发信间隔没到时服务端回 429，原样显示给用户（他要知道还得等多久） */
+export async function resendActivationCode(username) {
+  state.loginError = ''
+  try {
+    const data = await api.resendActivationCode(username)
+    return { ok: true, message: data.message || '验证码已重新发送' }
+  } catch (error) {
+    state.loginError = error.message || '验证码发送失败'
+    return { ok: false }
   }
 }
 

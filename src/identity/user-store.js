@@ -47,12 +47,44 @@ const USERNAME_RE = /^[A-Za-z0-9._-]{1,64}$/
 const PASSWORD_MIN = 8
 const PASSWORD_MAX = 200
 
+/**
+ * 邮箱。**故意写得宽松**：`local@domain.tld`，不含空格，总长不超过 254（RFC 5321）。
+ *
+ * 不去追求"完全符合 RFC 5322 的正则" —— 那个正则长得没人看得懂，而且它判对了
+ * 也说明不了这个邮箱**存在**。真正的判据只有一个：那封验证码信收不收得到。
+ * 这里挡的只是明显打错的（少个 @、带空格、末尾没有点）。
+ */
+const EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[A-Za-z]{2,}$/
+const EMAIL_MAX = 254
+
 export function assertUsername(input) {
   const name = String(input || '').trim()
   if (!USERNAME_RE.test(name)) {
     throw new Error('用户名只能是字母、数字、点、下划线、连字符，且不超过 64 字符')
   }
   return name
+}
+
+/**
+ * 校验并**归一化**邮箱：去空格、转小写。
+ *
+ * 归一化不是洁癖：不转小写的话 `Alice@x.com` 和 `alice@x.com` 会是两条互不相干的
+ * 记录，于是"这个邮箱已经注册过了"这道检查形同虚设 —— 域名部分本来就大小写不敏感。
+ *
+ * @param {string[]} [allowedDomains] 非空时只放行这些域名（内网部署常见的"只让公司邮箱注册"）
+ */
+export function assertEmail(input, allowedDomains = []) {
+  const email = String(input || '').trim().toLowerCase()
+  if (!email) throw new Error('邮箱不能为空')
+  if (email.length > EMAIL_MAX) throw new Error(`邮箱不能超过 ${EMAIL_MAX} 字符`)
+  if (!EMAIL_RE.test(email)) throw new Error('邮箱格式不正确')
+  if (allowedDomains.length) {
+    const domain = email.slice(email.lastIndexOf('@') + 1)
+    if (!allowedDomains.includes(domain)) {
+      throw new Error(`只允许使用这些邮箱域名注册：${allowedDomains.join('、')}`)
+    }
+  }
+  return email
 }
 
 export function assertPassword(input) {
@@ -88,6 +120,19 @@ export function toPublicUser(record) {
      * 而它们照样能用那些没有限制可用范围的模型。
      */
     groupId: record.groupId || '',
+    /**
+     * 邮箱。**可以是空串** —— 只有开了 REGISTER_REQUIRE_EMAIL / REGISTER_VERIFY_EMAIL
+     * 的部署才强制要，而管理员创建的账号和 CONSOLE_USERS 播种进来的从来没有。
+     */
+    email: record.email || '',
+    /**
+     * 激活状态。**只有"明确是 false"才算未激活**。
+     *
+     * 这条判据是故意写成这样的：老记录里根本没有这个字段，当成 undefined→未激活
+     * 的话，一次升级就会把全部存量账号锁在门外，而且现象是"密码明明是对的"。
+     * 新账号一律显式写 true/false，于是这里的宽容只作用于升级那一次。
+     */
+    activated: record.activated !== false,
     createdAt: record.createdAt || 0,
     updatedAt: record.updatedAt || 0,
   }
@@ -103,7 +148,19 @@ export function toPublicUser(record) {
  *   自助注册、CONSOLE_USERS 播种），漏掉任何一个的表现都是"那个人打开对话框
  *   一个模型都没有"，而那个现象完全看不出是在哪儿漏的。
  */
-export function createUserStore({ config, storage, groups = null, logger = console }) {
+export function createUserStore({ config, storage, groups = null, logger = console, now = () => Date.now() }) {
+  /**
+   * 注册细则（要不要邮箱、验证码几位、多久过期）。
+   * 单测里构造的 config 未必带这一段，所以给一份与 config.js 默认值一致的兜底。
+   */
+  const registerPolicy = {
+    codeLength: 6,
+    codeTtlMinutes: 15,
+    maxAttempts: 5,
+    resendIntervalSeconds: 60,
+    emailDomains: [],
+    ...(config.auth?.password?.register || {}),
+  }
   /**
    * 集合名是 `accounts` 而不是 `users`。
    *
@@ -169,7 +226,46 @@ export function createUserStore({ config, storage, groups = null, logger = conso
       return { ok: false, reason: 'bad-password' }
     }
     if (record.disabled) return { ok: false, reason: 'disabled' }
+    /**
+     * 密码是对的，但账号还没激活。
+     *
+     * 放在密码校验**之后**判，不是随手排的顺序：先判激活状态的话，任何人报一个
+     * 用户名就能问出"这个账号存不存在、激活没有"。放在后面，能看到这条的人
+     * 已经证明他知道密码 —— 那对他不是新信息。
+     */
+    if (record.activated === false) return { ok: false, reason: 'inactive', user: toPublicUser(record) }
     return { ok: true, user: toPublicUser(record) }
+  }
+
+  /* ═══════════ 注册验证码 ═══════════ */
+
+  /**
+   * 验证码只存**摘要**，不存原文。
+   *
+   * 说清楚这一步挡得住什么、挡不住什么：6 位数字一共一百万种，谁拿到摘要都能
+   * 在一秒内枚举回来 —— 所以这**不是**"即使库被拖走验证码也安全"。它挡的是
+   * 顺手一眼（备份、慢查询日志、DBA 的临时导出里不会躺着一串能直接用的码）。
+   * 真正兜底的是有效期和试错次数上限，见 verifyActivationCode。
+   *
+   * 掺上用户名一起哈希：否则同一时刻发出去的两个 `000000` 摘要一模一样，
+   * 库里一眼就能看出谁和谁的码是同一个。
+   */
+  function hashCode(username, code) {
+    return crypto.createHash('sha256').update(`${username}:${code}`).digest('hex')
+  }
+
+  /** 定长的数字验证码。用 randomInt 而不是 Math.random —— 后者可预测，而这是一次性凭据 */
+  function generateCode(length) {
+    let code = ''
+    while (code.length < length) code += String(crypto.randomInt(0, 10))
+    return code
+  }
+
+  /** 摘要比对也走 timingSafeEqual：长度固定，直接比 */
+  function sameHash(a, b) {
+    const left = Buffer.from(String(a || ''), 'utf8')
+    const right = Buffer.from(String(b || ''), 'utf8')
+    return left.length === right.length && crypto.timingSafeEqual(left, right)
   }
 
   /**
@@ -192,10 +288,38 @@ export function createUserStore({ config, storage, groups = null, logger = conso
     }))
   }
 
-  async function create({ username, password, role = 'user', groupId, enforcePolicy = true }) {
+  /**
+   * @param {object} params
+   * @param {string} [params.email] 留空 = 这个账号没有邮箱（管理员创建、CONSOLE_USERS 播种
+   *   一直都是这样）。要不要强制留，是 HTTP 层按配置决定的事。
+   * @param {boolean} [params.activated] 账号建出来算不算激活。**默认 true** ——
+   *   未激活是自助注册 + 邮箱验证码这一条路上的特例，其余入口（管理员创建、播种）
+   *   建出来就该能用。默认成 false 的话，一次配置疏忽就会让管理员创建的账号
+   *   全都登不进去，而管理台上看起来一切正常。
+   * @param {boolean} [params.replacePending] 用户名已存在**且那个账号还没激活**时，
+   *   允许覆盖它。见下面 putIfAbsent 那一段。
+   */
+  async function create({
+    username, password, role = 'user', groupId, enforcePolicy = true,
+    email = '', activated = true, replacePending = false,
+  }) {
     const name = assertUsername(username)
     const secret = enforcePolicy ? assertPassword(password) : String(password ?? '')
     if (!secret) throw new Error('密码不能为空')
+    const mail = email ? assertEmail(email, registerPolicy.emailDomains) : ''
+
+    /**
+     * 一个邮箱只能注册一个账号。
+     *
+     * ⚠️ 这是**尽力而为**，不是数据库唯一约束：两个并发的注册请求可能都查不到对方，
+     * 于是双双写进去。这里认了 —— 邮箱重复不是一条安全边界（它既不影响谁能登录，
+     * 也不影响谁能看到什么），而为它上一把跨行的锁，代价远大于它挡住的那点混乱。
+     * 用户名的唯一性不一样，那个是硬的，靠下面的 putIfAbsent 保证。
+     */
+    if (mail) {
+      const taken = await findByEmail(mail)
+      if (taken && taken.username !== name) throw new Error(`邮箱 ${mail} 已经注册过了`)
+    }
 
     /**
      * 没显式指定分组就用默认分组。**取不到默认分组不是错误** ——
@@ -206,7 +330,7 @@ export function createUserStore({ config, storage, groups = null, logger = conso
       : String(groupId || '')
 
     const salt = crypto.randomBytes(SALT_BYTES).toString('hex')
-    const now = Date.now()
+    const at = now()
     const record = {
       username: name,
       passwordHash: await derive(secret, salt),
@@ -214,6 +338,8 @@ export function createUserStore({ config, storage, groups = null, logger = conso
       role: role === 'admin' ? 'admin' : 'user',
       disabled: false,
       groupId: group,
+      email: mail,
+      activated: Boolean(activated),
       /**
        * 令牌代数。签发时写进 JWT，每次请求比对（见 src/identity/index.js）。
        * 改密 / 禁用会把它推一格，于是旧令牌当场作废。
@@ -222,19 +348,153 @@ export function createUserStore({ config, storage, groups = null, logger = conso
        * 数据迁移，也不会把所有人踢下线。
        */
       tokenVersion: 0,
-      createdAt: now,
-      updatedAt: now,
+      createdAt: at,
+      updatedAt: at,
     }
     // putIfAbsent 而不是 put：并发两个注册请求撞同一个用户名时，
     // 后到的那个应当失败，而不是把先到的那个覆盖掉
     const stored = await map.putIfAbsent(name, record)
-    if (stored !== record) throw new Error(`用户名 ${name} 已被占用`)
+    if (stored !== record) {
+      /**
+       * 用户名被占了。**如果占着它的那个账号从来没激活过**，允许这次注册顶掉它。
+       *
+       * 为什么这是对的：未激活的账号没有主人 —— 没人用它登录过，它名下没有任何
+       * 会话、作品、记忆。不让顶的话，随便谁提交一次注册就能把一个用户名**永久**
+       * 占住（他自己也用不了），而真正想用这个名字的人只能去找管理员。
+       *
+       * 代价是：A 正等着收验证码时，B 可以用同一个用户名重新注册，A 手里那个码
+       * 就作废了。A 什么也没丢（那个账号还不属于他），重新注册一次即可。
+       * 这条路本来就只在开放注册的部署上存在，而那里用户名先到先得。
+       */
+      if (!(replacePending && stored?.activated === false)) {
+        throw new Error(`用户名 ${name} 已被占用`)
+      }
+      // 保留最初的创建时间：这个用户名从那时起就在被人尝试注册，账上留个痕
+      await map.put(name, { ...record, createdAt: stored.createdAt || at })
+    }
     return toPublicUser(record)
+  }
+
+  /**
+   * 按邮箱找账号。**全表扫**。
+   *
+   * 只在注册和找回这类低频路径上调，而这个部署的账号数量是"一个团队"的量级，
+   * 不是"一个公网产品"的量级。真到了需要索引的规模，该做的是给账号表加一列
+   * 索引，而不是在这里塞一层会和主表漂移的缓存。
+   */
+  async function findByEmail(email) {
+    const target = String(email || '').trim().toLowerCase()
+    if (!target) return null
+    for (const record of await map.all()) {
+      if (String(record.email || '').toLowerCase() === target) return toPublicUser(record)
+    }
+    return null
   }
 
   return {
     seedFromEnv,
     create,
+    findByEmail,
+
+    /**
+     * 发一份新的验证码（注册时第一次发、以及后来的"重发"走的是同一个方法）。
+     *
+     * **回的是验证码原文**，只交给发信那一步用，绝不能进日志、进响应体。
+     * 存进库里的是它的摘要，见 hashCode。
+     *
+     * @returns {Promise<{ok: boolean, reason?: string, code?: string, expiresAt?: number, retryAfterMs?: number}>}
+     */
+    async issueActivationCode({ username }) {
+      const name = String(username || '')
+      if (!USERNAME_RE.test(name)) return { ok: false, reason: 'no-such-user' }
+      const record = await map.get(name)
+      if (!record) return { ok: false, reason: 'no-such-user' }
+      if (record.activated !== false) return { ok: false, reason: 'already-active' }
+      if (!record.email) return { ok: false, reason: 'no-email' }
+
+      const at = now()
+      /**
+       * 两次发信之间要隔一会儿。挡的不是注册的人，是拿我们的发信账号去轰炸
+       * 别人邮箱的人 —— 没有这道闸，一个 `/resend` 循环就是一台免费的发信机。
+       */
+      const interval = registerPolicy.resendIntervalSeconds * 1000
+      const sentAt = Number(record.activation?.sentAt) || 0
+      if (sentAt && at - sentAt < interval) {
+        return { ok: false, reason: 'too-soon', retryAfterMs: interval - (at - sentAt) }
+      }
+
+      const code = generateCode(registerPolicy.codeLength)
+      const expiresAt = at + registerPolicy.codeTtlMinutes * 60 * 1000
+      const updated = await map.merge(name, {
+        // 整份换掉而不是改字段：重发要把试错次数一起清零，
+        // 否则前一份码被试满之后，重发出来的新码一进门就是"次数已用尽"
+        activation: { codeHash: hashCode(name, code), expiresAt, attempts: 0, sentAt: at },
+        updatedAt: at,
+      })
+      if (!updated) return { ok: false, reason: 'no-such-user' }
+      return { ok: true, code, expiresAt, email: record.email, ttlMinutes: registerPolicy.codeTtlMinutes }
+    },
+
+    /**
+     * 拿验证码换激活。
+     *
+     * 整件事在**一次 update 里**完成（存储层是 SELECT ... FOR UPDATE + 事务），
+     * 而不是"读出来判断、再写回去"：后者在并发下，两个请求会读到同一个
+     * attempts，于是试错次数上限可以靠并发绕过 —— 一次发 50 个猜测只算 1 次。
+     *
+     * @returns {Promise<{ok: boolean, reason?: string, user?: object, attemptsLeft?: number}>}
+     *   reason: no-such-user | already-active | no-code | expired | too-many-attempts | bad-code
+     */
+    async verifyActivationCode({ username, code }) {
+      const name = String(username || '')
+      if (!USERNAME_RE.test(name)) return { ok: false, reason: 'no-such-user' }
+
+      const at = now()
+      let outcome = { ok: false, reason: 'no-such-user' }
+      const updated = await map.update(name, (current) => {
+        if (current.activated !== false) {
+          outcome = { ok: false, reason: 'already-active' }
+          return current
+        }
+        const activation = current.activation
+        if (!activation?.codeHash) {
+          outcome = { ok: false, reason: 'no-code' }
+          return current
+        }
+        if (Number(activation.expiresAt) <= at) {
+          // 过期的码直接摘掉：留着只会让下一次请求再判一遍同样的过期
+          outcome = { ok: false, reason: 'expired' }
+          return { ...current, activation: undefined, updatedAt: at }
+        }
+        const attempts = Number(activation.attempts) || 0
+        if (attempts >= registerPolicy.maxAttempts) {
+          outcome = { ok: false, reason: 'too-many-attempts' }
+          return { ...current, activation: undefined, updatedAt: at }
+        }
+        if (!sameHash(activation.codeHash, hashCode(name, String(code ?? '')))) {
+          const used = attempts + 1
+          const left = registerPolicy.maxAttempts - used
+          outcome = { ok: false, reason: left > 0 ? 'bad-code' : 'too-many-attempts', attemptsLeft: Math.max(0, left) }
+          /**
+           * 试满就把这份码作废（必须重发）。
+           *
+           * 这才是 6 位数字真正的护栏：一百万种可能里，允许试 5 次意味着
+           * 单份验证码被猜中的概率是二十万分之一，而重发还要过上面那道间隔闸。
+           */
+          return {
+            ...current,
+            activation: left > 0 ? { ...activation, attempts: used } : undefined,
+            updatedAt: at,
+          }
+        }
+        // 对了：激活，并且把验证码摘掉 —— 一次性的东西不留第二次机会
+        outcome = { ok: true }
+        return { ...current, activated: true, activation: undefined, updatedAt: at }
+      })
+
+      if (!updated) return { ok: false, reason: 'no-such-user' }
+      return outcome.ok ? { ok: true, user: toPublicUser(updated) } : outcome
+    },
 
     async get(username) {
       if (!USERNAME_RE.test(String(username || ''))) return null

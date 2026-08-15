@@ -260,7 +260,16 @@ const q = (params) => {
 export const api = {
   health: () => request('/healthz'),
   login: (username, password) => request('/v1/auth/login', { method: 'POST', body: { username, password } }),
-  register: (username, password) => request('/v1/auth/register', { method: 'POST', body: { username, password } }),
+  /**
+   * 注册。`email` 只在部署要求时才有值（healthz 的 features.registerEmail）。
+   *
+   * 开了邮箱验证码的部署上，这条回的是 **202 + pendingActivation**，
+   * **没有 token** —— 账号还没激活，要先拿验证码去换（activateAccount）。
+   */
+  register: (username, password, email = '') =>
+    request('/v1/auth/register', { method: 'POST', body: { username, password, ...(email ? { email } : {}) } }),
+  activateAccount: (username, code) => request('/v1/auth/activate', { method: 'POST', body: { username, code } }),
+  resendActivationCode: (username) => request('/v1/auth/activation/resend', { method: 'POST', body: { username } }),
   /** 改自己的密码。**必须带旧密码** —— 只凭令牌就能改密等于把"临时借用"变成"永久接管" */
   changePassword: (oldPassword, newPassword) =>
     request('/v1/auth/password', { method: 'POST', body: { oldPassword, newPassword } }),

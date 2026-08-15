@@ -58,7 +58,7 @@ const creating = ref(false)
  * 不传表示"用默认分组"（服务端去查哪个组标了默认），传空串表示"明确不进任何分组"。
  * 表单里那个下拉的第一项就是"默认分组"，选它就是不传。
  */
-const form = ref({ username: '', password: '', role: 'user', groupId: undefined })
+const form = ref({ username: '', password: '', email: '', role: 'user', groupId: undefined })
 
 async function onCreate() {
   const username = form.value.username.trim()
@@ -71,10 +71,12 @@ async function onCreate() {
     username,
     password: form.value.password,
     role: form.value.role,
+    // 空串就干脆不传：传了会让服务端去跑一遍邮箱校验，而"没填"不是"填了个空的"
+    ...(form.value.email.trim() ? { email: form.value.email.trim() } : {}),
     ...(form.value.groupId === undefined ? {} : { groupId: form.value.groupId }),
   })
   if (ok) {
-    form.value = { username: '', password: '', role: 'user', groupId: undefined }
+    form.value = { username: '', password: '', email: '', role: 'user', groupId: undefined }
     creating.value = false
   }
 }
@@ -509,6 +511,14 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
               <span>初始密码</span>
               <input v-model="form.password" type="password" placeholder="至少 8 位" autocomplete="new-password" />
             </label>
+            <!--
+              邮箱选填。管理员建的账号**一律直接可用**，不用等验证码 ——
+              人就在他面前，身份已经确认过了；这一栏留的是"以后联系得上"。
+            -->
+            <label>
+              <span>邮箱<span class="opt">（选填）</span></span>
+              <input v-model="form.email" type="email" placeholder="用于联系" autocomplete="off" />
+            </label>
             <label class="narrow">
               <span>角色</span>
               <select v-model="form.role">
@@ -551,6 +561,7 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
               <th>用户名</th>
               <th>角色</th>
               <th>分组</th>
+              <th>邮箱</th>
               <th>状态</th>
               <th>创建时间</th>
               <th class="acts-col">操作</th>
@@ -589,8 +600,15 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
                     </option>
                   </select>
                 </td>
+                <td class="muted">{{ user.email || '—' }}</td>
                 <td>
                   <span v-if="user.disabled" class="tag off-tag">已禁用</span>
+                  <!--
+                    未激活 = 自助注册了但还没填验证码。要单独标出来：
+                    否则管理员看到的是一个"正常"的账号，而那个人根本登不进去，
+                    来问的时候两边都说不清是怎么回事。
+                  -->
+                  <span v-else-if="!user.activated" class="tag off-tag">未激活</span>
                   <span v-else class="muted">正常</span>
                 </td>
                 <td class="muted time">{{ user.createdAt ? formatDateTime(user.createdAt) : '—' }}</td>
@@ -619,7 +637,8 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
                 </td>
               </tr>
               <tr v-if="resetting === user.username" class="reset-row">
-                <td colspan="6">
+                <!-- 列数跟着上面那张表头走：用户名 / 角色 / 分组 / 邮箱 / 状态 / 创建时间 / 操作 -->
+                <td colspan="7">
                   <form class="reset" @submit.prevent="onReset(user.username)">
                     <span class="reset-label">给 <strong>{{ user.username }}</strong> 设一个新密码：</span>
                     <input
@@ -1374,6 +1393,10 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
 .create label.narrow {
   flex: 0 0 140px;
   min-width: 0;
+}
+/* 「（选填）」比字段名淡一档：它是补充说明，不该和标题抢注意力 */
+.create label .opt {
+  opacity: 0.7;
 }
 /* 接口地址比别的字段长得多，给它两倍的份额，否则 URL 永远只看得见前半截 */
 .create label.wide {

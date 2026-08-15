@@ -25,6 +25,7 @@ import { createArtifactStore } from './artifacts/store.js'
 import { createShareStore } from './artifacts/shares.js'
 import { createStorage } from './persistence/storage.js'
 import { createUserStore } from './identity/user-store.js'
+import { createMailer } from './mail/mailer.js'
 import { createCronStore } from './cron/store.js'
 import { createCronCredentialVault } from './cron/credentials.js'
 import { createScheduler } from './cron/scheduler.js'
@@ -65,6 +66,14 @@ async function main() {
   if (users) await users.seedFromEnv()
 
   const identity = createIdentityResolver({ config, logger, users })
+  /**
+   * 发信口。今天只发注册验证码，没配发信账号时 enabled=false ——
+   * HTTP 层据此决定注册要不要走验证码那一步（见 server.js 的 registerVerifyEmail）。
+   */
+  const mailer = createMailer({ config, logger })
+  if (config.auth.password.register.verifyEmail && !mailer.enabled) {
+    logger.warn('REGISTER_VERIFY_EMAIL=1 但没有可用的发信账号，注册将退回"不验证邮箱"')
+  }
   const workspace = createWorkspaceStore({ config, logger })
   // 技能管理面（改/删/停用）。没有用户工作空间时它整体是关的 —— 与 canCreate 同一个前提
   const skillManager = workspace.enabled
@@ -161,6 +170,7 @@ async function main() {
     // 它只是 passthrough broker 的内部依赖
     config, logger, identity, broker, runService, store, metrics, workspace, skillManager,
     memory, projects, crons, scheduler, cronVault, artifacts, shares, users, usage, modelStore, groups,
+    mailer,
   })
 
   await app.listen(config.port)

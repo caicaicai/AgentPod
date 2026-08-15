@@ -109,6 +109,11 @@ export function createAccountRoutes({ config, identity, users, groups, modelStor
           username: body.username,
           password: body.password,
           role: body.role,
+          /**
+           * 邮箱选填。管理员建的账号**一律直接可用**（create 默认 activated=true）——
+           * 让他去等一封验证码没有意义：他人就在管理员面前，身份已经被确认过了。
+           */
+          ...(typeof body.email === 'string' ? { email: body.email.trim() } : {}),
           ...(typeof body.groupId === 'string' ? { groupId: body.groupId } : {}),
         })
         reqLogger.info('管理员创建账号', { by: subject.username, username: created.username, group: created.groupId })

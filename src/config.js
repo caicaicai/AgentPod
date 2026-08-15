@@ -139,6 +139,46 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
         allowRegister: bool(env.AUTH_ALLOW_REGISTER, false),
 
         /**
+         * 自助注册的细则：要不要留邮箱、要不要用验证码激活。
+         *
+         * 两个开关分开，因为它们回答的是两个问题：
+         *   requireEmail —— "注册时必须留一个邮箱"（找回密码、发通知有人可联系）；
+         *   verifyEmail  —— "那个邮箱得证明是他自己的"（发一封带验证码的信，验过才算激活）。
+         *
+         * 只开前者也说得通（内网部署，人都是同事，留个邮箱备查就够了）；
+         * 开后者则必然蕴含前者 —— 没有邮箱就没地方发信，所以下面取 needEmail 时是**或**。
+         *
+         * verifyEmail 打开后，注册接口**不再当场发令牌**：账号建出来是未激活的，
+         * 必须先带着验证码调 /v1/auth/activate。这条是整件事的意义所在 ——
+         * 否则"验证"只是发了封信，而人早就进来了。
+         */
+        register: {
+          requireEmail: bool(env.REGISTER_REQUIRE_EMAIL, false),
+          verifyEmail: bool(env.REGISTER_VERIFY_EMAIL, false),
+          /**
+           * 验证码几位、几分钟内有效、最多能试几次。
+           *
+           * 6 位数字只有一百万种可能，光靠"猜不中"是挡不住的 —— 真正兜底的是
+           * **试错次数上限**（试满就把这份验证码作废，必须重发）和有效期。
+           * 把位数调大是可以的，但别指望它替代那两道。
+           */
+          codeLength: num(env.REGISTER_CODE_LENGTH, 6),
+          codeTtlMinutes: num(env.REGISTER_CODE_TTL_MINUTES, 15),
+          maxAttempts: num(env.REGISTER_CODE_MAX_ATTEMPTS, 5),
+          /**
+           * 两次发信的最小间隔。挡的不是注册的人，是**拿我们的发信账号去轰炸
+           * 别人邮箱**的人：没有这道闸，一个 `/resend` 循环就是一台免费的发信机，
+           * 而挨骂（和被拉黑）的是我们那个域名。
+           */
+          resendIntervalSeconds: num(env.REGISTER_CODE_RESEND_SECONDS, 60),
+          /**
+           * 邮箱域名白名单（逗号分隔，留空 = 不限）。
+           * 内网部署常见的诉求是"只让公司邮箱注册"，而那本来要靠人工审核。
+           */
+          emailDomains: csv(env.REGISTER_EMAIL_DOMAINS, []),
+        },
+
+        /**
          * 登录限流。实现与两种计数口径的理由见 src/http/rate-limit.js。
          *
          * 默认值的取法：按 IP 每分钟 20 次，够任何真人（含几个标签页同时登录、
@@ -166,6 +206,44 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
      * 等于没有。直接暴露在公网时保持 0，套了 nginx / 网关再打开。
      */
     trustProxy: bool(env.TRUST_PROXY, false),
+
+    /**
+     * 发信账号。今天只有一个用途：注册验证码。
+     *
+     * ── 为什么自己写 SMTP，而不是装 nodemailer ──────────────────────────
+     *
+     * 这个服务的依赖只有 pi 那两个包（见 package.json）。为"一封纯文本的信"
+     * 引入一棵新的依赖树，换来的是一份要长期跟着升的攻击面 —— 而我们要用的
+     * 只是 SMTP 里最老实的那几条命令。实现在 src/mail/smtp.js，约二百行。
+     *
+     * ── transport ──────────────────────────────────────────────────────
+     *
+     *   smtp  真的发出去。
+     *   log   不发，把整封信打进日志（**含验证码**）。只给本地开发用 ——
+     *         生产下配置校验会直接拒绝启动，见 validate()：把验证码打进日志，
+     *         等于任何能看日志的人都能激活任何人的账号。
+     */
+    mail: {
+      transport: str(env.MAIL_TRANSPORT, 'smtp'), // smtp | log
+      host: str(env.MAIL_SMTP_HOST),
+      /**
+       * 465 = 连上就是 TLS（隐式）；587 = 先明文再 STARTTLS 升级。
+       * secure 默认跟着端口走，配错的表现是握手直接挂 —— 那比"以为加密了其实没有"好。
+       */
+      port: num(env.MAIL_SMTP_PORT, 465),
+      secure: bool(env.MAIL_SMTP_SECURE, num(env.MAIL_SMTP_PORT, 465) === 465),
+      user: str(env.MAIL_SMTP_USER),
+      pass: str(env.MAIL_SMTP_PASS),
+      /** 信封与信头上的发件人。留空就用 MAIL_SMTP_USER —— 多数服务商也只认这一个 */
+      from: str(env.MAIL_FROM) || str(env.MAIL_SMTP_USER),
+      fromName: str(env.MAIL_FROM_NAME, 'AgentPod'),
+      /**
+       * ⚠️ 关掉证书校验 = 这条链路可以被中间人接管，而信里带着验证码。
+       * 只有自建邮件服务器用自签证书时才该动它，且那时更该做的是把 CA 装进系统。
+       */
+      rejectUnauthorized: bool(env.MAIL_TLS_REJECT_UNAUTHORIZED, true),
+      timeoutMs: num(env.MAIL_TIMEOUT_MS, 15 * 1000),
+    },
 
     platform: {
       speedApiBase: str(env.SPEED_API_BASE).replace(/\/+$/, ''),
@@ -582,13 +660,53 @@ function validate(config) {
     errors.push(`CRON_CREDENTIAL_MODE 只能是 none|stored，当前 ${config.cron.credentialMode}`)
   }
   if (config.cron.tickMs < 1000) errors.push(`CRON_TICK_MS 不能小于 1000，当前 ${config.cron.tickMs}`)
+
+  /* ── 注册与发信 ── */
+  if (!['smtp', 'log'].includes(config.mail.transport)) {
+    errors.push(`MAIL_TRANSPORT 只能是 smtp|log，当前 ${config.mail.transport}`)
+  }
+  const register = config.auth.password.register
+  if (register.codeLength < 4 || register.codeLength > 12) {
+    errors.push(`REGISTER_CODE_LENGTH 只能是 4~12，当前 ${register.codeLength}`)
+  }
+  if (register.codeTtlMinutes < 1) errors.push(`REGISTER_CODE_TTL_MINUTES 至少为 1，当前 ${register.codeTtlMinutes}`)
+  if (register.maxAttempts < 1) errors.push(`REGISTER_CODE_MAX_ATTEMPTS 至少为 1，当前 ${register.maxAttempts}`)
+  /**
+   * 开了验证码注册就必须有一个发得出信的账号。
+   *
+   * 在启动时拦掉，而不是等第一个人来注册：后者的表现是"注册页好好的，
+   * 点提交转半天然后报 502"，而运维那边一切正常 —— 没有任何人会立刻想到
+   * 是 MAIL_SMTP_HOST 没配。这与下面 MySQL 那条是同一个道理。
+   */
+  if (config.auth.password.allowRegister && register.verifyEmail && config.mail.transport === 'smtp') {
+    if (!config.mail.host) errors.push('开启 REGISTER_VERIFY_EMAIL 时必须配置 MAIL_SMTP_HOST：没有发信账号就发不出验证码，所有人都会卡在激活这一步')
+    if (!config.mail.from) errors.push('开启 REGISTER_VERIFY_EMAIL 时必须配置 MAIL_FROM 或 MAIL_SMTP_USER：收信方要知道这封信是谁发的')
+  }
+  if (config.mail.transport === 'smtp' && config.mail.host && (config.mail.port < 1 || config.mail.port > 65535)) {
+    errors.push(`MAIL_SMTP_PORT 不是合法端口，当前 ${config.mail.port}`)
+  }
+  for (const domain of register.emailDomains) {
+    if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)) {
+      errors.push(`REGISTER_EMAIL_DOMAINS 里的 ${domain} 不是合法域名：要形如 example.com，不带 @ 和空格`)
+    }
+  }
   if (!['manager', 'http', 'local', 'none'].includes(config.sandbox.mode)) errors.push(`SANDBOX_MODE 只能是 manager|http|local|none，当前 ${config.sandbox.mode}`)
   // 拼错了不能静默退化成 auto：那样"我明明关了驻留，槽位怎么还占着"会查很久
   if (!['auto', 'always', 'off'].includes(config.sandbox.park)) errors.push(`SANDBOX_PARK 只能是 auto|always|off，当前 ${config.sandbox.park}`)
 
   if (config.auth.mode === 'password') {
     const pw = config.auth.password
-    if (!pw.users) errors.push('AUTH_MODE=password 时必须配置 CONSOLE_USERS（格式：user1:pass1,user2:pass2）')
+    /**
+     * 必须有**某一条**能产生第一个账号的路子：要么 CONSOLE_USERS 播种，
+     * 要么开着自助注册（第一个注册的人就是管理员）。
+     *
+     * 从前这里只认 CONSOLE_USERS，于是"只开注册、不预置账号"这个完全合理的部署
+     * 起不来 —— 而登录接口在没有任何账号时给的提示恰恰是"配 CONSOLE_USERS **或者**
+     * 开 AUTH_ALLOW_REGISTER"，两边说的不是一回事。
+     */
+    if (!pw.users && !pw.allowRegister) {
+      errors.push('AUTH_MODE=password 时必须配置 CONSOLE_USERS（格式：user1:pass1,user2:pass2），或者开启 AUTH_ALLOW_REGISTER 让第一个人自己注册（他会是管理员）')
+    }
     if (!pw.sessionSecret && !config.platform.fallbackCookie) {
       // 没有显式密钥也没有 FALLBACK_COOKIE 可复用时，用随机值 —— 重启后所有会话失效，
       // 但至少不会起不来。启动日志里会 warn。
@@ -652,6 +770,16 @@ function validate(config) {
     // 计费、限流、审计会全部归到同一个主体上，也就答不出"这次调用是谁发起的"。
     if (config.llm.mode === 'direct') errors.push('生产环境禁止 LLM_MODE=direct：它用一把共用的静态 key，用户之间的计费与审计边界会全部消失')
     if (config.devConsole) errors.push('生产环境必须 DEV_CONSOLE=0：它会暴露隔离自检等调试端点')
+    /**
+     * log 传输会把**验证码原文**打进日志。谁能看日志谁就能激活任意账号 ——
+     * 而看日志的人往往比该有这个能力的人多得多（运维、监控、日志平台）。
+     */
+    if (config.mail.transport === 'log') {
+      errors.push('生产环境禁止 MAIL_TRANSPORT=log：它把验证码原文打进日志，等于任何能看日志的人都能激活别人的账号')
+    }
+    if (!config.mail.rejectUnauthorized && config.mail.transport === 'smtp' && config.mail.host) {
+      errors.push('生产环境禁止 MAIL_TLS_REJECT_UNAUTHORIZED=0：信里带着验证码，这条链路被中间人接管就等于账号被接管')
+    }
     if (config.platform.fallbackCookie) errors.push('生产环境禁止配置 FALLBACK_COOKIE：那是把某个人的登录态当成全服务的身份')
     if (config.sandbox.mode === 'http' && !config.sandbox.token) {
       errors.push('生产环境 SANDBOX_MODE=http 时必须配置 SANDBOX_TOKEN：没有它，任何能连到 worker 端口的人都能在沙盒里执行命令')

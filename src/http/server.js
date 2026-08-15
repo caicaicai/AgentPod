@@ -73,6 +73,23 @@ function assertSessionKey(sessionKey) {
   return sessionKey
 }
 
+/**
+ * 邮箱打码：`zhangsan@example.com` → `z*******@example.com`。
+ *
+ * 注册和激活那几条响应**不需要登录就能拿到**，而完整邮箱是个能拿去别处撞库的东西。
+ * 但又不能什么都不回 —— 用户得看得出"信发到哪个邮箱了"，尤其是他有好几个邮箱时。
+ * 域名保持原样：它本来就是从他自己填的那一步回显回去的，遮住只会让人认不出。
+ */
+function maskEmail(email) {
+  const text = String(email || '')
+  const at = text.indexOf('@')
+  if (at <= 0) return ''
+  const local = text.slice(0, at)
+  // 一个字符的 local part 没有可遮的：遮了就是全遮，回显也就没意义了
+  const head = local.slice(0, 1)
+  return `${head}${'*'.repeat(Math.max(1, local.length - 1))}${text.slice(at)}`
+}
+
 /** 只服务这几类静态资源。没列进来的后缀一律 404，省得哪天 web/ 里落了个 .env 就被读走 */
 const STATIC_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -199,6 +216,7 @@ export function createServer({
   config, logger, identity, broker, runService, store, metrics, workspace = null,
   skillManager = null, memory = null, projects = null, crons = null, scheduler = null, cronVault = null,
   artifacts = null, shares = null, users = null, usage = null, modelStore = null, groups = null,
+  mailer = null,
 }) {
   const webDir = config.webDir || DEFAULT_WEB_DIR
 
@@ -251,6 +269,31 @@ export function createServer({
    * body 是给前端拿去渲染"请 N 秒后重试"的（与 sendJson 里 requestId 两处都放
    * 同一个道理）。writeHead 会把先前 setHeader 的合并进去，所以这里设了就带得上。
    */
+  /**
+   * 注册细则。单测构造的 config 未必带这一段，给一份与 config.js 默认值一致的兜底 ——
+   * 少了它，`config.auth.password.register.verifyEmail` 会在老用例里读到 undefined 上的属性。
+   */
+  const registerPolicy = {
+    requireEmail: false,
+    verifyEmail: false,
+    codeTtlMinutes: 15,
+    resendIntervalSeconds: 60,
+    emailDomains: [],
+    ...(config.auth.password?.register || {}),
+  }
+
+  /**
+   * 这个部署到底走不走"验证码激活"这条路。
+   *
+   * 开关开着但没有发信能力时**退回不验证**，而不是让注册整个失败：
+   * 后者意味着一次发信配置疏忽会把注册页面变成一个只会报 500 的按钮。
+   * 生产上这个组合已经在配置校验那里被拦掉了（见 config.js），
+   * 所以这条退路只会在开发和单测里被走到。
+   */
+  function registerVerifyEmail() {
+    return Boolean(registerPolicy.verifyEmail && mailer?.enabled)
+  }
+
   function rejectRateLimited(res, message, retryAfterMs) {
     const retryAfterSec = Math.max(1, Math.ceil(retryAfterMs / 1000))
     res.setHeader('Retry-After', String(retryAfterSec))
@@ -327,6 +370,18 @@ export function createServer({
           // 界面据此决定画不画「注册」「改密」「用户管理」
           accounts: Boolean(users),
           register: Boolean(users) && Boolean(config.auth.password?.allowRegister),
+          /**
+           * 注册表单要不要画邮箱那一栏、提交之后是不是还有一步验证码。
+           *
+           * 必须由服务端说：前端自己猜的话，两边配置一错位的表现是
+           * "注册完就卡在一个不存在的输入框上"，或者"填完提交才被告知邮箱必填"。
+           *
+           * `registerVerifyEmail` 还要求发信真的可用 —— 开关开着但没配发信账号时，
+           * 界面不该把人领到一个注定收不到信的流程里（配置校验也会拦这种组合，
+           * 见 config.js；这里再判一次是因为 mailer 可以不注入）。
+           */
+          registerEmail: Boolean(registerPolicy.requireEmail || registerPolicy.verifyEmail),
+          registerVerifyEmail: registerVerifyEmail(),
           // 管理台的「Token 用量」那一页。只有管理员看得到那一页，但这个宣告是公开的：
           // 它说的是"这个部署记不记账"，不是"谁用了多少"
           usage: Boolean(usage?.enabled),
@@ -357,7 +412,10 @@ export function createServer({
      * 前缀 + 例外清单的问题在于：新增一条同前缀的路由时，**没有任何东西提醒你
      * 去补例外**。列举法反过来 —— 忘了加就是压根匹配不上，而不是被静默劫走。
      */
-    if (url.pathname === '/v1/auth/login' || url.pathname === '/v1/auth/register') {
+    if (url.pathname === '/v1/auth/login'
+      || url.pathname === '/v1/auth/register'
+      || url.pathname === '/v1/auth/activate'
+      || url.pathname === '/v1/auth/activation/resend') {
       if (config.auth.mode !== 'password') {
         return sendJson(res, 404, { error: 'NOT_FOUND', message: '当前 AUTH_MODE 不支持密码登录' })
       }
@@ -419,6 +477,30 @@ export function createServer({
           const result = await users.verify(username, body.password)
           ok = result.ok
           reason = result.reason || ''
+
+          /**
+           * 密码对了，但账号还没激活。
+           *
+           * **不计进失败次数、并且把计数清零** —— 计数那道闸挡的是"猜密码的人"，
+           * 而这个人刚刚证明了他知道密码。不清的话，一个还没收到验证码的新用户
+           * 试几次就会把自己的账号锁上，然后连激活都做不成。
+           *
+           * 回 403 而不是 401：凭据是有效的，缺的是一步激活 —— 前端据
+           * `details.activationRequired` 直接把界面切到填验证码那一步，
+           * 而不是让他对着"用户名或密码错误"反复重试一个正确的密码。
+           */
+          if (reason === 'inactive') {
+            loginLimits?.user.reset(userKey)
+            reqLogger.info('登录被拒：账号未激活', { username })
+            throw Errors.forbidden('账号还没有激活，请填写邮箱收到的验证码', {
+              activationRequired: true,
+              username,
+              // 邮箱要打码：这条响应不需要证明身份就能拿到，
+              // 而完整邮箱是个可以拿去别处撞库的东西
+              email: maskEmail(result.user?.email || ''),
+            })
+          }
+
           if (!ok && reason === 'no-such-user' && (await users.count()) === 0) {
             return sendJson(res, 503, {
               error: 'NO_USERS',
@@ -465,24 +547,99 @@ export function createServer({
         return sendJson(res, 200, { ok: true, token, expiresAt, username })
       }
 
+      /** 注册这三条都要求账号存储 + 注册开关。判据一样，别在三个地方各写一遍 */
+      function assertRegisterOpen() {
+        if (!users) throw Errors.notFound('本部署未启用账号存储')
+        if (!config.auth.password.allowRegister) {
+          throw Errors.forbidden('本部署未开放注册（AUTH_ALLOW_REGISTER=0），请让管理员创建账号')
+        }
+      }
+
+      /**
+       * 把验证码发出去。
+       *
+       * **发信失败不回滚账号**：那条待激活的记录留着，用户可以走"重发"再来一次。
+       * 删掉的话，一次 SMTP 抖动就等于让他把用户名和密码重填一遍，而账号那边
+       * 什么痕迹都没留下 —— 他甚至说不清刚才那次到底算不算注册过了。
+       */
+      async function issueAndSend({ username, first }) {
+        const issued = await users.issueActivationCode({ username })
+        if (!issued.ok) {
+          if (issued.reason === 'too-soon') {
+            rejectRateLimited(res, '验证码刚发过，请稍后再试', issued.retryAfterMs)
+          }
+          if (issued.reason === 'already-active') throw Errors.badRequest('这个账号已经激活了，直接登录即可')
+          if (issued.reason === 'no-email') throw Errors.badRequest('这个账号没有留邮箱，无法发送验证码')
+          throw Errors.notFound('没有这个待激活的账号')
+        }
+        try {
+          await mailer.sendActivationCode({
+            to: issued.email,
+            username,
+            code: issued.code,
+            ttlMinutes: issued.ttlMinutes,
+          })
+        } catch (error) {
+          // ⚠️ 日志里只留失败原因，**绝不能带上 issued.code**
+          reqLogger.error('验证码邮件发送失败', { username, err: error?.message })
+          throw Errors.upstream('验证码邮件发不出去，请稍后重试或联系管理员', { retryable: true })
+        }
+        reqLogger.info('已发送注册验证码', { username, first: Boolean(first) })
+        return { expiresAt: issued.expiresAt, email: maskEmail(issued.email) }
+      }
+
       /**
        * 注册。**默认关**（AUTH_ALLOW_REGISTER=0）。
        *
        * 开放注册意味着任何能访问到这个地址的人都能拿到一个账号，
        * 而账号在这里等于"能跑模型、能开沙盒"。所以它是一个必须显式打开的开关，
        * 不是一个默认能力。内网部署想让同事自助开号时才打开。
+       *
+       * 开了 REGISTER_VERIFY_EMAIL 之后这条接口**不再发令牌**：账号建出来是
+       * 未激活的，得先拿邮箱里的验证码去换（/v1/auth/activate）。不这么做的话，
+       * "验证"就只是顺手发了封信，而人早就进来了 —— 那道验证等于不存在。
        */
       if (req.method === 'POST' && url.pathname === '/v1/auth/register') {
-        if (!users) throw Errors.notFound('本部署未启用账号存储')
-        if (!config.auth.password.allowRegister) {
-          throw Errors.forbidden('本部署未开放注册（AUTH_ALLOW_REGISTER=0），请让管理员创建账号')
-        }
+        assertRegisterOpen()
         const { body, username } = await readCredentials()
+
+        const verifying = registerVerifyEmail()
+        const email = typeof body.email === 'string' ? body.email.trim() : ''
+        // 要验证码就必然要邮箱 —— 没有邮箱就没有地方发信
+        if ((registerPolicy.requireEmail || verifying) && !email) throw Errors.badRequest('邮箱必填')
+
         try {
           // 第一个注册进来的人是管理员：全新部署里总得有人能管别人，
           // 而那时还没有任何管理员可以来授权
           const first = (await users.count()) === 0
-          const user = await users.create({ username, password: body.password, role: first ? 'admin' : 'user' })
+          const user = await users.create({
+            username,
+            password: body.password,
+            email,
+            role: first ? 'admin' : 'user',
+            activated: !verifying,
+            // 用户名被一个从来没激活过的账号占着时，允许这次注册顶掉它。
+            // 理由见 user-store.create()：那种账号没有主人
+            replacePending: true,
+          })
+
+          if (verifying) {
+            const sent = await issueAndSend({ username, first })
+            /**
+             * 202 而不是 201：账号确实建出来了，但这次交互**还没完成** ——
+             * 少了最后一步（填验证码）。前端据此把界面切到验证码那一屏。
+             * 这里一个字节的令牌都不发。
+             */
+            return sendJson(res, 202, {
+              ok: true,
+              pendingActivation: true,
+              username,
+              email: sent.email,
+              expiresAt: sent.expiresAt,
+              message: '验证码已发送到你的邮箱，填写后即可激活账号',
+            })
+          }
+
           // 新账号的代数就是 0，但还是从存储里取 —— 免得将来 create 改了初值，
           // 这里签出一张一进门就对不上号的令牌
           const version = (await users.authState(username))?.tokenVersion || 0
@@ -490,8 +647,86 @@ export function createServer({
           reqLogger.info('注册成功', { username, role: user.role })
           return sendJson(res, 201, { ok: true, user, token, expiresAt, username })
         } catch (error) {
+          if (error instanceof AppError) throw error
           throw Errors.badRequest(error.message)
         }
+      }
+
+      /**
+       * 拿验证码换激活，顺带把人登进去。
+       *
+       * 激活成功就直接发令牌：他刚刚同时证明了"知道这个账号的密码"（注册时设的）
+       * 和"收得到那个邮箱的信"。再让他回登录页填一遍密码，不多验证任何东西，
+       * 只是多一步。
+       */
+      if (req.method === 'POST' && url.pathname === '/v1/auth/activate') {
+        assertRegisterOpen()
+        const body = await readJsonBody(req, config.limits.bodyLimitBytes)
+        const username = typeof body?.username === 'string' ? body.username.trim() : ''
+        const code = typeof body?.code === 'string' ? body.code.trim() : ''
+        if (!username) throw Errors.badRequest('用户名必填')
+        if (!code) throw Errors.badRequest('验证码必填')
+
+        const result = await users.verifyActivationCode({ username, code })
+        if (!result.ok) {
+          reqLogger.warn('激活失败', { username, reason: result.reason })
+          /**
+           * 这几种失败**分开说**，与登录那边"一律回同一句"的做法相反。
+           *
+           * 那边不能分，是因为回答的是"这个用户名存不存在"；这边回答的是
+           * "你手里这份验证码怎么了"，而验证码本来就在他自己邮箱里 ——
+           * 含糊其辞并不能少泄露什么，只会让人对着"激活失败"四个字反复重试
+           * 一个已经过期的码。
+           */
+          if (result.reason === 'already-active') throw Errors.badRequest('这个账号已经激活了，直接登录即可')
+          if (result.reason === 'expired') throw Errors.badRequest('验证码已过期，请重新获取')
+          if (result.reason === 'too-many-attempts') throw Errors.badRequest('验证码错误次数过多，这份验证码已作废，请重新获取')
+          /**
+           * `no-code` 有两种来路：从来没发过，和**上一份被试满作废了**。
+           * 措辞要同时说得通这两种，所以是"重新获取"而不是"先获取" ——
+           * 后者对刚把验证码试作废的人来说像在说"你根本没申请过"。
+           */
+          if (result.reason === 'no-code') throw Errors.badRequest('当前没有可用的验证码，请重新获取')
+          if (result.reason === 'bad-code') {
+            throw Errors.badRequest(`验证码不正确，还可以再试 ${result.attemptsLeft} 次`, { attemptsLeft: result.attemptsLeft })
+          }
+          throw Errors.notFound('没有这个待激活的账号')
+        }
+
+        const version = (await users.authState(username))?.tokenVersion || 0
+        const { token, expiresAt } = signToken(username, identity.passwordSecret, ttlSec, version)
+        reqLogger.info('账号激活成功', { username, role: result.user.role })
+        return sendJson(res, 200, { ok: true, user: result.user, token, expiresAt, username })
+      }
+
+      /**
+       * 重发验证码。
+       *
+       * 账号不存在 / 已经激活时**照样回 200**，不说破 —— 否则这条接口就成了一个
+       * 免费的用户名探测器（而且不需要密码）。发信间隔那一档仍然回 429：
+       * 它只对"确实存在且待激活"的账号出现，也就是说它确实泄露了一点点。
+       * 认这笔账，是因为把它也糊成 200 的话，正在等验证码的人会以为信发出去了
+       * 而其实没有，然后一直等下去。
+       */
+      if (req.method === 'POST' && url.pathname === '/v1/auth/activation/resend') {
+        assertRegisterOpen()
+        if (!registerVerifyEmail()) throw Errors.badRequest('本部署没有开启邮箱验证码注册')
+        const body = await readJsonBody(req, config.limits.bodyLimitBytes)
+        const username = typeof body?.username === 'string' ? body.username.trim() : ''
+        if (!username) throw Errors.badRequest('用户名必填')
+
+        const state = await users.get(username)
+        if (!state || state.activated) {
+          reqLogger.info('重发验证码：无此待激活账号，按成功回复', { username })
+          return sendJson(res, 200, { ok: true, message: '如果这个账号存在且尚未激活，验证码已经重新发送' })
+        }
+        const sent = await issueAndSend({ username })
+        return sendJson(res, 200, {
+          ok: true,
+          email: sent.email,
+          expiresAt: sent.expiresAt,
+          message: '验证码已重新发送',
+        })
       }
 
       throw Errors.notFound('没有这个接口')

@@ -225,6 +225,25 @@ sandbox-worker/bin/check-namespace-caps.sh
 | `AUTH_ALLOW_REGISTER` | 开放自助注册，**默认 `0`**。账号在这里等于"能跑模型、能开沙盒"，所以必须显式打开。打开后第一个注册的人是管理员 |
 | `SESSION_SECRET` | JWT 签名密钥（不配则自动生成，进程重启后所有会话失效） |
 | `SESSION_TTL_HOURS` | 会话令牌有效期，默认 24 小时 |
+| `REGISTER_REQUIRE_EMAIL` | 注册时必须留邮箱，默认 `0` |
+| `REGISTER_VERIFY_EMAIL` | 邮箱要用验证码验过才算激活，默认 `0`。打开后注册接口**不再发令牌**，得先调 `/v1/auth/activate`。必须同时配好发信账号，否则服务拒绝启动 |
+| `REGISTER_CODE_LENGTH` / `REGISTER_CODE_TTL_MINUTES` / `REGISTER_CODE_MAX_ATTEMPTS` | 验证码几位、几分钟有效、最多试几次（默认 6 / 15 / 5）。6 位数字挡不住枚举，真正兜底的是**试满就作废** |
+| `REGISTER_CODE_RESEND_SECONDS` | 两次发信的最小间隔，默认 60 秒。没有它，`/resend` 循环就是一台免费的发信机 |
+| `REGISTER_EMAIL_DOMAINS` | 只放行这些邮箱域名（逗号分隔，留空 = 不限） |
+
+### 发信账号
+
+只有一个用途：注册验证码。**不装 nodemailer** —— SMTP 客户端在 `src/mail/smtp.js`，
+约二百行，为一封纯文本的信引入一棵新的依赖树不划算。
+
+| 变量 | 说明 |
+|------|------|
+| `MAIL_TRANSPORT` | `smtp`（默认，真的发）或 `log`（不发，把整封信含验证码打进日志）。**生产禁止 `log`** —— 那等于任何能看日志的人都能激活别人的账号 |
+| `MAIL_SMTP_HOST` / `MAIL_SMTP_PORT` | 服务器地址与端口，默认 465 |
+| `MAIL_SMTP_SECURE` | `1` = 连上就是 TLS（465）；`0` = 明文连上后走 STARTTLS（587）。默认跟着端口走。服务端不支持 STARTTLS 时**直接失败**，不会悄悄用明文继续 |
+| `MAIL_SMTP_USER` / `MAIL_SMTP_PASS` | 账号密码。多数服务商这里要的是「授权码」而不是登录密码 |
+| `MAIL_FROM` / `MAIL_FROM_NAME` | 发件人。`MAIL_FROM` 留空就用 `MAIL_SMTP_USER` |
+| `MAIL_TLS_REJECT_UNAUTHORIZED` | 默认 `1`。关掉 = 这条链路可以被中间人接管，而信里带着验证码。生产下禁止关 |
 
 ### MySQL（必需）
 
@@ -336,7 +355,9 @@ docker compose up -d      # 自带 mysql 服务，agent 等它健康检查通过
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/v1/auth/login` | 用户名 + 密码 → JWT。失败一律回同一句"用户名或密码错误"（日志里才记真实原因） |
-| POST | `/v1/auth/register` | 自助注册。需要 `AUTH_ALLOW_REGISTER=1`，否则 403 |
+| POST | `/v1/auth/register` | 自助注册 `{ username, password, email? }`。需要 `AUTH_ALLOW_REGISTER=1`，否则 403。开了 `REGISTER_VERIFY_EMAIL` 时回 **202 + `pendingActivation`，不发令牌** —— 账号建出来是未激活的 |
+| POST | `/v1/auth/activate` | `{ username, code }` → 激活并当场登入。他刚同时证明了知道密码、收得到那个邮箱的信，没必要再回登录页填一遍 |
+| POST | `/v1/auth/activation/resend` | 重发验证码。账号不存在 / 已激活时**照样回 200**，否则这就是个不要密码的用户名探测器；发信间隔没到回 429 |
 | POST | `/v1/auth/password` | 改自己的密码。**必须带旧密码** —— 只凭令牌就能改密，等于把"临时借用"变成"永久接管" |
 | GET | `/v1/admin/users` | 列出全部账号（要管理员） |
 | POST | `/v1/admin/users` | 管理员建号 |

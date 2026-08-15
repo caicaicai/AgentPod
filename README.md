@@ -226,6 +226,26 @@ See [`.env.example`](.env.example) for the complete annotated reference.
 | `AUTH_ALLOW_REGISTER` | Open self-service registration, **default `0`**. An account here means "can run models, can open sandboxes", so this has to be turned on deliberately. Once on, the first person to register becomes the admin |
 | `SESSION_SECRET` | JWT signing key (auto-generated if omitted; sessions invalidate on restart) |
 | `SESSION_TTL_HOURS` | Session token lifetime (default: 24) |
+| `REGISTER_REQUIRE_EMAIL` | Require an email address at registration (default `0`) |
+| `REGISTER_VERIFY_EMAIL` | The address must be proven with a code before the account is activated (default `0`). Once on, registration **no longer issues a token** — the user has to call `/v1/auth/activate` first. Requires a working mail account, otherwise the service refuses to start |
+| `REGISTER_CODE_LENGTH` / `REGISTER_CODE_TTL_MINUTES` / `REGISTER_CODE_MAX_ATTEMPTS` | Code length, lifetime and attempt cap (defaults 6 / 15 / 5). Six digits cannot resist enumeration on their own — what actually holds is **the code being voided once attempts run out** |
+| `REGISTER_CODE_RESEND_SECONDS` | Minimum gap between two sends (default 60). Without it, a `/resend` loop is a free mail cannon |
+| `REGISTER_EMAIL_DOMAINS` | Only allow these email domains (comma-separated; empty = no restriction) |
+
+### Mail account
+
+One purpose only: registration codes. **No nodemailer** — the SMTP client lives in
+`src/mail/smtp.js` at roughly two hundred lines; a new dependency tree is not worth
+one plain-text message.
+
+| Variable | Description |
+|----------|-------------|
+| `MAIL_TRANSPORT` | `smtp` (default, actually sends) or `log` (does not send; dumps the whole message, code included, into the log). **Forbidden in production** — that hands account activation to anyone who can read logs |
+| `MAIL_SMTP_HOST` / `MAIL_SMTP_PORT` | Server and port (default 465) |
+| `MAIL_SMTP_SECURE` | `1` = implicit TLS on connect (465); `0` = plain connect then STARTTLS (587). Defaults to whatever the port implies. If the server does not offer STARTTLS the send **fails** rather than quietly continuing in the clear |
+| `MAIL_SMTP_USER` / `MAIL_SMTP_PASS` | Credentials. Most providers want an app password here, not the login password |
+| `MAIL_FROM` / `MAIL_FROM_NAME` | Sender. An empty `MAIL_FROM` falls back to `MAIL_SMTP_USER` |
+| `MAIL_TLS_REJECT_UNAUTHORIZED` | Default `1`. Turning it off lets this hop be intercepted — and the message carries the code. Forbidden in production |
 
 ### MySQL (required)
 
@@ -347,7 +367,9 @@ otherwise "does this username exist" leaks through response timing, which is ste
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/v1/auth/login` | Username + password → JWT. Every failure returns the same message (the real reason goes to the log only) |
-| POST | `/v1/auth/register` | Self-service registration. Requires `AUTH_ALLOW_REGISTER=1`, otherwise 403 |
+| POST | `/v1/auth/register` | Self-service registration `{ username, password, email? }`. Requires `AUTH_ALLOW_REGISTER=1`, otherwise 403. With `REGISTER_VERIFY_EMAIL` on it returns **202 + `pendingActivation` and no token** — the account starts out inactive |
+| POST | `/v1/auth/activate` | `{ username, code }` → activates and signs in. They just proved both that they know the password and that they can read that mailbox; sending them back to the login form verifies nothing extra |
+| POST | `/v1/auth/activation/resend` | Resend the code. Unknown or already-active accounts still get a **200** — otherwise this is a username probe that does not even need a password. A too-soon resend returns 429 |
 | POST | `/v1/auth/password` | Change your own password. **Requires the old password** — letting a token alone change it turns "borrowed for a minute" into permanent takeover |
 | GET | `/v1/admin/users` | List accounts (admin only) |
 | POST | `/v1/admin/users` | Admin creates an account |
