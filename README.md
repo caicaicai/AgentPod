@@ -39,48 +39,39 @@ AgentPod is a **server-side, multi-tenant AI agent service** powered by the [pi]
 
 ### Local Development
 
-**You need a MySQL 8.** Structured data lives only in the database — there is no file mode
-(see [MySQL](#mysql-required) for why).
+The agent runs on the host (edit, restart, no image rebuild); its dependencies — the sandbox
+cluster and MySQL — run in containers. **The database is not optional**: structured data lives
+only in MySQL, there is no file mode (see [MySQL](#mysql-required) for why).
 
 ```bash
-# A throwaway MySQL for development
-docker run -d --name agentpod-dev-mysql -p 3306:3306 \
-  -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=agentpod \
-  -e MYSQL_USER=agentpod -e MYSQL_PASSWORD=agentpod mysql:8.0
+# Dependencies: worker + manager + redis + mysql
+docker compose -f docker-compose.dev.yml up -d
 
 # Install and build the web UI (only needed once, or after changing web/)
 npm run web:install
 npm run web:build
 
-# Start with mock LLM + trusted identity + local execution
+# Configure and start the agent
+cp .env.dev.template .env.dev
 npm run dev
 
-# Open http://127.0.0.1:8787
+# Open http://127.0.0.1:8787 (default login: admin / changeme)
 ```
 
-This starts with `LLM_MODE=faux` (mock model), `AUTH_MODE=dev` (trusts `X-Username` header), and
-`SANDBOX_MODE=local` (executes in-process) — no API keys or network access needed, but the database
-connection is required. Tables are created on first start.
+The template starts you on `LLM_MODE=faux` (mock model — no API key, no network) with real
+namespace-isolated sandboxes and `AUTH_MODE=password`. Tables are created on first start.
+Note that the mock model **never calls a tool**, so skills, sandboxes and artifacts cannot be
+exercised under it — switch `LLM_MODE` to `db` (models managed in the admin console) or `direct`
+once you need those. Self-registration is on with email codes, and `MAIL_TRANSPORT=log` prints
+the message — code included — into the server log instead of sending it.
+
+Want no containers at all? The header of `.env.dev.template` lists the three settings to change;
+you still have to point `MYSQL_*` at a database somewhere.
 
 `npm test` does **not** need a database: the store tests run against an in-memory double
 (`test/helpers/memory-storage.js`). Point `AP_TEST_MYSQL_URL` at a scratch database to additionally
 run the storage contract against real MySQL — CI should do that, since it is what catches the double
 drifting from the real backend.
-
-### Local Development with Sandbox Cluster
-
-To use real namespace-isolated sandboxes locally:
-
-```bash
-# Start the sandbox infrastructure (worker + manager + redis)
-docker compose -f docker-compose.sandbox.yml up -d
-
-# Start agent with sandbox cluster
-cp .env.sandbox.template .env.sandbox
-npm run dev:sandbox
-
-# Open http://127.0.0.1:8787 (default login: admin / changeme)
-```
 
 ### Full Stack Deployment
 

@@ -11,7 +11,6 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --env-file=.env.dev --watch src/index.js",
-    "dev:sandbox": "node --env-file=.env.sandbox --watch src/index.js",
     "web:install": "npm --prefix web ci",
     "web:build": "npm --prefix web run build",
     "web:dev": "npm --prefix web run dev",

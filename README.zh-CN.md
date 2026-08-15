@@ -39,47 +39,37 @@ AgentPod 是一个**服务端多租户 AI Agent 服务**，基于 [pi](https://g
 
 ### 本地开发
 
-**需要一个 MySQL 8。** 结构化数据只存数据库，没有文件模式（理由见 [MySQL 一节](#mysql必需)）。
+agent 跑在宿主机（改完重启即可，不用重新构建镜像），它的依赖 —— 沙盒集群和 MySQL ——
+跑在容器里。**数据库不是可选项**：结构化数据只存数据库，没有文件模式
+（理由见 [MySQL 一节](#mysql必需)）。
 
 ```bash
-# 开发用的一次性 MySQL
-docker run -d --name agentpod-dev-mysql -p 3306:3306 \
-  -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=agentpod \
-  -e MYSQL_USER=agentpod -e MYSQL_PASSWORD=agentpod mysql:8.0
+# 依赖：worker + manager + redis + mysql
+docker compose -f docker-compose.dev.yml up -d
 
 # 安装并构建前端（只需执行一次，修改 web/ 后需要重新构建）
 npm run web:install
 npm run web:build
 
-# 启动：假模型 + 信任身份 + 本机执行
+# 配置并启动 agent
+cp .env.dev.template .env.dev
 npm run dev
 
-# 打开 http://127.0.0.1:8787
+# 打开 http://127.0.0.1:8787（默认账号：admin / changeme）
 ```
 
-此模式使用 `LLM_MODE=faux`（假模型）、`AUTH_MODE=dev`（信任 `X-Username` 请求头）、
-`SANDBOX_MODE=local`（进程内执行）—— 不需要 API 密钥和网络访问，但数据库连接是必需的。
-表在首次启动时自动建好。
+模板里默认是 `LLM_MODE=faux`（假模型，不需要 API 密钥和网络）+ 真正的命名空间隔离沙盒
++ `AUTH_MODE=password`，表在首次启动时自动建好。注意假模型**不会调用任何工具**，
+所以技能、沙盒、作品这些在它下面验证不了 —— 要验证就把 `LLM_MODE` 换成 `db`
+（模型在管理台里维护）或 `direct`。自助注册默认开着并要求邮箱验证码，
+而 `MAIL_TRANSPORT=log` 不真的发信，把整封信连验证码一起打进服务日志。
+
+不想起容器？`.env.dev.template` 的开头列了要改的那三处，但 `MYSQL_*` 仍然得指到一个库。
 
 `npm test` **不需要数据库**：存储相关的用例跑在内存替身上
 （`test/helpers/memory-storage.js`）。把 `AP_TEST_MYSQL_URL` 指到一个测试库，
 存储契约会**额外**对真 MySQL 再跑一遍 —— CI 上应当这么做，那正是能抓出
 "替身与真后端漂移"的地方。
-
-### 本地开发 + 沙盒集群
-
-使用真正的命名空间隔离沙盒进行本地开发：
-
-```bash
-# 启动沙盒基础设施（worker + manager + redis）
-docker compose -f docker-compose.sandbox.yml up -d
-
-# 启动 agent 并连接沙盒集群
-cp .env.sandbox.template .env.sandbox
-npm run dev:sandbox
-
-# 打开 http://127.0.0.1:8787（默认账号：admin / changeme）
-```
 
 ### 全栈部署
 

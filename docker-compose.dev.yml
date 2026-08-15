@@ -1,15 +1,16 @@
-# 仅启动沙盒基础设施（manager + worker + redis + mysql）
+# 本地开发的依赖（manager + worker + redis + mysql）。**不含 agent 本身。**
 #
-# 适用于本地开发：agent 在宿主机以 `node src/index.js` 直接运行，
-# 沙盒集群与数据库由容器提供。
+# 分工：agent 在宿主机以 `npm run dev` 直接运行（改代码就重启，不用重新构建镜像），
+# 沙盒集群与数据库跑在容器里。整套连 agent 一起进容器的是根目录那份
+# docker-compose.yml —— 那是部署用的，不是开发用的。
 #
 # 启动：
-#   docker compose -f docker-compose.sandbox.yml up -d
+#   docker compose -f docker-compose.dev.yml up -d
 #
 # 查看日志：
-#   docker compose -f docker-compose.sandbox.yml logs -f
+#   docker compose -f docker-compose.dev.yml logs -f
 #
-# Agent 侧需要配置以下环境变量连接沙盒集群：
+# Agent 侧连过来要配的那几项（.env.dev.template 里已经填好）：
 #   SANDBOX_MODE=manager
 #   SANDBOX_MANAGER_URL=http://localhost:3000
 #   SANDBOX_MANAGER_CODE=dev-api-code
