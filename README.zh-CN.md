@@ -52,19 +52,30 @@ npm run web:install
 npm run web:build
 
 # 配置并启动 agent
-cp .env.dev.template .env.dev
+cp .env.example .env.dev
+# 改这几行（文件里每一处都标着「本地开发：」）：
+#   MYSQL_HOST=localhost
+#   SANDBOX_MANAGER_URL=http://localhost:3000
+#   SANDBOX_MANAGER_CODE=dev-api-code
+#   LLM_MODE=faux
+#   SKILL_DIRS=builtin-skills:managed-skills
+#   CONSOLE_USERS=admin:changeme
 npm run dev
 
 # 打开 http://127.0.0.1:8787（默认账号：admin / changeme）
 ```
 
-模板里默认是 `LLM_MODE=faux`（假模型，不需要 API 密钥和网络）+ 真正的命名空间隔离沙盒
-+ `AUTH_MODE=password`，表在首次启动时自动建好。注意假模型**不会调用任何工具**，
-所以技能、沙盒、作品这些在它下面验证不了 —— 要验证就把 `LLM_MODE` 换成 `db`
-（模型在管理台里维护）或 `direct`。自助注册默认开着并要求邮箱验证码，
-而 `MAIL_TRANSPORT=log` 不真的发信，把整封信连验证码一起打进服务日志。
+**配置只有 `.env.example` 一份**（从前还有个 `.env.dev.template`，两份各列一半、
+谁也不提醒谁，结果是有几个开关只存在于其中一份里）。它的取值按全栈部署给
+——容器之间用服务名互相找——所以本地开发要改上面那几行，文件里每一处都就地标了。
+不能反过来把默认值写成 `localhost`：compose 会把 `.env` 读进 `${MYSQL_HOST:-mysql}`
+做插值，agent 容器会去连它自己。
 
-不想起容器？`.env.dev.template` 的开头列了要改的那三处，但 `MYSQL_*` 仍然得指到一个库。
+`LLM_MODE=faux` 是假模型，不需要 API 密钥和网络，但它**不会调用任何工具** ——
+技能、沙盒、作品在它下面验证不了，要验证就换成 `db`（模型在管理台里维护）或 `direct`。
+表在首次启动时自动建好。想连自助注册一起试，把 `AUTH_ALLOW_REGISTER=1`、
+`REGISTER_VERIFY_EMAIL=1`、`MAIL_TRANSPORT=log` 打开——最后那个不真的发信，
+把整封信连验证码一起打进服务日志。
 
 `npm test` **不需要数据库**：存储相关的用例跑在内存替身上
 （`test/helpers/memory-storage.js`）。把 `AP_TEST_MYSQL_URL` 指到一个测试库，

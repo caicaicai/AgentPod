@@ -10,10 +10,11 @@
 # 查看日志：
 #   docker compose -f docker-compose.dev.yml logs -f
 #
-# Agent 侧连过来要配的那几项（.env.dev.template 里已经填好）：
+# Agent 侧连过来要配的那几项（.env.example 里每一处都标着「本地开发：」）：
 #   SANDBOX_MODE=manager
 #   SANDBOX_MANAGER_URL=http://localhost:3000
 #   SANDBOX_MANAGER_CODE=dev-api-code
+#   MYSQL_HOST=localhost
 
 services:
   # ── Sandbox Worker ────────────────────────────────────────────────

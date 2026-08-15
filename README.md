@@ -52,21 +52,32 @@ npm run web:install
 npm run web:build
 
 # Configure and start the agent
-cp .env.dev.template .env.dev
+cp .env.example .env.dev
+# Change these lines (each one is marked "本地开发：" in the file):
+#   MYSQL_HOST=localhost
+#   SANDBOX_MANAGER_URL=http://localhost:3000
+#   SANDBOX_MANAGER_CODE=dev-api-code
+#   LLM_MODE=faux
+#   SKILL_DIRS=builtin-skills:managed-skills
+#   CONSOLE_USERS=admin:changeme
 npm run dev
 
 # Open http://127.0.0.1:8787 (default login: admin / changeme)
 ```
 
-The template starts you on `LLM_MODE=faux` (mock model — no API key, no network) with real
-namespace-isolated sandboxes and `AUTH_MODE=password`. Tables are created on first start.
-Note that the mock model **never calls a tool**, so skills, sandboxes and artifacts cannot be
-exercised under it — switch `LLM_MODE` to `db` (models managed in the admin console) or `direct`
-once you need those. Self-registration is on with email codes, and `MAIL_TRANSPORT=log` prints
-the message — code included — into the server log instead of sending it.
+**`.env.example` is the only config file** (there used to be a second `.env.dev.template`; two
+half-lists that never reminded each other, so a few switches only ever existed in one of them).
+Its values are written for the full-stack deployment — containers find each other by service
+name — which is why local development needs the edits above; every such line is marked in place.
+The defaults cannot simply be `localhost`: compose feeds `.env` into `${MYSQL_HOST:-mysql}` for
+interpolation, so the agent container would try to reach itself.
 
-Want no containers at all? The header of `.env.dev.template` lists the three settings to change;
-you still have to point `MYSQL_*` at a database somewhere.
+`LLM_MODE=faux` is a mock model — no API key, no network — but it **never calls a tool**, so
+skills, sandboxes and artifacts cannot be exercised under it; switch to `db` (models managed in
+the admin console) or `direct` when you need those. Tables are created on first start. To try
+self-registration too, turn on `AUTH_ALLOW_REGISTER=1`, `REGISTER_VERIFY_EMAIL=1` and
+`MAIL_TRANSPORT=log` — the last one prints the message, code included, into the server log
+instead of sending it.
 
 `npm test` does **not** need a database: the store tests run against an in-memory double
 (`test/helpers/memory-storage.js`). Point `AP_TEST_MYSQL_URL` at a scratch database to additionally

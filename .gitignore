@@ -2,7 +2,7 @@ node_modules/
 .env
 .env.local
 .env.dev1
-# 本地开发档。里面有真实的 Key 和密码，只有 .env.dev.template 进版本库
+# 本地开发档（cp .env.example .env.dev 而来）。里面有真实的 Key 和密码
 **/.env.dev
 *.log
 dist/
