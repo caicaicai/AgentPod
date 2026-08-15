@@ -20,6 +20,7 @@
 import { AppError, Errors } from '../../errors.js'
 import { signToken } from '../../identity/password-auth.js'
 import { assertSegment } from '../../persistence/paths.js'
+import { DEFAULT_TIMEZONE } from '../../telemetry/quota.js'
 
 /**
  * @param {object} deps createServer 注入进来的那些
@@ -301,6 +302,17 @@ export function createAccountRoutes({ config, identity, users, groups, modelStor
           })),
           // 无分组的人也要有个地方看得见 —— 否则"人数加起来对不上"没法解释
           ungrouped: accounts.filter((account) => !account.groupId).length,
+          /**
+           * 每日额度在哪个时区归零（QUOTA_TIMEZONE）。
+           *
+           * 回给界面而不是让它写死一个 'Asia/Shanghai'：这是部署级的配置，
+           * 而"每天几点归零"正是管理员填每日额度时唯一会犹豫的那件事。
+           * 前端猜错了的表现是页面上写着北京时间、实际按别的时区归零。
+           *
+           * `?.` 不是防御性冗余：测试里的 config 是手搭的局部对象，没有 limits 段。
+           * 缺了就走与 config.js 同一个默认值（那个常量就住在闸门自己那边）。
+           */
+          quotaTimezone: config.limits?.quotaTimezone || DEFAULT_TIMEZONE,
         })
       }
 

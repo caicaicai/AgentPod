@@ -545,6 +545,51 @@ describe('管理接口：模型与分组', () => {
   })
 
   /**
+   * Token 额度（分组上那两个数，判据在 test/quota.test.js）。
+   *
+   * 这里只钉**接口这一层**：字段收得进、回得出、改得动，以及"每日额度几点归零"
+   * 跟着清单一起下来 —— 界面上要写这句话，让它自己写死一个时区的话，
+   * 换了 QUOTA_TIMEZONE 的部署会显示一个假的归零时刻。
+   */
+  test('分组的两个 token 额度：建的时候能带，清单里回得出', async () => {
+    const token = await adminToken()
+    const created = (await call('POST', '/v1/admin/groups', {
+      token,
+      body: { name: '试用', tokenQuota: 1000000, dailyTokenQuota: 50000 },
+    })).body.group
+    assert.equal(created.tokenQuota, 1000000)
+    assert.equal(created.dailyTokenQuota, 50000)
+
+    const data = (await call('GET', '/v1/admin/groups', { token })).body
+    const listed = data.groups.find((group) => group.id === created.id)
+    assert.equal(listed.tokenQuota, 1000000)
+    assert.equal(listed.dailyTokenQuota, 50000)
+    assert.ok(data.quotaTimezone, '每日额度几点归零要跟着清单一起回')
+
+    // 不配额度的组回两个 0（不限），不是 undefined —— 界面直接读这两个字段
+    const free = (await call('POST', '/v1/admin/groups', { token, body: { name: '内部' } })).body.group
+    assert.equal(free.tokenQuota, 0)
+    assert.equal(free.dailyTokenQuota, 0)
+  })
+
+  test('改额度只改额度；填错回 400 而不是悄悄变成"不限"', async () => {
+    const token = await adminToken()
+    const group = (await call('POST', '/v1/admin/groups', {
+      token, body: { name: '试用', tokenQuota: 1000, dailyTokenQuota: 100 },
+    })).body.group
+
+    const patched = await call('PATCH', `/v1/admin/groups/${group.id}`, { token, body: { tokenQuota: 2000 } })
+    assert.equal(patched.body.group.tokenQuota, 2000)
+    assert.equal(patched.body.group.dailyTokenQuota, 100, '没传的那个不动')
+    assert.equal(patched.body.group.name, '试用')
+
+    const bad = await call('PATCH', `/v1/admin/groups/${group.id}`, { token, body: { tokenQuota: -1 } })
+    assert.equal(bad.status, 400)
+    assert.equal((await call('GET', '/v1/admin/groups', { token })).body
+      .groups.find((item) => item.id === group.id).tokenQuota, 2000, '没被那次坏请求改掉')
+  })
+
+  /**
    * /v1/models 是**用户**那条路，与管理接口分开测：
    * 越权的判定在管理接口那边，这里要保证普通用户拿到的是**他那一份**，
    * 且同样不含 key。

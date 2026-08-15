@@ -213,6 +213,8 @@ export const state = reactive({
   adminUngrouped: 0,
   adminGroupsLoading: false,
   adminGroupEditing: '',
+  /** 每日 token 额度在哪个时区归零。空 = 还没拉到，页面上退回默认那个时区名 */
+  adminQuotaTimezone: '',
 
   /**
    * Token 用量。

@@ -20,7 +20,7 @@ import { generateTitle } from '../sessions/title.js'
 export function createRunService({
   config, logger, store, sandbox, broker, metrics, workspace = null,
   skillManager = null, memory = null, memoryCapture = null, projects = null, crons = null,
-  artifacts = null, usage = null, registry = null,
+  artifacts = null, usage = null, registry = null, quota = null,
 }) {
   const active = new Map() // runId -> { username, abort, startedAt, source }
   const perUser = new Map() // username -> count
@@ -242,6 +242,19 @@ export function createRunService({
       const { username } = subject
       const runId = `run_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`
       const runLogger = logger.child({ runId, username, source })
+
+      /**
+       * Token 额度（分组上配的那两个，见 telemetry/quota.js）。
+       *
+       * 排在 acquire 之前：额度是"这个人还能不能用"，并发槽位是"这会儿有没有位子"。
+       * 反过来的话，一个额度已经烧光的账号还是会先占住一个槽位，
+       * 再在下一行被拦下来还回去 —— 每次都白占一次，而并发满的时候
+       * 那一下白占会把别人挤成 429。
+       *
+       * 也排在 emit('run_start') 之前：这一轮压根没开始，不该在界面上
+       * 先冒出一个空的回答气泡再变成错误。
+       */
+      if (quota?.enabled) await quota.assert(username)
 
       acquire(username)
       active.set(runId, { username, abort: () => {}, startedAt: Date.now(), source })

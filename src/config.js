@@ -633,6 +633,15 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
        * 「这张图太大了」这种说得清的报错，而不是「请求体超过 N 字节上限」。
        */
       chatBodyLimitBytes: num(env.REQUEST_BODY_LIMIT_CHAT_BYTES, 12 * 1024 * 1024),
+      /**
+       * 分组的**每日** token 额度在哪个时区跨零点归零（额度本身配在分组上，
+       * 不在这里 —— 见 src/identity/group-store.js）。
+       *
+       * 默认跟 cron 一样是 Asia/Shanghai：台账按 UTC 存，直接拿 UTC 的天当"今天"
+       * 的话，额度会在北京时间早上八点归零 —— 那既不是用户理解的"每天"，
+       * 也没人猜得到。写错的时区名不会让服务起不来，会退回这个默认值并告警。
+       */
+      quotaTimezone: String(env.QUOTA_TIMEZONE || 'Asia/Shanghai').trim() || 'Asia/Shanghai',
     },
 
     /**

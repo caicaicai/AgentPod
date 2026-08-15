@@ -284,11 +284,21 @@ const shownModels = computed(() => {
 
 /* ═══════════════ 分组的增删改 ═══════════════ */
 
-const groupForm = ref({ name: '', description: '', isDefault: false })
+/**
+ * 两个额度在表单里是**字符串**（数字输入框给的就是字符串），空串 = 不限。
+ *
+ * 不在前端转成数字：0 和空串在这个位置是同一个意思（不限），而 `Number('')`
+ * 是 0、`Number('abc')` 是 NaN —— 转早了就分不清"他清空了"和"他打错了"。
+ * 收口在服务端一处做（group-store 的 assertQuota），错了会回一条说得清的 400。
+ */
+const groupForm = ref({ name: '', description: '', isDefault: false, tokenQuota: '', dailyTokenQuota: '' })
+
+/** 存着的 0（不限）在输入框里要显示成空，而不是一个碍眼的 0 */
+const quotaInput = (value) => (Number(value) > 0 ? String(value) : '')
 
 function startCreateGroup() {
   state.adminGroupEditing = state.adminGroupEditing === 'new' ? '' : 'new'
-  groupForm.value = { name: '', description: '', isDefault: false }
+  groupForm.value = { name: '', description: '', isDefault: false, tokenQuota: '', dailyTokenQuota: '' }
 }
 
 function startEditGroup(group) {
@@ -297,7 +307,13 @@ function startEditGroup(group) {
     return
   }
   state.adminGroupEditing = group.id
-  groupForm.value = { name: group.name, description: group.description, isDefault: group.isDefault }
+  groupForm.value = {
+    name: group.name,
+    description: group.description,
+    isDefault: group.isDefault,
+    tokenQuota: quotaInput(group.tokenQuota),
+    dailyTokenQuota: quotaInput(group.dailyTokenQuota),
+  }
 }
 
 async function onSubmitGroup() {
@@ -310,6 +326,8 @@ async function onSubmitGroup() {
     name: groupForm.value.name.trim(),
     description: groupForm.value.description.trim(),
     isDefault: Boolean(groupForm.value.isDefault),
+    tokenQuota: String(groupForm.value.tokenQuota ?? '').trim(),
+    dailyTokenQuota: String(groupForm.value.dailyTokenQuota ?? '').trim(),
   }
   const ok = state.adminGroupEditing === 'new'
     ? await createGroup(body)
@@ -926,9 +944,18 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
       <!-- ══════════ 分组 ══════════ -->
       <template v-else-if="state.adminTab === 'groups'">
         <p class="note">
-          分组只决定<strong>一个人能用哪些模型</strong>。它不是角色（能不能管别人那是「账号」页的管理员开关），
+          分组决定<strong>一个人能用哪些模型</strong>、<strong>能用多少 token</strong>。它不是角色（能不能管别人那是「账号」页的管理员开关），
           也不是隔离边界 —— 会话、作品、记忆一直是按账号隔离的，与分组无关。
-          没有分组的人能用的是那些<strong>没有限制可用范围</strong>的模型。
+          没有分组的人能用的是那些<strong>没有限制可用范围</strong>的模型，且不受额度限制。
+        </p>
+        <!--
+          这两句要写在页面上，不能只写在代码注释里 —— 它们是管理员**填之前**
+          就必须知道的事，填完再从别处发现"原来是每人一份"就晚了。
+        -->
+        <p class="note">
+          两个额度都是<strong>按人算</strong>的：填 100 万的意思是"组里每个人各有 100 万"，不是全组共用。
+          口径是<strong>输入 + 输出</strong>（不含缓存读入），与「用量」页那张表一致；
+          总额度<strong>永不重置</strong>，每日额度按 {{ state.adminQuotaTimezone || 'Asia/Shanghai' }} 的零点归零。留空或 0 = 不限。
         </p>
 
         <form v-if="state.adminGroupEditing === 'new'" class="create" @submit.prevent="onSubmitGroup">
@@ -940,6 +967,16 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
             <label class="wide">
               <span>说明（可选）</span>
               <input v-model="groupForm.description" placeholder="这个分组是给谁的、为什么这么分" autocomplete="off" />
+            </label>
+          </div>
+          <div class="create-row">
+            <label>
+              <span>总额度（tokens）</span>
+              <input v-model="groupForm.tokenQuota" type="number" min="0" step="10000" placeholder="留空 = 不限" />
+            </label>
+            <label>
+              <span>每日额度（tokens）</span>
+              <input v-model="groupForm.dailyTokenQuota" type="number" min="0" step="10000" placeholder="留空 = 不限" />
             </label>
           </div>
           <div class="create-row switches">
@@ -966,6 +1003,8 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
               <th>说明</th>
               <th class="num">人数</th>
               <th class="num">可用模型</th>
+              <th class="num">总额度</th>
+              <th class="num">每日额度</th>
               <th class="acts-col">操作</th>
             </tr>
           </thead>
@@ -983,6 +1022,16 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
                   那个组里的人打开对话框会是空的，而他们不会知道为什么。
                 -->
                 <td class="num" :class="{ warnnum: !group.modelCount }">{{ group.modelCount }}</td>
+                <!--
+                  「不限」写成灰字而不是 0 或空白：0 在这一列上会被读成"一点都不给"，
+                  而空白看起来像是这一格没加载出来。
+                -->
+                <td class="num" :class="{ muted: !group.tokenQuota }">
+                  {{ group.tokenQuota ? formatTokens(group.tokenQuota) : '不限' }}
+                </td>
+                <td class="num" :class="{ muted: !group.dailyTokenQuota }">
+                  {{ group.dailyTokenQuota ? formatTokens(group.dailyTokenQuota) : '不限' }}
+                </td>
                 <td class="acts">
                   <button type="button" class="ghost-btn" :disabled="state.adminBusy" @click="startEditGroup(group)">
                     {{ state.adminGroupEditing === group.id ? '收起' : '编辑' }}
@@ -1000,14 +1049,28 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
                 </td>
               </tr>
               <tr v-if="state.adminGroupEditing === group.id" class="reset-row">
-                <td colspan="5">
+                <td colspan="7">
                   <form class="create" @submit.prevent="onSubmitGroup">
                     <div class="create-row">
                       <label><span>分组名</span><input v-model="groupForm.name" autocomplete="off" /></label>
                       <label class="wide"><span>说明</span><input v-model="groupForm.description" autocomplete="off" /></label>
                     </div>
+                    <div class="create-row">
+                      <label>
+                        <span>总额度（tokens）</span>
+                        <input v-model="groupForm.tokenQuota" type="number" min="0" step="10000" placeholder="留空 = 不限" />
+                      </label>
+                      <label>
+                        <span>每日额度（tokens）</span>
+                        <input v-model="groupForm.dailyTokenQuota" type="number" min="0" step="10000" placeholder="留空 = 不限" />
+                      </label>
+                    </div>
                     <div class="create-foot">
-                      <p class="hint">改名不影响成员：模型和账号存的是分组 id，不是名字。</p>
+                      <!--
+                        调高额度对已经被拦住的人是**立刻生效**的：闸门每一轮都重新查一次，
+                        没有任何缓存。这句话要写在这里 —— 否则管理员改完会去猜"要不要让他重新登录"。
+                      -->
+                      <p class="hint">改名不影响成员：模型和账号存的是分组 id，不是名字。改额度下一轮对话就生效。</p>
                       <button type="button" class="ghost-btn" @click="state.adminGroupEditing = ''">取消</button>
                       <button type="submit" class="primary-btn" :disabled="state.adminBusy">保存</button>
                     </div>
@@ -1024,6 +1087,9 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
               <td class="muted">只能用那些不限可用范围的模型</td>
               <td class="num">{{ state.adminUngrouped }}</td>
               <td class="num">{{ state.adminModels.filter((m) => m.enabled && !m.groups.length).length }}</td>
+              <!-- 无分组 = 没有额度可言。额度挂在分组上，没有分组就没有那两个数 -->
+              <td class="num muted">不限</td>
+              <td class="num muted">不限</td>
               <td />
             </tr>
           </tbody>

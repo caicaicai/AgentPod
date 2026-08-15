@@ -1,21 +1,41 @@
 /**
  * 用户分组。
  *
- * ── 它只回答一个问题 ────────────────────────────────────────────────────
+ * ── 它回答的是"这个人的档位" ────────────────────────────────────────────
  *
- * "这个人能用哪些模型"。分组本身不带任何权限含义 —— 它不是角色（那是
- * `role: user | admin`，管的是能不能管别人），也不是租户（隔离一直是按
- * username 做的，见隔离契约 #4）。把它做成一个只有一件用途的概念，
- * 是为了避免它慢慢长成第二套权限系统：一旦"分组"开始决定能不能用某个技能、
- * 能不能建作品、能跑几个并发，任何一次授权问题都要同时查两个地方。
+ * 具体是两件事，而且只有这两件：**能用哪些模型**，以及**能用多少 token**。
+ * 它们是同一个轴上的两个刻度 —— "给试用用户开便宜的模型、每天一百万 token"
+ * 是一句话里的一件事，拆到两个概念上只会让管理员在两个页面之间来回对齐。
+ *
+ * 分组仍然**不带任何权限含义**：它不是角色（那是 `role: user | admin`，管的是
+ * 能不能管别人），也不是租户（隔离一直是按 username 做的，见隔离契约 #4）。
+ * 这条边界要守住，否则它会慢慢长成第二套权限系统：一旦"分组"开始决定能不能用
+ * 某个技能、能不能建作品、能跑几个并发，任何一次授权问题都要同时查两个地方。
  *
  * 真需要那些的时候，该加的是各自的开关，而不是往分组上挂。
+ *
+ * ── 两个额度的口径 ──────────────────────────────────────────────────────
+ *
+ *   tokenQuota       累计总量，**永不重置**。烧完就停，要继续用得管理员调高上限。
+ *   dailyTokenQuota  每天的量，跨零点归零。"零点"按 QUOTA_TIMEZONE 算（见 telemetry/quota.js）。
+ *
+ * 都是 **0 = 不限**，而不是"没配过 = 不限、配了 0 = 一点都不给" —— 后者会让
+ * "把额度清空"这个动作变成"把人封死"，而管理员想做的十有八九是前者。
+ *
+ * 更要紧的是：**额度是按人算的，不是全组共用一个池子**。配 100 万的意思是
+ * "组里每个人各有 100 万"。共用池的话，一个人跑几个大任务就能让整组停摆，
+ * 而被停的人既看不出是谁烧的、也做不了任何事。想按部门做预算的时候，
+ * 要加的是"部门"这个新概念，不是把分组的语义改掉。
  *
  * ── 没有分组的人是什么状态 ──────────────────────────────────────────────
  *
  * 合法状态，不是错误。`groupId: ''` 的人能用的是**没有限制可用范围的那些模型**
- * （模型记录里 groups 为空的）。所以一个部署可以完全不建分组就跑起来：
- * 配几个模型，所有人都能用。分组是在"要区别对待"的那一刻才引入的东西。
+ * （模型记录里 groups 为空的），而且**不受任何额度限制**。所以一个部署可以完全
+ * 不建分组就跑起来：配几个模型，所有人都能用、都不限量。分组是在"要区别对待"
+ * 的那一刻才引入的东西。
+ *
+ * ⚠️ 这也意味着额度**不是一道安全边界**：把一个人移出分组就等于给他解开了限制。
+ * 它防的是"跑飞的任务把这个月的预算烧光"，不是防内鬼。
  *
  * ── 默认分组 ────────────────────────────────────────────────────────────
  *
@@ -38,6 +58,14 @@ export function toPublicGroup(record) {
     name: record.name,
     description: record.description || '',
     isDefault: Boolean(record.isDefault),
+    /**
+     * 两个额度都**兜底成 0（不限）**：这个字段是后加的，老记录里根本没有它。
+     * 不兜底的话，升级上来的部署里每个分组的额度都是 undefined，
+     * 而 `undefined >= quota` 是 false —— 恰好不拦，看起来像是好的，
+     * 直到有人在界面上点开一个分组，看到两个空输入框保存了一次。
+     */
+    tokenQuota: Number(record.tokenQuota) || 0,
+    dailyTokenQuota: Number(record.dailyTokenQuota) || 0,
     createdAt: record.createdAt || 0,
     updatedAt: record.updatedAt || 0,
   }
@@ -52,6 +80,26 @@ export function createGroupStore({ storage, logger = console }) {
     if (!name) throw new Error('分组名不能为空')
     if (name.length > NAME_MAX) throw new Error(`分组名不能超过 ${NAME_MAX} 个字符`)
     return name
+  }
+
+  /**
+   * 额度收口成一个非负整数。
+   *
+   * **乱填要报错，不能悄悄退回 0** —— 与查询参数不同（那些错填一下只是让人多点
+   * 一次，见 usage-store 的 resolveSince）。这里退回 0 的意思是"不限"：管理员
+   * 想配 100 万、少打了一个字，得到的却是"这个组从此不限量"，而界面上会如实
+   * 显示"不限"，没有任何地方提示他刚才那一下没生效。
+   *
+   * 空串同样按 0 收：界面上那个数字输入框清空之后给过来的就是空串，
+   * 而在那个位置上"清空"就是"不限"的意思。
+   */
+  function assertQuota(input, label) {
+    const text = String(input ?? '').trim()
+    if (!text) return 0
+    const value = Number(text)
+    if (!Number.isFinite(value) || value < 0) throw new Error(`${label}要填一个不小于 0 的整数（0 = 不限）`)
+    if (!Number.isSafeInteger(Math.floor(value))) throw new Error(`${label}太大了`)
+    return Math.floor(value)
   }
 
   /**
@@ -88,13 +136,15 @@ export function createGroupStore({ storage, logger = console }) {
       return all.find((record) => record.isDefault)?.id || ''
     },
 
-    async create({ name, description = '', isDefault = false }) {
+    async create({ name, description = '', isDefault = false, tokenQuota = 0, dailyTokenQuota = 0 }) {
       const now = Date.now()
       const record = {
         id: `grp_${randomUUID().slice(0, 12)}`,
         name: assertName(name),
         description: String(description || '').trim().slice(0, DESC_MAX),
         isDefault: Boolean(isDefault),
+        tokenQuota: assertQuota(tokenQuota, '总额度'),
+        dailyTokenQuota: assertQuota(dailyTokenQuota, '每日额度'),
         createdAt: now,
         updatedAt: now,
       }
@@ -104,12 +154,14 @@ export function createGroupStore({ storage, logger = console }) {
       return toPublicGroup(record)
     },
 
-    async update(id, { name, description, isDefault }) {
+    async update(id, { name, description, isDefault, tokenQuota, dailyTokenQuota }) {
       const key = String(id || '')
       const patch = { updatedAt: Date.now() }
       if (name !== undefined) patch.name = assertName(name)
       if (description !== undefined) patch.description = String(description || '').trim().slice(0, DESC_MAX)
       if (isDefault !== undefined) patch.isDefault = Boolean(isDefault)
+      if (tokenQuota !== undefined) patch.tokenQuota = assertQuota(tokenQuota, '总额度')
+      if (dailyTokenQuota !== undefined) patch.dailyTokenQuota = assertQuota(dailyTokenQuota, '每日额度')
 
       const updated = await map.merge(key, patch)
       if (!updated) return null

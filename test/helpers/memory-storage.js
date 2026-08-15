@@ -21,6 +21,8 @@
  */
 
 import { assertSegment } from '../../src/persistence/paths.js'
+// 形状从真后端那边 import，不在这里再拼一遍 —— 少一处能漂移的地方
+import { toTotals } from '../../src/persistence/storage.js'
 
 /**
  * 拼键的分隔符。写成转义而不是字面 NUL —— 后者会让 ripgrep 把整个文件判成
@@ -275,6 +277,23 @@ export function createMemoryStorage() {
 
       async dailyForModel({ modelId, since = null }) {
         return daily(rowsSince(store.usage, since).filter((row) => row.modelId === String(modelId || '')))
+      },
+
+      /** 与真后端的条件 SUM 对应：累计一份、`dayStart` 之后一份，同一次遍历里算 */
+      async totalsForUser({ username, dayStart = null }) {
+        assertSegment(username, 'username')
+        const from = dayStart ? new Date(dayStart) : null
+        const acc = { totalInput: 0, totalOutput: 0, dayInput: 0, dayOutput: 0 }
+        for (const row of store.usage.values()) {
+          if (row.username !== username) continue
+          acc.totalInput += row.input
+          acc.totalOutput += row.output
+          if (!from || row.createdAt >= from) {
+            acc.dayInput += row.input
+            acc.dayOutput += row.output
+          }
+        }
+        return toTotals(acc)
       },
     },
 

@@ -174,8 +174,12 @@ function offsetAt(ts, timezone) {
  *
  * 先按 UTC 猜一个，再用那个瞬间的真实偏移修正，最后复核一次 —— 夏令时切换那两个
  * 小时里，第一次猜出来的偏移可能属于切换前。不复核的话，每年有两天会差一小时。
+ *
+ * 导出是给 telemetry/quota.js 用的（每日 token 额度要算"当地零点是哪一刻"）。
+ * 那边自己写一份的话，就是第二处"每年有两天会差一小时"的地方，
+ * 而它们会在不同的两天出错。
  */
-function utcFromWall({ year, month, day, hour, minute }, timezone) {
+export function utcFromWall({ year, month, day, hour, minute }, timezone) {
   const guess = Date.UTC(year, month - 1, day, hour, minute, 0)
   const first = guess - offsetAt(guess, timezone)
   const second = guess - offsetAt(first, timezone)

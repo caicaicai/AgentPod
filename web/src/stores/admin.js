@@ -198,6 +198,8 @@ export async function refreshGroups() {
     const data = await api.adminListGroups()
     state.adminGroups = data.groups || []
     state.adminUngrouped = data.ungrouped || 0
+    // 每日额度几点归零，由服务端说了算（QUOTA_TIMEZONE），界面不猜
+    state.adminQuotaTimezone = data.quotaTimezone || ''
     state.adminNote = ''
     state.adminNoteWarn = false
   } catch (error) {

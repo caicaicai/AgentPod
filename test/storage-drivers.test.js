@@ -519,11 +519,47 @@ forEachDriver('token 用量', ({ storage }) => {
     assert.deepEqual(daily.map((item) => [item.day, item.runs, item.input]), [['2026-03-01', 2, 120]])
   })
 
+  /**
+   * ── 额度闸门要的那两个数（telemetry/quota.js）────────────────────────
+   *
+   * 一次查询回"累计"和"当日"两份。这里钉的是它们**各自的下界**：累计没有下界
+   * （多久以前的账都算），当日只算 `dayStart` 之后的。两个后端都要一样 ——
+   * 替身上把累计写成"最近 30 天"的话，用例照样绿，而生产上人烧不到上限。
+   */
+  test('累计与当日：一次查完，累计不带时间下界', async () => {
+    const now = Date.now()
+    const dayStart = new Date(now - 6 * 60 * 60 * 1000)
+    await ledger().record(row({ input: 900, output: 100, cacheRead: 7000, createdAt: new Date(now - 300 * DAY) }))
+    await ledger().record(row({ input: 30, output: 20, cacheRead: 5, createdAt: new Date(now - 60 * 60 * 1000) }))
+    await ledger().record(row({ username: 'lisi', input: 9999, output: 9999 }))
+
+    const totals = await ledger().totalsForUser({ username: 'zhangsan', dayStart })
+    assert.equal(totals.total.tokens, 1050, '三百天前的那一行照样算进累计')
+    assert.equal(totals.today.tokens, 50, '当日只算 dayStart 之后的')
+    assert.equal(totals.total.input, 930)
+    // **必须是 number**：mysql2 把 SUM() 回成字符串，而 '900' >= 1000 是按字符串比的
+    assert.equal(typeof totals.total.tokens, 'number')
+    assert.equal(totals.total.cacheRead, undefined, '额度口径不含缓存读入，索性不回这个数')
+  })
+
+  test('一行账都没有时回一堆 0，不是 null —— 上层直接拿去比大小', async () => {
+    const totals = await ledger().totalsForUser({ username: 'zhangsan', dayStart: new Date() })
+    assert.deepEqual(totals, { total: { input: 0, output: 0, tokens: 0 }, today: { input: 0, output: 0, tokens: 0 } })
+  })
+
+  test('不传 dayStart 时"当日"等于累计（没配每日额度就不必再筛一遍）', async () => {
+    await ledger().record(row({ input: 10, output: 5, createdAt: new Date(Date.now() - 300 * DAY) }))
+    const totals = await ledger().totalsForUser({ username: 'zhangsan' })
+    assert.equal(totals.total.tokens, 15)
+    assert.equal(totals.today.tokens, 15)
+  })
+
   /** username 是主键的一部分，两边都必须过同一道字符集检查（隔离契约 #4） */
   test('用户名不合法当场拒绝，两个后端一样', async () => {
     await assert.rejects(() => ledger().record(row({ username: '../etc' })), /不能作为目录名/)
     await assert.rejects(() => ledger().dailyForUser({ username: '..' }), /不能作为目录名/)
     await assert.rejects(() => ledger().dailyForUser({ username: 'a/b' }), /不能作为目录名/)
+    await assert.rejects(() => ledger().totalsForUser({ username: 'a/b' }), /不能作为目录名/)
   })
 })
 

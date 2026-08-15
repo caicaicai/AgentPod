@@ -52,6 +52,26 @@ function toBucket(row) {
 }
 
 /**
+ * 「累计 / 当日」这一对数字的形状，两个后端共用（替身从这里 import，见
+ * test/helpers/memory-storage.js 文件头说的"防漂移"）。
+ *
+ * `tokens = input + output`，**不含缓存读入** —— 与管理台那张表、与
+ * telemetry/usage-store.js 的 sumBuckets 是同一个口径。额度用另一个口径的话，
+ * 管理员会看到"用量页写着 80 万，人却在 100 万的额度上被拦了"。
+ *
+ * mysql2 把 BIGINT 的 SUM 回成字符串（怕溢出 Number），所以每个数都要过一次
+ * Number —— 不过的话，`'900000' >= 1000000` 是按字符串比的，比出来是 false。
+ */
+export function toTotals(row = {}) {
+  const bucket = (input, output) => {
+    const i = Number(input) || 0
+    const o = Number(output) || 0
+    return { input: i, output: o, tokens: i + o }
+  }
+  return { total: bucket(row.totalInput, row.totalOutput), today: bucket(row.dayInput, row.dayOutput) }
+}
+
+/**
  * 建后端：连库 + 建表。
  *
  * 连不上就当场抛，服务起不来。那是有意的 —— 起来了但第一次写数据才报错，
@@ -276,6 +296,35 @@ export async function createStorage({ config, logger = console, pool: sharedPool
           [username, String(modelId || ''), String(modelId || ''), since, since],
         )
         return rows.map(toBucket)
+      },
+
+      /**
+       * 一个人的**累计**与**当日**用量，一次查完。给额度闸门用（telemetry/quota.js）。
+       *
+       * 为什么是一个查询而不是两个：这条路排在**每一次对话开始之前**，两个查询
+       * 就是两次往返，而它们扫的是同一段索引区间（`idx_username_created` 上这个人
+       * 的那一段）。条件 SUM 让第二个数几乎不要钱。
+       *
+       * `dayStart` 是一个**瞬间**（Date），不是"日期"——"今天从哪一刻开始"由上层
+       * 按时区算好（见 quota.js）。放在这里算的话，这一层就得知道部署在哪个时区，
+       * 而它连自己那几张表都是按 UTC 存的。
+       *
+       * ⚠️ 累计那一半**没有时间下界**，扫的是这个人的全部历史行。跑了一年的重度
+       * 用户是几千行的 SUM —— 走索引、不到毫秒，但它会随时间线性变长。真慢到
+       * 看得见的那一天，该加的是一张按人的累计快照表，而不是把口径改成"最近 N 天"
+       * （那会让"总额度"这个词变成另一个意思）。
+       */
+      async totalsForUser({ username, dayStart = null }) {
+        assertSegment(username, 'username')
+        const from = dayStart ? new Date(dayStart) : null
+        const [rows] = await pool.query(
+          'SELECT COALESCE(SUM(input_tokens), 0) AS totalInput, COALESCE(SUM(output_tokens), 0) AS totalOutput,'
+          + ' COALESCE(SUM(CASE WHEN ? IS NULL OR created_at >= ? THEN input_tokens ELSE 0 END), 0) AS dayInput,'
+          + ' COALESCE(SUM(CASE WHEN ? IS NULL OR created_at >= ? THEN output_tokens ELSE 0 END), 0) AS dayOutput'
+          + ' FROM ap_usage WHERE username = ?',
+          [from, from, from, from, username],
+        )
+        return toTotals(rows[0])
       },
 
       /** 一个模型的按天明细（全体用户合起来）。看的是"这个模型的量在往哪走" */

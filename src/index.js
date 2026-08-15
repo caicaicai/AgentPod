@@ -17,6 +17,7 @@ import { createRunService } from './agent/run-service.js'
 import { createRunRegistry } from './agent/run-registry.js'
 import { createMetrics } from './telemetry/metrics.js'
 import { createUsageStore } from './telemetry/usage-store.js'
+import { createQuotaGuard } from './telemetry/quota.js'
 import { createServer } from './http/server.js'
 import { createMemoryStore } from './memory/store.js'
 import { createMemoryCapture } from './memory/capture.js'
@@ -159,9 +160,18 @@ async function main() {
    */
   const runRegistry = createRunRegistry()
 
+  /**
+   * Token 额度闸门。额度配在分组上（管理台的「分组」页），这里只是执行。
+   * 没接账号库（dev 鉴权模式）时它自己 enabled=false —— 那种部署里没有"谁属于
+   * 哪个组"这回事，也就无从限起。
+   */
+  const quota = createQuotaGuard({
+    storage, users, groups, timezone: config.limits.quotaTimezone, logger,
+  })
+
   const runService = createRunService({
     config, logger, store, sandbox, broker, metrics, workspace, skillManager,
-    memory, memoryCapture, projects, crons, artifacts, usage, registry: runRegistry,
+    memory, memoryCapture, projects, crons, artifacts, usage, quota, registry: runRegistry,
   })
   // 调度器要用 runService，所以只能排在它后面建
   const scheduler = createScheduler({ config, logger, crons, vault: cronVault, runService, sessionStore: store })
@@ -199,6 +209,8 @@ async function main() {
     sandbox: sandbox.mode,
     devConsole: config.devConsole,
     maxConcurrentRuns: config.limits.maxConcurrentRuns,
+    // 额度是**分组上**配的，这里只说得出"这个部署有没有在管额度"和零点在哪
+    tokenQuota: quota.enabled ? `按分组（每日额度在 ${quota.timezone} 归零）` : '关',
   })
   if (config.auth.mode === 'dev') logger.warn('AUTH_MODE=dev：信任客户端自称的 X-Username，仅限本地开发')
   if (config.auth.mode === 'password') {

@@ -304,11 +304,37 @@ Changes take effect **immediately, no restart**:
 | Allowed groups | None checked = available to everyone; otherwise only members of those groups see it |
 | Sort | Ascending. **The first enabled model is the default** — the one used when the user picks nothing |
 
-**User groups** are maintained on the Groups page. A group only decides which models a person can use —
-it is not a role (that is `role`) and not an isolation boundary (sessions, artifacts and memory have always
-been isolated per account). New accounts join whichever group is marked default. Users with no group get the
-models that have no group restriction. Deleting a group returns its members to "no group" and detaches it
-from every model's allow list — neither accounts nor models are deleted.
+**User groups** are maintained on the Groups page. A group decides which models a person can use and how many
+tokens they get — it is not a role (that is `role`) and not an isolation boundary (sessions, artifacts and
+memory have always been isolated per account). New accounts join whichever group is marked default. Users with
+no group get the models that have no group restriction, and no quota at all. Deleting a group returns its
+members to "no group" and detaches it from every model's allow list — neither accounts nor models are deleted.
+
+#### Token quotas
+
+Each group carries two quotas. **0 or blank means unlimited** for both:
+
+| Field | Description |
+|-------|-------------|
+| Total quota | Ceiling on **cumulative** usage; never resets. Once spent, an admin has to raise it |
+| Daily quota | Ceiling per day, reset at midnight in `QUOTA_TIMEZONE` (default `Asia/Shanghai`) |
+
+Things worth knowing before you fill them in:
+
+- **They are per member, not a shared pool.** 1M means every member gets 1M. With a shared pool one person
+  running a few large tasks stalls the whole group, and the people who get stalled can neither see who spent
+  it nor do anything about it.
+- **The unit is input + output, excluding cache reads** — the same basis as the admin Usage page.
+- **It is an up-front gate.** Usage is only known once a turn finishes, so the test is "how much was spent as
+  of the previous turn". The last turn **does overshoot** (a turn starting with 1 token left still runs to
+  completion); the overshoot lands on the ledger and the next turn is blocked. Never overshooting would mean
+  cutting the model off mid-stream, and the tokens saved don't buy that experience.
+- **Failed runs don't cost quota** (they are never recorded), so retries don't burn it.
+- When blocked: total quota returns **403** (waiting won't help), daily quota returns **429** with
+  `retryAfterMs` (midnight fixes it). Scheduled tasks use this to decide "back off" versus "stop trying".
+- Quota changes take effect on the **next turn** — nobody has to sign in again.
+- ⚠️ It is **not a security boundary**: moving someone out of a group lifts the limit. It exists to stop a
+  runaway task from burning the budget.
 
 ⚠️ **The key in this mode belongs to the deployment**, shared by everyone using that model — the same property
 that gets `direct` rejected in production. It is allowed here because the cost is covered: usage is still
@@ -349,6 +375,7 @@ For local development with real models (without a platform backend):
 | `MAX_CONCURRENT_RUNS` | `8` | Global concurrent run limit |
 | `MAX_RUNS_PER_USER` | `2` | Per-user concurrent run limit |
 | `RUN_TIMEOUT_MS` | `600000` | Maximum run duration (10 min) |
+| `QUOTA_TIMEZONE` | `Asia/Shanghai` | Timezone whose midnight resets the per-group **daily** token quota. The quotas themselves live on the group (see [Token quotas](#token-quotas)); this only sets the day boundary |
 
 ## API Reference
 
@@ -380,9 +407,9 @@ otherwise "does this username exist" leaks through response timing, which is ste
 | POST | `/v1/admin/models` | Add a model: `{ name, model, baseUrl, key, contextWindow, maxTokens, input, reasoning, groups, enabled, sort }` |
 | PATCH | `/v1/admin/models/:id` | Edit one. **Omitting `key` leaves it alone**; pass `key: null` to clear it |
 | DELETE | `/v1/admin/models/:id` | Delete one. **Historical usage rows are kept** — the bill still has to add up |
-| GET | `/v1/admin/groups` | Groups, each with `userCount` and `modelCount`; `ungrouped` counts accounts with no group |
-| POST | `/v1/admin/groups` | Create a group: `{ name, description, isDefault }`. At most one default (setting a new one clears the old) |
-| PATCH | `/v1/admin/groups/:id` | Rename, re-describe, or make default |
+| GET | `/v1/admin/groups` | Groups, each with `userCount`, `modelCount` and both quotas; `ungrouped` counts accounts with no group, `quotaTimezone` says when the daily quota resets |
+| POST | `/v1/admin/groups` | Create a group: `{ name, description, isDefault, tokenQuota, dailyTokenQuota }`. At most one default (setting a new one clears the old); quotas of 0 or blank mean unlimited |
+| PATCH | `/v1/admin/groups/:id` | Rename, re-describe, make default, or change quotas |
 | DELETE | `/v1/admin/groups/:id` | Delete: members fall back to "no group", every model's allow list drops it. Returns `{ detachedUsers, detachedModels }` |
 | GET | `/v1/admin/usage` | Token usage, admin only. `?days=30` is the window (`days=0` = all time); `?group=user` (default) gives a row per account carrying the models it used, `?group=model` gives a row per model carrying the accounts that used it. Both are transposes of one **account × model** cross-tab, so the totals are identical either way. Accounts that never ran anything still get a row of zeros — otherwise "never used it" and "doesn't exist" look identical |
 | GET | `/v1/admin/usage/user/:name` | One account's per-day series; `?modelId=` narrows it to a single model |
@@ -528,7 +555,7 @@ src/                    Core agent service
 ├── tools/              Extended tools (task plan, browser, memory, cron)
 ├── persistence/        File-based storage primitives
 ├── credentials/        Credential broker + encryption-at-rest for model keys
-└── telemetry/          In-process metrics + the persisted per-user token usage ledger
+└── telemetry/          In-process metrics, the persisted per-user token ledger, and the group quota gate
 
 web/                    Chat UI (Vue 3 + Vite)
 ├── src/stores/         Global state (reactive singleton)
