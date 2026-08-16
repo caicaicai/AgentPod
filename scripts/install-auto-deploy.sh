@@ -50,7 +50,14 @@ fi
 RUN_USER="$(stat -c '%U' "$REPO_DIR")"
 chmod +x "$REPO_DIR/scripts/deploy.sh"
 
-cat >"/etc/systemd/system/${UNIT_NAME}.service" <<EOF
+# 下面两个 heredoc 一律用**引号包起来**（<<'EOF'），变量靠后面那一次 sed 填。
+# 不引的话 unit 文件正文会先过一遍 shell 展开：注释里一对反引号就会被当成命令
+# 替换执行，把命令输出塞进 unit 文件 —— 现象是 systemd 报
+# "Missing '=', ignoring line"，而你盯着脚本里那一行怎么看都是条注释。
+render() { sed -e "s#@REPO_DIR@#${REPO_DIR}#g" -e "s#@RUN_USER@#${RUN_USER}#g" \
+               -e "s#@INTERVAL@#${INTERVAL}#g" -e "s#@UNIT_NAME@#${UNIT_NAME}#g"; }
+
+cat <<'EOF' | render >"/etc/systemd/system/${UNIT_NAME}.service"
 [Unit]
 Description=AgentPod 自动部署（拉 git 最新代码并重建）
 After=network-online.target docker.service
@@ -59,28 +66,28 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
-User=${RUN_USER}
-WorkingDirectory=${REPO_DIR}
+User=@RUN_USER@
+WorkingDirectory=@REPO_DIR@
 # 走 bash 而不是直接 exec 脚本本身：仓库放在 /home 下时，文件的 SELinux 类型是
-# user_home_t，systemd 直接 exec 它会被拒，报的是 `203/EXEC Permission denied`
-# —— 而 `ls -l` 上执行位明明是有的，光看权限位查不出来。让 bash（bin_t）去读它
-# 就没有这个问题：被限制的是"以它为入口起一个进程"，不是读它。
-ExecStart=/bin/bash ${REPO_DIR}/scripts/deploy.sh
+# user_home_t，systemd 直接以它为入口 exec 会被拒，报 203/EXEC Permission denied
+# —— 而权限位上执行位明明是有的，只看 ls 的输出查不出原因。让 bash（bin_t）
+# 去读它就没这个问题：被限制的是"以它为入口起一个进程"，不是读它。
+ExecStart=/bin/bash @REPO_DIR@/scripts/deploy.sh
 # 首次构建（要装 Chromium）可能跑很久，给足时间，不然会被半路杀掉
 # 留下一堆构建到一半的层
 TimeoutStartSec=3600
 EOF
 
-cat >"/etc/systemd/system/${UNIT_NAME}.timer" <<EOF
+cat <<'EOF' | render >"/etc/systemd/system/${UNIT_NAME}.timer"
 [Unit]
-Description=每 ${INTERVAL} 检查一次 AgentPod 是否有新提交
+Description=每 @INTERVAL@ 检查一次 AgentPod 是否有新提交
 
 [Timer]
 # 开机后等一会儿再跑第一次：让 docker 和网络先就位
 OnBootSec=3min
-OnUnitActiveSec=${INTERVAL}
+OnUnitActiveSec=@INTERVAL@
 AccuracySec=30s
-Unit=${UNIT_NAME}.service
+Unit=@UNIT_NAME@.service
 
 [Install]
 WantedBy=timers.target
