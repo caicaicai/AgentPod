@@ -22,11 +22,9 @@ CREATE TABLE IF NOT EXISTS `ap_cloud_session` (
   KEY `idx_username_project` (`username`, `project_id`, `updated_at` DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='云端 agent 会话元数据';
 
--- 已经建过表的实例执行这三条补列（MySQL 8.0 的 IF NOT EXISTS 不支持 ADD COLUMN，
--- 重复执行会报 1060，可安全忽略）：
---   ALTER TABLE `ap_cloud_session` ADD COLUMN `project_id` VARCHAR(64) NOT NULL DEFAULT '';
---   ALTER TABLE `ap_cloud_session` ADD COLUMN `pinned`   TINYINT(1) NOT NULL DEFAULT 0;
---   ALTER TABLE `ap_cloud_session` ADD COLUMN `archived` TINYINT(1) NOT NULL DEFAULT 0;
+-- 老库补这三列的 ALTER 在 src/persistence/migrations/0001-session-project-pin-archive.sql。
+-- 从前它们是以注释的形式写在这里的，而建表时会滤掉注释行 —— 于是那段"补列说明"
+-- 永远不会被执行，只有人照着手工跑才算数。改表的语句要放在 migrations/ 下。
 
 CREATE TABLE IF NOT EXISTS `ap_cloud_session_entry` (
   `id`           BIGINT       NOT NULL AUTO_INCREMENT,

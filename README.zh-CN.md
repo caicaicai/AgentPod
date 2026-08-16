@@ -272,8 +272,22 @@ sudo scripts/install-auto-deploy.sh --uninstall
 **本服务的结构化数据只存数据库，没有文件模式。** 会话、项目、长期记忆、作品、
 分享/市场、定时任务、账号、定时任务凭据 —— 全在库里。
 
-表结构由 agent 启动时自动建（`CREATE TABLE IF NOT EXISTS`，可反复执行），
-不需要先手工导表；一份可审阅的真相在 [`src/persistence/schema.sql`](src/persistence/schema.sql)。
+表结构由 agent 启动时自动对齐，不需要先手工导表，也没有单独的升级步骤：
+
+| 做什么 | 在哪 | 管谁 |
+|--------|------|------|
+| 建表 | [`src/persistence/schema.sql`](src/persistence/schema.sql) + [`src/sessions/schema.sql`](src/sessions/schema.sql) | 新库。全是 `CREATE TABLE IF NOT EXISTS`，可反复跑 |
+| 改表 | [`src/persistence/migrations/`](src/persistence/migrations/) | 老库。按文件名顺序执行，跑过的记在 `ap_schema_migration` 里不再跑 |
+| 核对 | 启动时自动 | 拿 schema.sql 声明的列去比 `information_schema`，**缺列就拒绝启动** |
+
+改表为什么不能写在 schema.sql 里：`CREATE TABLE IF NOT EXISTS` 对已经存在的表是
+彻底的空操作，写在那儿的改动在老库上一件都不会发生。所以一次改动两处都要写 ——
+schema.sql 说"这张表应该长什么样"，migrations/ 说"从旧形状怎么走到那儿"。
+写漏了不会安静过去：漏迁移则启动时核对不过并点名缺哪一列，漏 schema.sql 则
+`test/migrations.test.js` 里那条一致性检查不过。
+
+⚠️ 迁移必须**向后兼容**（只加列、加索引，不删不改名）：部署失败会自动回滚代码，
+但不会回滚已经执行的迁移。写迁移前先看 [`migrations/README.md`](src/persistence/migrations/README.md)。
 
 ```bash
 docker compose up -d      # 自带 mysql 服务，agent 等它健康检查通过再启动
@@ -293,8 +307,8 @@ docker compose up -d      # 自带 mysql 服务，agent 等它健康检查通过
 先写的；而且它是本机磁盘，同一个人落到不同副本会看到不同的历史。MySQL 的读改写走事务 + 行锁，
 跨副本成立。展开的理由写在 [`src/persistence/storage.js`](src/persistence/storage.js) 的文件头。
 
-⚠️ **没有自动迁移。** 从旧版本（数据落在 `DATA_DIR` 的文件里）升上来时，那些会话、项目、
-记忆、作品**不会**被搬进数据库 —— 它们仍在原目录里，但服务不再读它。需要的话请自行导入，
+⚠️ **旧数据不会自动搬迁**（与上面的表结构迁移是两回事）。从旧版本（数据落在 `DATA_DIR`
+的文件里）升上来时，那些会话、项目、记忆、作品**不会**被搬进数据库 —— 它们仍在原目录里，但服务不再读它。需要的话请自行导入，
 或把旧版本留着做数据导出。
 
 ⚠️ 有一样**不进库**：会话工作区与用户技能（`USER_WORKSPACE_ROOT`）。

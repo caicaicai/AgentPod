@@ -275,8 +275,24 @@ one plain-text message.
 **Structured data lives only in the database — there is no file mode.** Sessions, projects,
 long-term memory, artifacts, shares/market, cron, accounts and cron credentials are all in MySQL.
 
-Tables are created at startup (`CREATE TABLE IF NOT EXISTS`, safe to re-run) — no manual import
-step. The reviewable source of truth is [`src/persistence/schema.sql`](src/persistence/schema.sql).
+The schema is brought up to date at startup — no manual import, and no separate upgrade step:
+
+| Step | Where | Applies to |
+|------|-------|------------|
+| Create | [`src/persistence/schema.sql`](src/persistence/schema.sql) + [`src/sessions/schema.sql`](src/sessions/schema.sql) | New databases. All `CREATE TABLE IF NOT EXISTS`, safe to re-run |
+| Alter | [`src/persistence/migrations/`](src/persistence/migrations/) | Existing databases. Applied in filename order, recorded in `ap_schema_migration` so each runs once |
+| Verify | automatic at startup | Columns declared in schema.sql are checked against `information_schema`; **a missing column refuses to start** |
+
+Alters can't live in schema.sql: `CREATE TABLE IF NOT EXISTS` is a complete no-op against a table
+that already exists, so a change written there never happens on an existing database. Every schema
+change is therefore written in both places — schema.sql says *what the table should look like*,
+migrations/ says *how to get there from the previous shape*. Neither omission is silent: a missing
+migration fails the startup check and names the missing column, and a missing schema.sql update
+fails the consistency test in `test/migrations.test.js`.
+
+⚠️ Migrations must be **backward compatible** (add columns and indexes; never drop or rename): a
+failed deploy rolls the code back automatically, but it does not roll back a migration that already
+ran. See [`migrations/README.md`](src/persistence/migrations/README.md) before writing one.
 
 ```bash
 docker compose up -d      # ships a mysql service; agent waits for its healthcheck
