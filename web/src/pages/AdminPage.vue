@@ -5,10 +5,11 @@ import AppIcon from '@/components/AppIcon.vue'
 import { formatDateTime, formatSince, formatTokens } from '@/lib/format.js'
 import { askConfirm } from '@/lib/dialog.js'
 import {
-  closeAdmin, createGroup, createModel, createUser, deleteGroup, deleteModel, openUsageRow,
+  closeAdmin, createGroup, createModel, createUser, deleteGroup, deleteModel,
+  loadMoreGroups, loadMoreModels, loadMoreUsage, loadMoreUsers, openUsageRow,
   refreshGroups, refreshModels, refreshUsage, refreshUsers, resetUserPassword, setAdminTab,
   setModelEnabled, setUsageDays, setUsageGroup, setUserDisabled, setUserGroup, setUserRole,
-  state, updateGroup, updateModel,
+  setUserSearch, state, updateGroup, updateModel,
 } from '@/stores/app.js'
 
 /**
@@ -42,13 +43,32 @@ import {
 
 const me = computed(() => state.account?.username || '')
 
-const shown = computed(() => {
-  const keyword = state.adminSearch.trim().toLowerCase()
-  if (!keyword) return state.adminUsers
-  return state.adminUsers.filter((user) => user.username.toLowerCase().includes(keyword))
-})
+/**
+ * 表里显示的那些行。
+ *
+ * **不在这儿过滤** —— 搜索是服务端做的（见 stores/admin.js:setUserSearch）。
+ * 从前这里有一句 `filter(username.includes(keyword))`，分页之后它会退化成
+ * "只搜已经加载的那几页"，而搜不到的人在界面上看起来就像不存在。
+ */
+const shown = computed(() => state.adminUsers)
 
-const admins = computed(() => state.adminUsers.filter((user) => user.role === 'admin' && !user.disabled))
+/**
+ * 在岗管理员有几个。**用服务端回的全局数**，不是数当前这一页。
+ *
+ * 它只有一个用处，而那个用处经不起数错：`isLastAdmin` 靠它判断"这是最后一个
+ * 管理员吗"。从已加载的行里数的话，翻到第二页会数出"只剩一个"，
+ * 于是几个本该能点的按钮无缘无故变灰 —— 而且越翻页越离谱。
+ */
+const adminCount = computed(() => state.adminStats?.admins || 0)
+
+/**
+ * 搜索框的输入。账号页转成一次服务端搜索（`setUserSearch` 自己压节流），
+ * 其余页只改本地那个词、就地 filter —— 两种行为的取舍见模板里那段注释。
+ */
+function onSearch(value) {
+  if (state.adminTab === 'users') return setUserSearch(value)
+  state.adminSearch = value
+}
 
 /* ═══════════════ 新建账号 ═══════════════ */
 
@@ -151,7 +171,7 @@ async function onReset(username) {
  */
 const isMe = (user) => user.username === me.value
 /** 最后一个管理员不能被降级或禁用 —— 降完就没人能再把它改回来了 */
-const isLastAdmin = (user) => user.role === 'admin' && !user.disabled && admins.value.length <= 1
+const isLastAdmin = (user) => user.role === 'admin' && !user.disabled && adminCount.value <= 1
 
 /* ═══════════════ 分组（账号页与模型页共用的查表） ═══════════════ */
 
@@ -412,13 +432,34 @@ const usageRows = computed(() => {
    * 搜索框在两个维度上搜的东西不一样，但都**连另一维一起搜**：
    * 按用户时输 `opus` 能筛出"用过 opus 的人"，按模型时输 `zhangsan` 能筛出
    * "张三用过的模型"。只搜主维的话，这个框在另一页上就像坏了。
+   *
+   * ⚠️ 这一页的筛选**只作用在已经加载的行上**，与账号页不同（那边是服务端搜的）。
+   * 原因是这张表按 token 数排序，"搜索 + 按聚合值分页"要在 SQL 里同时做，
+   * 得给聚合结果再套一层筛选 —— 而用量页的用法是"从多到少看前几名"，
+   * 不是"找某一个人"（找人该去账号页）。所以界面上会明说还有没加载的行，
+   * 见下面 searchScopeNote。
    */
   return rows.filter((row) => String(rowKey(row) || '').toLowerCase().includes(keyword)
     || rowChildren(row).some((child) => String(childKey(child) || '').toLowerCase().includes(keyword)))
 })
 
-/** 只把用过的算进这句话：0 那些行在表里有意义（"他没用过"），在这句话里没有 */
-const activeCount = computed(() => ((state.adminUsage?.users) || []).filter((row) => row.tokens > 0).length)
+/**
+ * "还有没加载的行"这句提示。
+ *
+ * 只在**一边搜一边还有下一页**时出现。不写的话，一次搜不到结果的搜索
+ * 与"这个人真的没有用量"长得一模一样，而前者只要再点两下「加载更多」就有了。
+ */
+const searchScopeNote = computed(() => (state.adminSearch.trim() && state.adminUsageHasMore
+  ? '只在已加载的行里筛。还有更多没加载 —— 找某一个人请去「账号」页。'
+  : ''))
+
+/**
+ * 只把用过的算进这句话：0 那些行在表里有意义（"他没用过"），在这句话里没有。
+ *
+ * 服务端给的全局数（`COUNT(DISTINCT username)`），不是数当前这些行 ——
+ * 后者在分页之后是"当前加载了几行"，每点一次「加载更多」表头就涨一截。
+ */
+const activeCount = computed(() => state.adminUsage?.userCount || 0)
 /**
  * 服务端给的数（两个视图都有）。不用 `models.length` —— 那个只在按模型看时才存在，
  * 于是「模型」这一格会在切到按用户看时凭空消失。
@@ -530,27 +571,44 @@ function partialNote(row) {
         <button type="button" :class="{ on: state.adminTab === 'usage' }" @click="setAdminTab('usage')">Token 用量</button>
       </nav>
 
+      <!--
+        表头这几个数一律用**服务端回的全局数**，不是 `xxx.length`。
+        分页之后数组长度的含义是"当前加载了几条" —— 每点一次「加载更多」
+        表头就跟着涨一截，而管理员看这一行是为了知道这个部署一共有多少。
+      -->
       <span v-if="state.adminTab === 'users'" class="head-count">
-        {{ state.adminUsers.length }} 个账号 · {{ admins.length }} 个管理员
+        {{ state.adminStats.total }} 个账号 · {{ adminCount }} 个管理员
       </span>
       <span v-else-if="state.adminTab === 'models'" class="head-count">
-        {{ state.adminModels.filter((m) => m.enabled).length }} 个启用 · 共 {{ state.adminModels.length }} 个
+        {{ state.adminModelStats.enabled }} 个启用 · 共 {{ state.adminModelStats.total }} 个
       </span>
       <span v-else-if="state.adminTab === 'groups'" class="head-count">
-        {{ state.adminGroups.length }} 个分组 · {{ state.adminUngrouped }} 人无分组
+        {{ state.adminGroupTotal }} 个分组 · {{ state.adminUngrouped }} 人无分组
       </span>
       <span v-else-if="state.adminUsage?.enabled" class="head-count">
         合计 {{ formatTokens(state.adminUsage.total.tokens) }} tokens · {{ listedNote }}
       </span>
 
       <div class="head-right">
+        <!--
+          同一个搜索框，两种行为，故意不统一：
+
+          账号页  **服务端搜**（`setUserSearch` 压 250ms 再发请求）。账号是唯一
+                  一个会无上限增长的清单，在已加载的那几页上 filter 等于
+                  "只搜当前这一页"，而搜不到的人看起来就像不存在。
+          其余页  在已加载的行上就地 filter。模型天然有界（一页就装完了）；
+                  用量页按 token 排序，服务端搜要在聚合结果上再套一层筛选，
+                  而那一页的用法是"看前几名"不是"找某一个人" ——
+                  所以它会在筛不全时明说（见 searchScopeNote）。
+        -->
         <div v-if="state.adminTab !== 'groups'" class="search">
           <AppIcon name="search" :size="14" />
           <input
-            v-model="state.adminSearch"
+            :value="state.adminSearch"
             type="search"
             :placeholder="state.adminTab === 'usage' ? '搜用户名或模型'
               : state.adminTab === 'models' ? '搜模型名 / ID / 地址' : '搜用户名'"
+            @input="onSearch($event.target.value)"
           />
         </div>
         <!-- 维度与时间窗紧挨着刷新：它们是同一类动作（换一份要看的数） -->
@@ -759,7 +817,23 @@ function partialNote(row) {
           </tbody>
         </table>
 
-        <p v-else class="empty">没有匹配的账号。</p>
+        <p v-else class="empty">
+          {{ state.adminSearch.trim() ? '没有匹配的账号。' : '还没有账号。' }}
+        </p>
+
+        <!--
+          翻页入口。`hasMore` 由服务端说了算，不靠"这一页装满了没"猜 ——
+          那种猜法在"最后一页恰好装满"时会多画一个点了没反应的按钮。
+        -->
+        <button
+          v-if="state.adminUsersHasMore"
+          type="button"
+          class="load-more"
+          :disabled="state.adminUsersLoadingMore"
+          @click="loadMoreUsers"
+        >
+          {{ state.adminUsersLoadingMore ? '加载中…' : '加载更多账号' }}
+        </button>
 
         <!--
           ── 本部署 ──
@@ -1064,6 +1138,16 @@ function partialNote(row) {
             : '还没有配置任何模型。点右上角「添加模型」，填上 OpenAI 兼容端点的地址与 Key 即可。' }}
         </p>
 
+        <button
+          v-if="state.adminModelsHasMore"
+          type="button"
+          class="load-more"
+          :disabled="state.adminModelsLoadingMore"
+          @click="loadMoreModels"
+        >
+          {{ state.adminModelsLoadingMore ? '加载中…' : '加载更多模型' }}
+        </button>
+
         <!--
           排序不是装饰：**列表里的第一个就是用户没有指定模型时用的那个**。
           这句话必须写在页面上，否则"默认模型是哪个"只能靠试。
@@ -1232,6 +1316,16 @@ function partialNote(row) {
           还没有分组。不建分组也能用 —— 那样所有人都能用所有启用的模型。
           要区别对待时（比如只给一部分人开贵的模型），在这里建一个。
         </p>
+
+        <button
+          v-if="state.adminGroupsHasMore"
+          type="button"
+          class="load-more"
+          :disabled="state.adminGroupsLoadingMore"
+          @click="loadMoreGroups"
+        >
+          {{ state.adminGroupsLoadingMore ? '加载中…' : '加载更多分组' }}
+        </button>
       </template>
 
       <!-- ══════════ Token 用量 ══════════ -->
@@ -1436,6 +1530,23 @@ function partialNote(row) {
           <p v-else class="empty">
             {{ state.adminSearch.trim() ? '没有匹配的行。' : byModel ? '这段时间还没有任何模型产生用量。' : '没有账号。' }}
           </p>
+
+          <!--
+            搜索只在已加载的行里做（这一页按 token 排序，服务端搜要在聚合结果上
+            再套一层筛选）。所以一边搜一边还有下一页时必须说出来 ——
+            否则"搜不到"与"这个人真的没有用量"长得一模一样。
+          -->
+          <p v-if="searchScopeNote" class="hint">{{ searchScopeNote }}</p>
+
+          <button
+            v-if="state.adminUsageHasMore"
+            type="button"
+            class="load-more"
+            :disabled="state.adminUsageLoadingMore"
+            @click="loadMoreUsage"
+          >
+            {{ state.adminUsageLoadingMore ? '加载中…' : (byModel ? '加载更多模型' : '加载更多账号') }}
+          </button>
         </template>
       </template>
     </section>
@@ -1710,6 +1821,33 @@ function partialNote(row) {
   color: var(--muted-foreground);
   font-size: 11.5px;
   line-height: 1.6;
+}
+
+/*
+  ── 翻页按钮 ──
+  四张表共用。样式与侧栏那个「加载更早的对话」一致（AppSidebar.vue）：
+  它是一个低调的整行按钮，不该看起来像页面上的主操作 ——
+  管理台真正的动作是禁用、改角色、删模型那几个。
+*/
+.load-more {
+  width: 100%;
+  margin: 8px 0 2px;
+  padding: 9px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 12.5px;
+  text-align: center;
+  cursor: pointer;
+}
+.load-more:hover:not(:disabled) {
+  background: var(--muted);
+  color: var(--foreground);
+}
+.load-more:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 /* ── 用户表 ── */

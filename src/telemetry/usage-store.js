@@ -44,10 +44,46 @@
  * 掉的那一瞬间都会让它们差一点。对外收钱要以网关那份为准。
  */
 
+import { PAGE_DEFAULT, decodeCursor, encodeCursor, finishPage } from '../persistence/page.js'
+
 import { costOf, costOfRows, priceRow, round } from './pricing.js'
 
 /** 时间窗的上限：一年。再往前的账翻起来意义不大，而无上限等于允许一次全表扫 */
 const MAX_DAYS = 365
+
+/**
+ * 一行最多带几个 children。
+ *
+ * 只有**按模型看**那一页真的需要这个上限：那一页的 children 是"用了这个模型的人"，
+ * 会跟着人数涨，而它是内嵌在每一行里下发的 —— 也就是说光把行分页并不能把
+ * 响应体收住，一个被所有人使用的模型自己就能拖回整个用户表。
+ *
+ * 按用户看那一页不受影响（children 是"他用过的模型"，本来就是十几个的量级），
+ * 但也走同一个上限：两边不同的话，`childrenTruncated` 这个标记在哪一页上会出现
+ * 就成了要去查代码才知道的事。
+ */
+const CHILD_MAX = 20
+
+/**
+ * idle 段最多探几页账号。见 summary 里那一段 —— 它挡的是"绝大多数账号都有用量"
+ * 时，为了凑满一页而无限翻账号表。
+ */
+const IDLE_PROBE_MAX = 10
+
+/**
+ * 用量表的游标。三段：
+ *
+ *   used   有台账记录的人，按 token 降序（`t` 是 token 数，`u` 是决胜的用户名）
+ *   idle   台账里一行都没有的账号，按用户名升序（`u` 是上一页最后一个用户名）
+ *   model  按模型看那一页（`t` + 决胜的模型 id `m`）
+ *
+ * 为什么用户维要分成两段：这张表以**账号**为准做左连接（没跑过任何 run 的人
+ * 也要有一行 0，否则"这个人没用过"和"这个人不存在"在界面上长得一样），
+ * 而那两拨人住在两张表里、按两个不同的键排序。合成一条 SQL 要跨 ap_usage 和
+ * ap_kv 做 LEFT JOIN —— 那等于让用量这一层知道账号存在哪张表里，
+ * 而它现在连这件事都不需要知道（账号是调用方以回调的形式传进来的）。
+ */
+const validCursor = (value) => ['used', 'idle', 'model'].includes(value.s)
 
 /**
  * `days` 收口成一个 Date（或 null=不限时间）。
@@ -95,26 +131,27 @@ const withTokens = (rows) => rows.map((row) => ({ ...row, tokens: (row.input || 
 const byTokensThen = (key) => (a, b) => b.tokens - a.tokens || (a[key] < b[key] ? -1 : a[key] > b[key] ? 1 : 0)
 
 /**
- * 把「用户 × 模型」的交叉表按某一维折叠起来。
+ * 把「用户 × 模型」的明细行按 `dimension` 归堆，供上层挂到对应的行下面。
  *
- * `dimension` 是要留下的那一维（'username' 或 'modelId'），另一维成为每行里的
- * `children`。两个视图（按用户 / 按模型）**共用这一个函数**，所以它们的口径
- * 不可能对不上 —— 各写一遍的话，"两页的总计差了一点"这种错谁也说不清哪页是对的。
+ * ── 它替掉的是从前那个 pivot() ──────────────────────────────────────────
+ *
+ * pivot 做两件事：归堆 children，**顺带把父行的数也加出来**。那在"一次把整张
+ * 交叉表捞回来"的年代是对的 —— 父行的数除了从 children 加，没有别的来源。
+ *
+ * 分页之后父行的数来自 SQL 的聚合（`topUsers` / `byModel`），是**全窗口**的口径；
+ * 而 children 可能是截断过的（见 CHILD_MAX）。这时候再去从 children 加一遍父行，
+ * 加出来的会是一个偏小、且看起来很正常的数字。所以这个函数只归堆，不求和 ——
+ * 父行的数只有一个来源，也就不存在两个来源对不上的可能。
+ *
+ * @param {string} dimension 归堆用的键（'username' 或 'modelId'）
+ * @param {string} other     另一维，写进每个 child 里
+ * @returns {Map<string, object[]>} 每堆内部按 token 降序（同数按名字）
  */
-export function pivot(rows, dimension) {
-  const other = dimension === 'username' ? 'modelId' : 'username'
-  const groups = new Map()
-  for (const row of rows) {
-    const key = row[dimension]
-    const current = groups.get(key)
-      || { [dimension]: key, runs: 0, input: 0, output: 0, cacheRead: 0, lastAt: null, children: [] }
-    current.runs += row.runs || 0
-    current.input += row.input || 0
-    current.output += row.output || 0
-    current.cacheRead += row.cacheRead || 0
-    // 时间是 ISO 串，字典序就是时间序 —— 不必解析成 Date 再比
-    if (row.lastAt && (!current.lastAt || row.lastAt > current.lastAt)) current.lastAt = row.lastAt
-    current.children.push({
+export function groupChildren(rows, dimension, other) {
+  const out = new Map()
+  for (const row of rows || []) {
+    const list = out.get(row[dimension]) || []
+    list.push({
       [other]: row[other],
       runs: row.runs || 0,
       input: row.input || 0,
@@ -123,15 +160,196 @@ export function pivot(rows, dimension) {
       lastAt: row.lastAt || null,
       tokens: (row.input || 0) + (row.output || 0),
     })
-    groups.set(key, current)
+    out.set(row[dimension], list)
   }
-  return withTokens([...groups.values()])
-    .map((row) => ({ ...row, children: row.children.sort(byTokensThen(other)) }))
-    .sort(byTokensThen(dimension))
+  for (const list of out.values()) list.sort(byTokensThen(other))
+  return out
 }
 
 export function createUsageStore({ storage = null, logger = console } = {}) {
   const ledger = storage?.usage || null
+
+  /**
+   * 按模型看的那一页。
+   *
+   * 行来自 `byModel()`，**已经全取回来了**（行数 = 窗口里出现过的模型数，有界，
+   * 而且合计和计价本来就要用它），所以这里在内存里按游标切一段就够 ——
+   * 再往数据库跑一趟只是重复同一个聚合。
+   *
+   * children 就完全不一样了：那是"用了这个模型的人"，跟着人数涨。它走
+   * `topUsersPerModel()` 一个有界的 top-N 查询，多取一条用来判断截没截断。
+   */
+  async function modelPage({ modelRows, since, prices, cursor, limit }) {
+    const from = cursor?.s === 'model'
+      ? { tokens: Number(cursor.t) || 0, modelId: String(cursor.u || '') }
+      : null
+    // modelRows 已经是 (tokens 降序, modelId 升序)，过滤保序，不必重排
+    const rest = from
+      ? modelRows.filter((row) => row.tokens < from.tokens
+        || (row.tokens === from.tokens && row.modelId > from.modelId))
+      : modelRows
+    // 这个游标要交给浏览器，所以在这里编码（finishPage 只算，不编码）
+    const { page, hasMore, nextCursor } = finishPage(
+      rest.slice(0, limit + 1),
+      limit,
+      (row) => encodeCursor({ s: 'model', t: row.tokens, u: row.modelId }),
+    )
+
+    const kids = page.length
+      ? await ledger.topUsersPerModel({ since, modelIds: page.map((row) => row.modelId), limit: CHILD_MAX + 1 })
+      : []
+    const grouped = groupChildren(kids, 'modelId', 'username')
+    const models = page.map((row) => {
+      const all = grouped.get(row.modelId) || []
+      /**
+       * 截断只影响**展示的那一串人**，不影响这一行的钱：按模型看时
+       * `priceRow` 的金额是从行自己的 token 数乘出来的（一行一个模型一个价），
+       * 与列了几个人无关。所以先截断再计价是安全的 —— 按用户看那一页不是这样，
+       * 见 decorateUsed。
+       */
+      const withKids = {
+        ...row,
+        users: all.slice(0, CHILD_MAX),
+        usersTruncated: all.length > CHILD_MAX,
+      }
+      return prices ? priceRow(withKids, prices, 'users') : withKids
+    })
+    // 只回 models 这一份，不带一个空的 users —— 前端就不可能拿错那一维
+    return { models, hasMore, nextCursor }
+  }
+
+  /** 台账里有记录的那些人 → 界面上的一行（补上 role / disabled / children） */
+  async function decorateUsed(rows, { since, prices, accounts }) {
+    if (!rows.length) return []
+    const names = rows.map((row) => row.username)
+    const [kids, known] = await Promise.all([
+      ledger.byUserAndModel({ since, usernames: names }),
+      accounts?.many ? accounts.many(names) : Promise.resolve([]),
+    ])
+    const grouped = groupChildren(kids, 'username', 'modelId')
+    const info = new Map(known.map((account) => [account.username, account]))
+
+    return rows.map((row) => {
+      const all = grouped.get(row.username) || []
+      /**
+       * ⚠️ **先计价，再截断。**
+       *
+       * 按用户看时这一行的钱是从 children 加出来的（各模型单价不同，见
+       * pricing.priceRow），所以拿截断后的 children 去算，会得到一个偏小、
+       * 却看起来完全正常的金额 —— pricing.js 文件头把这类错单列了一条。
+       * children 这一维本来就有界（一个部署里的模型是十几个），
+       * 真的截断是极端情况，但金额不能赌它不发生。
+       */
+      const priced = prices
+        ? priceRow({ ...row, models: all }, prices, 'models')
+        : { ...row, models: all }
+      const account = info.get(row.username)
+      return {
+        ...priced,
+        // 账号已经不在、账还留着：标出来。藏起来只会让合计对不上
+        ...(account ? { role: account.role || 'user', disabled: Boolean(account.disabled) } : { role: '', disabled: false, orphan: true }),
+        models: priced.models.slice(0, CHILD_MAX),
+        modelsTruncated: priced.models.length > CHILD_MAX,
+      }
+    })
+  }
+
+  /**
+   * 按用户看的那一页。**跨两段拼出来**（见文件上方 validCursor 那段的说明）：
+   *
+   *   used  台账里有记录的人，token 降序
+   *   idle  台账里一行都没有的账号，用户名升序，各补一行 0
+   *
+   * 两段在**同一次请求里接上**，而不是让 used 段走完之后回一页空的 ——
+   * 用户点"加载更多"点出一页空白，看起来就是坏了。
+   */
+  async function userPage({ accounts, since, prices, cursor, limit }) {
+    /**
+     * 没跑过任何 run 的账号补的那一行零。
+     *
+     * 计价开着时它的 `cost` 是 **0 而不是 null**：这个人确实一分钱没花，
+     * 那是一个已知的事实，不是"不知道多少钱"。反过来写成 null，界面上
+     * 就会给一排从没用过的账号标"未定价"，而那与单价填没填毫无关系。
+     */
+    const blank = {
+      runs: 0, input: 0, output: 0, cacheRead: 0, tokens: 0, lastAt: null,
+      models: [], modelsTruncated: false,
+      ...(prices ? { cost: 0, costPartial: false, unpricedModels: [] } : {}),
+    }
+
+    // 多凑一条，最后交给 finishPage 判断"还有没有下一页"
+    const target = limit + 1
+    const out = []
+    let state = cursor?.s === 'used' || cursor?.s === 'idle' ? cursor : { s: 'used' }
+    let probes = 0
+
+    while (out.length < target) {
+      const need = target - out.length
+
+      if (state.s === 'used') {
+        const from = state.t === undefined || state.t === null
+          ? null
+          : { tokens: Number(state.t) || 0, username: String(state.u || '') }
+        // 存储层自己会多取一条，所以 rows.length > need 才表示这一段还没完
+        const rows = await ledger.topUsers({ since, cursor: from, limit: need })
+        const got = rows.slice(0, need)
+        for (const row of await decorateUsed(got, { since, prices, accounts })) {
+          out.push({ row, cursor: { s: 'used', t: row.tokens, u: row.username } })
+        }
+        if (rows.length > need) break
+        // 这一段翻完了，接着翻另一段
+        state = { s: 'idle', u: '' }
+        continue
+      }
+
+      /* ── idle 段 ── */
+      if (!accounts?.page) break
+      probes += 1
+      const probe = await accounts.page({ cursor: String(state.u || ''), limit: need })
+      /**
+       * 这一批账号里，哪些在窗口内有台账记录 —— 有的已经在 used 段出现过了，
+       * 这里必须跳过，否则同一个人会出现两次。
+       *
+       * 判据是"有没有台账行"，而不是"token 是不是 0"：一个只产生过缓存读入的人
+       * token 是 0，但他在 used 段里（那一段不筛 token），漏判就会重复。
+       */
+      const names = probe.items.map((item) => item.username)
+      const seen = new Set((await ledger.byUserAndModel({ since, usernames: names })).map((row) => row.username))
+      for (const account of probe.items) {
+        if (seen.has(account.username)) continue
+        out.push({
+          row: {
+            username: account.username,
+            role: account.role || 'user',
+            disabled: Boolean(account.disabled),
+            ...blank,
+          },
+          cursor: { s: 'idle', u: account.username },
+        })
+      }
+
+      if (!probe.hasMore) break
+      state = { s: 'idle', u: probe.nextCursor }
+      /**
+       * 这一页凑不满就再探一页账号 —— 但**探的次数要有上限**。
+       *
+       * 极端情况是"几乎所有账号在这个窗口里都有用量"：那时候每探一页账号
+       * 几乎全被上面那句 `seen.has` 滤掉，为了凑满 50 行可以一直探到账号表末尾，
+       * 而那正是这次改动要消灭的东西。探满 IDLE_PROBE_MAX 次就带着现有的行返回，
+       * `hasMore` 照实回 true —— 一页短一点是可以接受的，一次请求把全表翻一遍不是。
+       */
+      if (probes >= IDLE_PROBE_MAX) {
+        return {
+          users: out.slice(0, limit).map((item) => item.row),
+          hasMore: true,
+          nextCursor: encodeCursor(out.length > limit ? out[limit - 1].cursor : state),
+        }
+      }
+    }
+
+    const { page, hasMore, nextCursor } = finishPage(out, limit, (item) => encodeCursor(item.cursor))
+    return { users: page.map((item) => item.row), hasMore, nextCursor }
+  }
 
   return {
     /** 没有台账能力时整块关掉：接口回 `enabled: false`，界面画一句说明而不是空表 */
@@ -159,41 +377,69 @@ export function createUsageStore({ storage = null, logger = console } = {}) {
     },
 
     /**
-     * 管理台总表。一次查询（用户 × 模型的交叉表），转置成两个视图：
+     * 管理台总表，**一页一页地取**。两个视图：
      *
      *   group='user'   每个账号一行，`models` 是他用过的模型
      *   group='model'  每个模型一行，`users` 是用了它的人
      *
      * 两个方向都要有，因为要问的是两个问题：分账时问"这个人该付多少"，
-     * 选型和定价时问"这个模型吃掉了多少"。同一份交叉表转置得来，
-     * 所以两页的合计**天然相等**。
+     * 选型和定价时问"这个模型吃掉了多少"。
      *
-     * `accounts` 是账号清单（`users.list()` 的结果），只在 group='user' 时用得上：
-     * **以账号为准做左连接** —— 一个没跑过任何 run 的人也要出现在表里（一行 0），
-     * 否则"这个人没用过"和"这个人不存在"在界面上长得一样。反过来，台账里有而
-     * 账号清单里没有的用户名也要留着（标 orphan）—— 那是被删掉的账号留下的账，
-     * 藏起来只会让合计对不上。
+     * ── 从"一次查完再在 Node 里 pivot"改成分页，改了什么 ──────────────────
      *
-     * ⚠️ 模型这一维**没有**对应的左连接：可用模型清单是每个用户各自从 llminfo 拿的
-     * （见 credentials/broker.js），服务端没有一份"本部署有哪些模型"的权威清单。
-     * 所以这一页只列**真的被用过**的模型 —— 那也正是要算钱的那些。
+     * 从前这里是一句 `byUserAndModel({ since })`：把窗口内**全部**的
+     * (用户 × 模型) 组合捞回来，在 JS 里 pivot、排序、再和**全部账号**做左连接。
+     * 行数跟着人数涨，而管理员点开这一页要等的就是它 —— 而且那份等待会
+     * 随时间线性变长，上线时完全看不出来。
+     *
+     * 现在：
+     *   - **行**按需取。用户维走 `ledger.topUsers()`（聚合上的 keyset 翻页），
+     *     模型维走 `ledger.byModel()`（行数天然有界，在这里切片）。
+     *   - **children** 只给这一页的行取，各自有界（见 CHILD_MAX）。
+     *   - **合计仍然是全局的**，见下面 `byModel` 那一段。
+     *
+     * ── 合计为什么还是准的 ──────────────────────────────────────────────
+     *
+     * `total` / `pricing` / `modelCount` 全部从 `ledger.byModel()` 那一个查询来。
+     * 台账里**每一行都带 model_id**，所以"按模型分组求和"加起来就是全窗口的总量 ——
+     * 不是这一页的总量。这一点必须是这样：一张"合计只算了当前这一页"的用量表
+     * 会让管理员每翻一页看到一个不同的总数，而他没有任何办法看出哪个是对的。
+     *
+     * 顺带的好处是那一个查询同时喂了三件事（合计、计价、按模型看的那一页），
+     * 于是它们之间**不可能对不上**。
+     *
+     * @param {object} params.accounts 账号侧的两个回调 —— `page({cursor, limit})`
+     *   与 `many(usernames)`。**传的是回调而不是账号数组**：数组的写法要求调用方
+     *   先把全部账号取出来，而那正是这次要消灭的东西。用回调也让这一层
+     *   继续不知道账号存在哪张表里（合成一条跨表 LEFT JOIN 就得知道了）。
+     * @param {string} [params.cursor] 上一页回的 nextCursor
+     * @returns {Promise<object>} 除了原有字段，多 `hasMore` / `nextCursor`
      */
-    async summary({ accounts = [], days = 30, group = 'user', prices = null, currency = '', now = Date.now() } = {}) {
+    async summary({
+      accounts = null, days = 30, group = 'user', prices = null, currency = '',
+      now = Date.now(), cursor: rawCursor = '', limit: rawLimit = PAGE_DEFAULT,
+    } = {}) {
       const since = resolveSince(days, { now })
       const view = group === 'model' ? 'model' : 'user'
+      const limit = Math.max(1, Math.floor(Number(rawLimit) || PAGE_DEFAULT))
       if (!ledger) {
-        return { enabled: false, group: view, since: null, users: [], models: [], modelCount: 0, total: sumBuckets([]) }
+        return {
+          enabled: false, group: view, since: null, users: [], models: [],
+          modelCount: 0, userCount: 0, total: sumBuckets([]), hasMore: false, nextCursor: '',
+        }
       }
 
-      const rows = await ledger.byUserAndModel({ since })
       /**
-       * 全局的金额与"哪些模型没定价"都从**台账原始行**算，不从拼好的行算。
+       * 一个有界的查询（每个模型一行），同时承担全局合计、计价、以及按模型看的那一页。
        *
-       * 与 `total` 从 rows 算是同一个理由：拼出来的行含补零的账号行，
-       * 加起来一样，但少一次"补零补错了"的可能。未定价清单尤其如此 ——
-       * 从补零行里收，会把"从来没用过任何模型"的人也算成一次未定价。
+       * 未定价清单也从这里收，而不是从拼好的行里收：后者含补零的账号行，
+       * 会把"从来没用过任何模型"的人也算成一次未定价。
        */
-      const money = prices ? costOfRows(rows, prices) : null
+      const [modelRows, userCount] = await Promise.all([
+        ledger.byModel({ since }),
+        ledger.countActiveUsers({ since }),
+      ])
+      const money = prices ? costOfRows(modelRows, prices) : null
       const base = {
         enabled: true,
         group: view,
@@ -212,55 +458,26 @@ export function createUsageStore({ storage = null, logger = console } = {}) {
             unpricedModels: money.unpriced,
           }
           : { enabled: false },
-        /**
-         * 合计只从台账行来，不从拼出来的行来。
-         * 后者含补零的行，加起来一样 —— 但少一次"补零补错了"的可能。
-         */
-        total: sumBuckets(rows),
+        /** ⚠️ 全窗口的合计，不是这一页的 —— 见方法头 */
+        total: sumBuckets(modelRows),
         /**
          * 这个窗口里出现过几个模型。**两个视图都回**：按用户看的时候，
-         * "这段时间在用几个模型"同样是管理员要知道的一个数（多模型切换开起来之后
-         * 它会变），而那一页的行是按人分的，自己数不出来。
+         * "这段时间在用几个模型"同样是管理员要知道的一个数，
+         * 而那一页的行是按人分的，自己数不出来。
          */
-        modelCount: new Set(rows.map((row) => row.modelId)).size,
+        modelCount: modelRows.length,
+        /**
+         * 这个窗口里有几个人产生过用量。与 modelCount 同一个理由 ——
+         * 表头那句"N 人在用"从前是数 `users.filter(tokens > 0).length`，
+         * 分页之后那会变成"当前加载了几行"，每点一次加载更多就涨一截。
+         */
+        userCount,
       }
 
-      if (view === 'model') {
-        const models = pivot(rows, 'modelId')
-          .map((row) => renameChildren(row, 'users'))
-          .map((row) => (prices ? priceRow(row, prices, 'users') : row))
-        return { ...base, models }
-      }
+      const cursor = decodeCursor(rawCursor, validCursor)
 
-      const users = pivot(rows, 'username')
-        .map((row) => renameChildren(row, 'models'))
-        .map((row) => (prices ? priceRow(row, prices, 'models') : row))
-      const seen = new Map(users.map((row) => [row.username, row]))
-      /**
-       * 没跑过任何 run 的账号补的那一行零。
-       *
-       * 计价开着时它的 `cost` 是 **0 而不是 null**：这个人确实一分钱没花，
-       * 那是一个已知的事实，不是"不知道多少钱"。反过来写成 null，界面上
-       * 就会给一排从没用过的账号标"未定价"，而那与单价填没填毫无关系。
-       */
-      const blank = {
-        runs: 0, input: 0, output: 0, cacheRead: 0, tokens: 0, lastAt: null, models: [],
-        ...(prices ? { cost: 0, costPartial: false, unpricedModels: [] } : {}),
-      }
-      const merged = accounts.map((account) => {
-        const row = seen.get(account.username)
-        seen.delete(account.username)
-        return {
-          username: account.username,
-          role: account.role || 'user',
-          disabled: Boolean(account.disabled),
-          ...(row || blank),
-        }
-      })
-      // 剩下的就是账号已经不在、账还留着的
-      for (const row of seen.values()) merged.push({ role: '', disabled: false, orphan: true, ...row })
-
-      return { ...base, users: merged.sort(byTokensThen('username')) }
+      if (view === 'model') return { ...base, ...await modelPage({ modelRows, since, prices, cursor, limit }) }
+      return { ...base, ...await userPage({ accounts, since, prices, cursor, limit }) }
     },
 
     /**
@@ -364,15 +581,4 @@ function rollupDaily(daily, currency) {
     known += 1
   }
   return { enabled: true, currency, cost: known ? round(total) : null, partial }
-}
-
-/**
- * `children` 换成一个说得清是什么的名字（`models` / `users`）。
- *
- * pivot 用的是中性的 `children`（它不知道自己在折哪一维），但接口回出去的字段名
- * 是给人读的：`users[0].models` 一眼看得懂，`users[0].children` 要猜。
- */
-function renameChildren(row, name) {
-  const { children, ...rest } = row
-  return { ...rest, [name]: children }
 }

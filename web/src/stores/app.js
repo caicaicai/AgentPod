@@ -389,10 +389,10 @@ export async function changePassword(oldPassword, newPassword) {
  * openAdmin / setAdminTab 另外 import 一次：本文件的路由那一段要调它们。
  */
 export {
-  refreshUsers, openAdmin, closeAdmin,
-  refreshUsage, setUsageDays, setUsageGroup, openUsageRow,
-  refreshModels, createModel, updateModel, setModelEnabled, deleteModel,
-  refreshGroups, createGroup, updateGroup, deleteGroup, setUserGroup,
+  refreshUsers, loadMoreUsers, setUserSearch, openAdmin, closeAdmin,
+  refreshUsage, loadMoreUsage, setUsageDays, setUsageGroup, openUsageRow,
+  refreshModels, loadMoreModels, createModel, updateModel, setModelEnabled, deleteModel,
+  refreshGroups, loadMoreGroups, createGroup, updateGroup, deleteGroup, setUserGroup,
   setAdminTab, createUser, setUserDisabled, setUserRole, resetUserPassword,
 } from './admin.js'
 import { openAdmin, setAdminTab } from './admin.js'
@@ -479,8 +479,20 @@ export function logout() {
   // 角色跟着清：不清的话，换个人登录进来会先看到上一个人的管理员入口
   state.account = null
   state.adminUsers = []
+  /**
+   * 游标、搜索词和那两个全局计数跟着账号清单一起清。
+   *
+   * 尤其是游标：留着的话，换个人登录进来第一次"加载更多"会从上一个人翻到的
+   * 位置接着往下 —— 于是他看到的第一页账号是从字母 M 开始的。
+   */
+  state.adminUsersCursor = ''
+  state.adminUsersHasMore = false
+  state.adminSearch = ''
+  state.adminStats = { total: 0, admins: 0 }
   // 用量是按人名列出来的，属于上一个人才看得到的东西：跟账号清单一起清
   state.adminUsage = null
+  state.adminUsageCursor = ''
+  state.adminUsageHasMore = false
   state.adminUsageOpen = ''
   state.adminUsageTrend = null
   state.adminUsageGroup = 'user'

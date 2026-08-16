@@ -16,6 +16,7 @@ import assert from 'node:assert/strict'
 import { costOf, costOfRows, priceRow, round } from '../src/telemetry/pricing.js'
 import { createUsageStore } from '../src/telemetry/usage-store.js'
 import { createModelStore } from '../src/models/model-store.js'
+import { fakeAccounts } from './helpers/fake-accounts.js'
 import { createMemoryStorage } from './helpers/memory-storage.js'
 
 const silent = { info() {}, warn() {}, error() {}, debug() {} }
@@ -224,14 +225,14 @@ describe('汇总接口带上金额', () => {
 
   test('不传 prices 时形状与从前完全一致 —— 没配价的部署不受影响', async () => {
     const { usage } = await seed()
-    const summary = await usage.summary({ accounts: [{ username: 'zhangsan' }] })
+    const summary = await usage.summary({ accounts: fakeAccounts([{ username: 'zhangsan' }]) })
     assert.equal(summary.pricing.enabled, false)
     assert.equal('cost' in summary.users[0], false)
   })
 
   test('传了就每行带金额，未定价的模型点名回来', async () => {
     const { usage, prices } = await seed()
-    const summary = await usage.summary({ accounts: [{ username: 'zhangsan' }], prices, currency: 'USD' })
+    const summary = await usage.summary({ accounts: fakeAccounts([{ username: 'zhangsan' }]), prices, currency: 'USD' })
 
     assert.equal(summary.pricing.enabled, true)
     assert.equal(summary.pricing.currency, 'USD')
@@ -251,7 +252,7 @@ describe('汇总接口带上金额', () => {
   test('补零的账号金额是 0，不是"未定价"', async () => {
     const { usage, prices } = await seed()
     const summary = await usage.summary({
-      accounts: [{ username: 'zhangsan' }, { username: 'lisi' }],
+      accounts: fakeAccounts([{ username: 'zhangsan' }, { username: 'lisi' }]),
       prices,
       currency: 'USD',
     })
@@ -262,8 +263,8 @@ describe('汇总接口带上金额', () => {
 
   test('两个视图的合计相等 —— 它们是同一份交叉表的转置', async () => {
     const { usage, prices } = await seed()
-    const byUser = await usage.summary({ accounts: [{ username: 'zhangsan' }], prices, group: 'user' })
-    const byModel = await usage.summary({ accounts: [{ username: 'zhangsan' }], prices, group: 'model' })
+    const byUser = await usage.summary({ accounts: fakeAccounts([{ username: 'zhangsan' }]), prices, group: 'user' })
+    const byModel = await usage.summary({ accounts: fakeAccounts([{ username: 'zhangsan' }]), prices, group: 'model' })
     assert.equal(byUser.pricing.cost, byModel.pricing.cost)
   })
 

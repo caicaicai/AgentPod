@@ -320,6 +320,119 @@ describe('管理员接口', () => {
     assert.equal((await call('PATCH', '/v1/admin/users/ghost', { token: admin, body: { newPassword: 'whatever-8' } })).status, 404)
     assert.match((await call('PATCH', '/v1/admin/users/admin', { token: admin, body: {} })).body.message, /没有可更新的字段/)
   })
+
+  /**
+   * ── 账号清单的分页 ──────────────────────────────────────────────────
+   *
+   * 从前这条接口是 `users.list()`：一次把全部账号读进 Node 再整个下发。
+   * 这一组钉的是改完之后的三件事 —— 翻页不漏不重、搜索**在服务端**做、
+   * 以及那两个计数是全局的而不是"当前这一页有几条"。
+   */
+  describe('分页', () => {
+    /** 名字刻意打乱着建，验证顺序是服务端排的而不是碰巧的插入顺序 */
+    const seedUsers = async (admin, names) => {
+      for (const username of names) {
+        await call('POST', '/v1/admin/users', { token: admin, body: { username, password: `${username}-password` } })
+      }
+    }
+
+    test('按用户名升序翻页，翻到底不漏不重', async () => {
+      const admin = await asAdmin()
+      await seedUsers(admin, ['carol', 'bob', 'erin', 'dave'])
+
+      const seen = []
+      let cursor = ''
+      for (let guard = 0; guard < 10; guard += 1) {
+        const { body } = await call('GET', `/v1/admin/users?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { token: admin })
+        seen.push(...body.users.map((user) => user.username))
+        if (!body.hasMore) break
+        cursor = body.nextCursor
+      }
+      assert.deepEqual(seen, ['admin', 'bob', 'carol', 'dave', 'erin'])
+      assert.equal(new Set(seen).size, seen.length, '一个都不许重复')
+    })
+
+    test('最后一页恰好装满时，hasMore 说的是实话（不多画一个空页）', async () => {
+      const admin = await asAdmin()
+      await seedUsers(admin, ['bob'])
+      const { body } = await call('GET', '/v1/admin/users?limit=2', { token: admin })
+      assert.deepEqual(body.users.map((user) => user.username), ['admin', 'bob'])
+      assert.equal(body.hasMore, false, '正好两条两条，后面没有了')
+      assert.equal(body.nextCursor, '')
+    })
+
+    /**
+     * 搜索必须在服务端做。留在前端的话它只作用于**已经加载的那几页** ——
+     * 而一个搜不到的人在界面上看起来就像不存在。
+     */
+    test('搜索在服务端做：搜得到没在第一页上的人', async () => {
+      const admin = await asAdmin()
+      await seedUsers(admin, ['bob', 'carol', 'zoe'])
+      const { body } = await call('GET', '/v1/admin/users?limit=1&q=zo', { token: admin })
+      assert.deepEqual(body.users.map((user) => user.username), ['zoe'])
+      assert.equal(body.query, 'zo', '带着搜索词回，界面据它判断这一页是不是搜出来的')
+    })
+
+    /** 通配符不转义的话，搜一个 `%` 就是"匹配全部" —— 一次本该缩小范围的搜索反而捞回整张表 */
+    test('搜索里的 % 是普通字符，不是通配符', async () => {
+      const admin = await asAdmin()
+      await seedUsers(admin, ['bob'])
+      assert.deepEqual((await call('GET', '/v1/admin/users?q=%25', { token: admin })).body.users, [])
+    })
+
+    /**
+     * 表头那两个数**必须是全局的**。
+     *
+     * admins 尤其要紧：界面靠它判断"这是不是最后一个管理员"（最后一个不能降级
+     * 也不能禁用）。从已加载的那一页去数的话，翻到第二页会数出"只剩一个"，
+     * 于是几个本该能点的按钮无缘无故变灰。
+     */
+    test('stats 是全库的数，不是这一页的', async () => {
+      const admin = await asAdmin()
+      await seedUsers(admin, ['bob', 'carol'])
+      await call('PATCH', '/v1/admin/users/carol', { token: admin, body: { role: 'admin' } })
+
+      const { body } = await call('GET', '/v1/admin/users?limit=1', { token: admin })
+      assert.equal(body.users.length, 1, '这一页只要一条')
+      assert.equal(body.stats.total, 3, '但总数是三个账号')
+      assert.equal(body.stats.admins, 2, 'admin + carol')
+    })
+
+    test('被禁用的管理员不算"在岗" —— 他登不进来，也就救不了场', async () => {
+      const admin = await asAdmin()
+      await seedUsers(admin, ['carol'])
+      await call('PATCH', '/v1/admin/users/carol', { token: admin, body: { role: 'admin' } })
+      await call('PATCH', '/v1/admin/users/carol', { token: admin, body: { disabled: true } })
+      assert.equal((await call('GET', '/v1/admin/users', { token: admin })).body.stats.admins, 1)
+    })
+
+    /**
+     * 乱七八糟的游标**不报错**，也不影响那两个全局计数。
+     *
+     * ⚠️ 这里要说清楚它到底做了什么，别写成"退回第一页"——**它不会**。
+     * 账号的游标就是用户名本身（排序键 = 主键），所以一个乱码游标的效果是
+     * "从这个字符串之后开始"，很可能是一页空的。这是单列 keyset 固有的：
+     * 没有任何办法把"乱码"和"一个合法的位置"分开。
+     *
+     * 能这样是因为这个游标**不进地址栏**（只在「加载更多」那条路上来回传），
+     * 与会话列表那个不同 —— 那边的游标会被收藏、会跨版本带回来，
+     * 所以它是编码过的、有形状校验的，解不开就真的退回第一页。
+     */
+    test('乱码游标不炸，也不影响全局计数', async () => {
+      const admin = await asAdmin()
+      await seedUsers(admin, ['bob'])
+      const { status, body } = await call('GET', '/v1/admin/users?cursor=not-a-real-cursor', { token: admin })
+      assert.equal(status, 200)
+      assert.ok(Array.isArray(body.users))
+      assert.equal(body.stats.total, 2, '这一页取到什么都不该影响"一共几个账号"')
+    })
+
+    test('limit 超过上限被收口，不能靠一条 ?limit=1000000 把内存拉满', async () => {
+      const admin = await asAdmin()
+      const { status } = await call('GET', '/v1/admin/users?limit=1000000', { token: admin })
+      assert.equal(status, 200)
+    })
+  })
 })
 
 /**
@@ -535,13 +648,140 @@ describe('Token 用量', () => {
     const { body } = await call('GET', '/v1/admin/usage', { token: admin })
     assert.deepEqual(
       Object.keys(body.users[0]).sort(),
-      ['cacheRead', 'disabled', 'input', 'lastAt', 'models', 'output', 'role', 'runs', 'tokens', 'username'],
+      // modelsTruncated：这一行的 models 是不是被截过（一行最多带 20 个）。
+      // 它是一个布尔，不是内容 —— 但也要在这张清单里，否则这条断言就白写了
+      ['cacheRead', 'disabled', 'input', 'lastAt', 'models', 'modelsTruncated',
+        'output', 'role', 'runs', 'tokens', 'username'],
     )
     // 嵌进去的那一层同样只有数：模型名 + 用量，没有 sessionKey、没有正文
     assert.deepEqual(
       Object.keys(body.users[0].models[0]).sort(),
       ['cacheRead', 'input', 'lastAt', 'modelId', 'output', 'runs', 'tokens'],
     )
+  })
+
+  /**
+   * ── 用量表的分页 ────────────────────────────────────────────────────
+   *
+   * 这张表的翻页比账号那张难，因为它的行来自**两处**：台账里有记录的人
+   * （按 token 降序）和一行都没有的账号（按用户名升序，各补一行 0）。
+   * 两段在同一次请求里接上，所以这一组重点钉三件事：
+   *
+   *   1. 两段拼起来**不漏不重**（尤其是段与段的交界）；
+   *   2. 顶上那几个合计**不跟着翻页变** —— 一张每翻一页总数就变的表，
+   *      管理员没有任何办法判断哪个数是对的；
+   *   3. 坏游标退回第一页（这个游标是编码过的，形状对不上就当没有）。
+   */
+  describe('分页', () => {
+    const seedPeople = async (admin, names) => {
+      for (const username of names) {
+        await call('POST', '/v1/admin/users', { token: admin, body: { username, password: `${username}-password` } })
+      }
+    }
+
+    /** 一次把整张表翻完，回所有行的主键 */
+    const drain = async (token, query = '') => {
+      const seen = []
+      let cursor = ''
+      let pages = 0
+      for (; pages < 20; pages += 1) {
+        const url = `/v1/admin/usage?limit=2${query}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+        const { body } = await call('GET', url, { token })
+        seen.push(...(body.users || body.models || []).map((row) => row.username ?? row.modelId))
+        if (!body.hasMore) break
+        cursor = body.nextCursor
+      }
+      return seen
+    }
+
+    test('有用量的在前（token 降序），没用量的账号接在后面（用户名升序）', async () => {
+      const admin = await asAdmin()
+      await seedPeople(admin, ['bob', 'carol', 'dave'])
+      await seed({ username: 'carol', input: 900, output: 0 })
+      await seed({ username: 'bob', input: 100, output: 0 })
+
+      const seen = await drain(admin)
+      assert.deepEqual(seen, ['carol', 'bob', 'admin', 'dave'],
+        '900 / 100 在前；admin 与 dave 都没用量，按用户名排')
+      assert.equal(new Set(seen).size, seen.length, '交界处一个都不许重复')
+    })
+
+    /**
+     * 段与段的交界正好压在页边界上 —— 这是"两段拼一页"最容易出错的形态。
+     * 一页两条、有用量的正好两个人，于是第一页装满时 used 段刚好翻完。
+     */
+    test('两段的交界压在页边界上也不漏不重', async () => {
+      const admin = await asAdmin()
+      await seedPeople(admin, ['bob', 'carol', 'dave', 'erin'])
+      await seed({ username: 'carol', input: 900, output: 0 })
+      await seed({ username: 'bob', input: 100, output: 0 })
+
+      const seen = await drain(admin)
+      assert.deepEqual(seen, ['carol', 'bob', 'admin', 'dave', 'erin'])
+    })
+
+    /**
+     * 只产生过缓存读入的人 token 是 0，但他在台账里**有行**。
+     * 他必须只出现一次 —— 判"有没有台账行"而不是判"token 是不是 0"，
+     * 差别就在这种人身上（判错了他会在两段里各出现一次）。
+     */
+    test('只有缓存读入的人（token=0 但台账里有行）不会出现两次', async () => {
+      const admin = await asAdmin()
+      await seedPeople(admin, ['bob'])
+      await seed({ username: 'bob', input: 0, output: 0, cacheRead: 500 })
+
+      const seen = await drain(admin)
+      assert.equal(seen.filter((name) => name === 'bob').length, 1)
+      assert.deepEqual(seen.sort(), ['admin', 'bob'])
+    })
+
+    /** 合计是整个时间窗的，不是这一页的 —— 翻页时它一个字都不该动 */
+    test('翻页不改变顶上那几个合计', async () => {
+      const admin = await asAdmin()
+      await seedPeople(admin, ['bob', 'carol'])
+      await seed({ username: 'carol', modelId: 'gpt-4o', input: 900, output: 0, cacheRead: 0 })
+      await seed({ username: 'bob', modelId: 'tiny', input: 100, output: 0, cacheRead: 0 })
+
+      const first = await call('GET', '/v1/admin/usage?limit=1', { token: admin })
+      assert.equal(first.body.users.length, 1, '一页只要一行')
+      assert.equal(first.body.total.tokens, 1000, '合计是全窗口的：900 + 100')
+      assert.equal(first.body.modelCount, 2)
+      assert.equal(first.body.userCount, 2, '有几个人产生过用量 —— 不是"这一页几行"')
+
+      const second = await call('GET', `/v1/admin/usage?limit=1&cursor=${encodeURIComponent(first.body.nextCursor)}`, { token: admin })
+      assert.equal(second.body.total.tokens, 1000, '翻一页总数不能变')
+      assert.equal(second.body.modelCount, 2)
+      assert.equal(second.body.userCount, 2)
+    })
+
+    test('按模型看也分页，且合计与按用户看相等', async () => {
+      const admin = await asAdmin()
+      await seed({ modelId: 'gpt-4o', input: 900, output: 0, cacheRead: 0 })
+      await seed({ modelId: 'tiny', input: 100, output: 0, cacheRead: 0 })
+
+      const seen = await drain(admin, '&group=model')
+      assert.deepEqual(seen, ['gpt-4o', 'tiny'])
+
+      const byUser = await call('GET', '/v1/admin/usage', { token: admin })
+      const byModel = await call('GET', '/v1/admin/usage?group=model', { token: admin })
+      assert.deepEqual(byUser.body.total, byModel.body.total, '换个维度总数不能变')
+      assert.equal(byModel.body.users, undefined, '按模型看不回 users 那一份，省得前端拿错')
+    })
+
+    /**
+     * 这个游标是编码过的、带形状校验的（与账号那个裸用户名不同），
+     * 所以解不开就真的退回第一页 —— 而不是回一页空的。
+     */
+    test('坏游标退回第一页，不是 400 也不是空页', async () => {
+      const admin = await asAdmin()
+      await seed({ input: 100, output: 0 })
+      for (const bad of ['not-base64!!', Buffer.from('{}').toString('base64url'),
+        Buffer.from('{"s":"nope"}').toString('base64url')]) {
+        const { status, body } = await call('GET', `/v1/admin/usage?cursor=${encodeURIComponent(bad)}`, { token: admin })
+        assert.equal(status, 200, `坏游标 ${bad} 不该报错`)
+        assert.deepEqual(body.users.map((row) => row.username), ['admin'], `坏游标 ${bad} 该退回第一页`)
+      }
+    })
   })
 })
 

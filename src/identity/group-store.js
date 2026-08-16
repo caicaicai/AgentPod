@@ -45,6 +45,7 @@
  */
 import { randomUUID } from 'node:crypto'
 
+import { PAGE_DEFAULT, finishPage } from '../persistence/page.js'
 import { requireStorage } from '../persistence/storage.js'
 
 const COLLECTION = 'user_groups'
@@ -116,13 +117,59 @@ export function createGroupStore({ storage, logger = console }) {
     }
   }
 
+  /**
+   * 全部分组，按显示顺序排好。
+   *
+   * 写成一个具名函数而不是 `this.list()`：这个 store 的方法经常被解构出来用
+   * （路由里就是 `const { list } = groups` 那种写法），而 `this` 在解构之后
+   * 就没了 —— 那种错在运行时才炸，且只炸在某一条不常走的路径上。
+   */
+  async function listAll() {
+    const all = await map.all()
+    return all
+      .map(toPublicGroup)
+      // 默认分组排最前（它是"大多数人在哪儿"），其余按名字
+      .sort((a, b) => (Number(b.isDefault) - Number(a.isDefault)) || a.name.localeCompare(b.name))
+  }
+
   return {
-    async list() {
-      const all = await map.all()
-      return all
-        .map(toPublicGroup)
-        // 默认分组排最前（它是"大多数人在哪儿"），其余按名字
-        .sort((a, b) => (Number(b.isDefault) - Number(a.isDefault)) || a.name.localeCompare(b.name))
+    list: listAll,
+
+    /**
+     * 分页版的清单。
+     *
+     * ⚠️ **这里的分页收的是响应体和界面，不是数据库。** 必须说清楚，
+     * 否则下一个人会以为分组已经"分页安全"了：
+     *
+     *   - 排序键（`isDefault` 然后 `name`）住在 payload 的 JSON 里。SQL 排不了它，
+     *     所以没法像账号那样做主键上的 keyset 翻页（账号能，是因为它的排序键
+     *     就是主键 id 本身）。
+     *   - 就算能排，`defaultGroupId()` 和 `clearDefaultExcept()` 本来就要看遍
+     *     全部分组 —— 那两件事没有"只看一页"的版本。
+     *
+     * 那为什么还要分页：分组这一维**天然有界**（一个部署里是几条到几十条，
+     * 不是跟着注册涨的东西），真正的代价不在这儿。而接口上有了统一的翻页形状，
+     * 界面就不必为四张表写两套加载逻辑，将来哪天分组真的多起来，
+     * 要换的只有这一个方法的内部实现，接口和前端一行不用动。
+     *
+     * 游标就是上一页最后一条的 id（分组 id 唯一，做决胜键正合适）。
+     */
+    async page({ cursor = '', limit = PAGE_DEFAULT } = {}) {
+      const sorted = await listAll()
+      const from = cursor ? sorted.findIndex((group) => group.id === cursor) : -1
+      /**
+       * 找不到游标指的那一条（这一轮翻页当中它被删了）就**退回第一页**，
+       * 而不是当成"翻到底了"。后者会让用户点一下"加载更多"之后什么也没发生，
+       * 而他并不知道自己刚删掉的正是那一条。
+       */
+      const rest = from >= 0 ? sorted.slice(from + 1) : sorted
+      const { page, hasMore, nextCursor } = finishPage(rest.slice(0, limit + 1), limit, (group) => group.id)
+      return { items: page, hasMore, nextCursor }
+    },
+
+    /** 一共几个分组。表头那句"N 个分组"用它 */
+    async count() {
+      return map.count()
     },
 
     async get(id) {

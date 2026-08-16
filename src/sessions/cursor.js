@@ -20,7 +20,17 @@
  *
  * 游标本身不加密也不签名：它编码的是**用户自己那一页的位置**，
  * 伪造它最多是翻到自己数据的另一个位置。真正的隔离在 SQL 的 `username = ?` 上。
+ *
+ * ── 与 src/persistence/page.js 的分工 ───────────────────────────────────
+ *
+ * 「一页多大」「游标怎么编成 base64url」这些与**翻什么**无关，管理台也要用，
+ * 所以搬去了 persistence/page.js，这里只 re-export（导入路径不变，
+ * 全库只有一处定义，调上限时不会漏掉一边）。留在这个文件里的是会话独有的：
+ * `(pinned, updated_at, session_key)` 这个三段排序键怎么展开成 SQL。
  */
+import { decodeCursor as decodeBase, encodeCursor as encodeBase } from '../persistence/page.js'
+
+export { PAGE_DEFAULT, PAGE_MAX, normalizeLimit } from '../persistence/page.js'
 
 /**
  * 把一行编码成游标。
@@ -28,11 +38,11 @@
  */
 export function encodeCursor(row) {
   if (!row) return ''
-  return Buffer.from(JSON.stringify({
+  return encodeBase({
     p: row.pinned ? 1 : 0,
     u: new Date(row.updatedAt || row.updated_at).getTime(),
     k: row.sessionKey || row.session_key,
-  })).toString('base64url')
+  })
 }
 
 /**
@@ -43,16 +53,12 @@ export function encodeCursor(row) {
  * 而他能做的只有清缓存 —— 退回第一页是个明显更好的降级。
  */
 export function decodeCursor(raw) {
-  if (!raw) return null
-  try {
-    const parsed = JSON.parse(Buffer.from(String(raw), 'base64url').toString('utf8'))
-    const updatedAt = Number(parsed.u)
-    if (!Number.isFinite(updatedAt)) return null
-    if (typeof parsed.k !== 'string' || !parsed.k) return null
-    return { pinned: parsed.p ? 1 : 0, updatedAt, sessionKey: parsed.k }
-  } catch {
-    return null
-  }
+  const parsed = decodeBase(
+    raw,
+    (value) => Number.isFinite(Number(value.u)) && typeof value.k === 'string' && Boolean(value.k),
+  )
+  if (!parsed) return null
+  return { pinned: parsed.p ? 1 : 0, updatedAt: Number(parsed.u), sessionKey: parsed.k }
 }
 
 /**
@@ -71,15 +77,4 @@ export function cursorClause(cursor) {
     sql: '(pinned < ? OR (pinned = ? AND updated_at < ?) OR (pinned = ? AND updated_at = ? AND session_key < ?))',
     params: [cursor.pinned, cursor.pinned, updatedAt, cursor.pinned, updatedAt, cursor.sessionKey],
   }
-}
-
-/** 一页最多多少条，以及不传 limit 时给多少 */
-export const PAGE_MAX = 200
-export const PAGE_DEFAULT = 50
-
-/** 收口客户端传来的 limit。给个上限，免得一条 `?limit=1000000` 把内存拉满 */
-export function normalizeLimit(raw, fallback = PAGE_DEFAULT) {
-  const parsed = Number(raw)
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback
-  return Math.min(Math.floor(parsed), PAGE_MAX)
 }

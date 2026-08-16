@@ -545,6 +545,88 @@ describe('管理接口：模型与分组', () => {
   })
 
   /**
+   * ── 分组与模型这两页的分页 ──────────────────────────────────────────
+   *
+   * ⚠️ 这两处的分页收的是**响应体和界面**，不是数据库 —— 它们的排序键
+   * （分组是 isDefault/name，模型是 sort/createdAt/id）住在 payload 的 JSON 里，
+   * SQL 排不了；而且模型那份**必须**能整取（resolveForGroup 跑在每次对话之前，
+   * 要的是完整的优先级序列）。两个 store 的文件头把这条判据写清楚了。
+   *
+   * 所以这一组钉的是接口层面的契约：翻页不漏不重、顺序不因分页而变、
+   * 以及表头那几个数是全量而不是"当前这一页"。
+   */
+  test('模型清单分页：翻到底不漏不重，且顺序仍然是 sort 排的', async () => {
+    const token = await adminToken()
+    // sort 故意逆着建，验证顺序来自 sort 而不是插入顺序
+    for (const [name, sort] of [['c', 30], ['a', 10], ['b', 20]]) {
+      await call('POST', '/v1/admin/models', { token, body: sampleModel({ name, model: `m-${name}`, sort }) })
+    }
+
+    const seen = []
+    let cursor = ''
+    for (let guard = 0; guard < 10; guard += 1) {
+      const { body } = await call('GET', `/v1/admin/models?limit=2${cursor ? `&cursor=${cursor}` : ''}`, { token })
+      seen.push(...body.models.map((model) => model.name))
+      if (!body.hasMore) break
+      cursor = body.nextCursor
+    }
+    assert.deepEqual(seen, ['a', 'b', 'c'], 'sort 小的在前 —— 第一个就是默认模型')
+    assert.equal(new Set(seen).size, seen.length)
+  })
+
+  test('模型页的 stats 是全量的：翻页时"共几个 / 几个启用"不该跟着变', async () => {
+    const token = await adminToken()
+    for (const [name, enabled] of [['a', true], ['b', false], ['c', true]]) {
+      await call('POST', '/v1/admin/models', { token, body: sampleModel({ name, model: `m-${name}`, enabled }) })
+    }
+    const { body } = await call('GET', '/v1/admin/models?limit=1', { token })
+    assert.equal(body.models.length, 1, '这一页只要一条')
+    assert.deepEqual(body.stats, { total: 3, enabled: 2 }, '但表头那两个数是全库的')
+  })
+
+  test('分组清单分页：默认分组仍然排最前，total 是全量', async () => {
+    const token = await adminToken()
+    await call('POST', '/v1/admin/groups', { token, body: { name: '乙' } })
+    await call('POST', '/v1/admin/groups', { token, body: { name: '甲' } })
+    await call('POST', '/v1/admin/groups', { token, body: { name: '默认组', isDefault: true } })
+
+    const first = await call('GET', '/v1/admin/groups?limit=1', { token })
+    assert.deepEqual(first.body.groups.map((group) => group.name), ['默认组'], '默认分组排最前')
+    assert.equal(first.body.total, 3, '表头那个数是全量，不是这一页')
+    assert.equal(first.body.hasMore, true)
+
+    const seen = [...first.body.groups.map((group) => group.name)]
+    let cursor = first.body.nextCursor
+    for (let guard = 0; guard < 10 && cursor; guard += 1) {
+      const { body } = await call('GET', `/v1/admin/groups?limit=1&cursor=${cursor}`, { token })
+      seen.push(...body.groups.map((group) => group.name))
+      cursor = body.hasMore ? body.nextCursor : ''
+    }
+    assert.equal(seen.length, 3)
+    assert.equal(new Set(seen).size, 3, '一个都不许重复')
+    assert.equal(seen[0], '默认组')
+  })
+
+  /**
+   * 游标指的那一条在翻页当中被删了 → **退回第一页**，而不是当成"翻到底了"。
+   * 后者会让用户点一下「加载更多」之后什么也没发生，而他并不知道
+   * 自己刚删掉的正是那一条。
+   */
+  test('游标指的那条被删了就退回第一页，不是安静地什么都不回', async () => {
+    const token = await adminToken()
+    await call('POST', '/v1/admin/groups', { token, body: { name: '甲' } })
+    await call('POST', '/v1/admin/groups', { token, body: { name: '乙' } })
+
+    const first = await call('GET', '/v1/admin/groups?limit=1', { token })
+    const goneCursor = first.body.nextCursor
+    await call('DELETE', `/v1/admin/groups/${goneCursor}`, { token })
+
+    const again = await call('GET', `/v1/admin/groups?limit=1&cursor=${goneCursor}`, { token })
+    assert.equal(again.status, 200)
+    assert.equal(again.body.groups.length, 1, '退回第一页，而不是回一页空的')
+  })
+
+  /**
    * Token 额度（分组上那两个数，判据在 test/quota.test.js）。
    *
    * 这里只钉**接口这一层**：字段收得进、回得出、改得动，以及"每日额度几点归零"

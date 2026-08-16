@@ -186,8 +186,31 @@ export const state = reactive({
   accountNote: '',
   accountNoteWarn: false,
 
-  /** 管理员控制台 */
+  /**
+   * 管理员控制台。
+   *
+   * ── 四张表全部是分页的，所以每张都带三样东西 ────────────────────────
+   *
+   *   `xxxCursor`   下一页从哪儿开始（服务端给的，前端不解释它的内容）
+   *   `xxxHasMore`  还有没有下一页。**由服务端说了算**，不靠"这一页装满了没"猜 ——
+   *                 那种猜法在"最后一页恰好装满"时会多画一个点了没反应的「加载更多」
+   *   `xxxLoadingMore` 只作用在那个按钮上。与整表的 loading 分开：翻下一页时
+   *                 已经看到的行不该跟着变灰闪一下
+   *
+   * `adminStats` 是**全局**的两个数（总账号数、在岗管理员数），不是"当前加载了几条"。
+   * 后面那个数有实际用处：界面靠它判断"这是不是最后一个管理员"（最后一个不能降级
+   * 也不能禁用）。从已加载的那一页去数的话，翻到第二页就会告诉你只剩一个了，
+   * 而实际上第一页里还有三个 —— 现象是几个本该能点的按钮无缘无故变灰。
+   */
   adminUsers: [],
+  adminUsersCursor: '',
+  adminUsersHasMore: false,
+  adminUsersLoadingMore: false,
+  adminStats: { total: 0, admins: 0 },
+  /**
+   * 搜索框里的词。**筛选在服务端做** —— 从前是前端在已加载的清单上 filter，
+   * 分页之后那等于"只搜当前这一页"，而搜不到的人看起来就像不存在。
+   */
   adminSearch: '',
   adminLoading: false,
   adminBusy: false,
@@ -212,6 +235,11 @@ export const state = reactive({
    */
   adminModels: [],
   adminModelsMeta: { effective: false, llmMode: '', encrypted: false, currency: '' },
+  /** 全部模型里有几条、其中几条启用着。表头用它，不数当前这一页 */
+  adminModelStats: { total: 0, enabled: 0 },
+  adminModelsCursor: '',
+  adminModelsHasMore: false,
+  adminModelsLoadingMore: false,
   adminModelsLoading: false,
   /** 正在编辑的那条的 id；'new' 表示在新建 */
   adminModelEditing: '',
@@ -219,6 +247,10 @@ export const state = reactive({
   /** 分组。`adminUngrouped` 是没有分组的人数，否则各分组人数加起来对不上账号总数 */
   adminGroups: [],
   adminUngrouped: 0,
+  adminGroupTotal: 0,
+  adminGroupsCursor: '',
+  adminGroupsHasMore: false,
+  adminGroupsLoadingMore: false,
   adminGroupsLoading: false,
   adminGroupEditing: '',
   /** 每日 token 额度在哪个时区归零。空 = 还没拉到，页面上退回默认那个时区名 */
@@ -237,6 +269,14 @@ export const state = reactive({
    * 只留一份：同一时刻只可能展开一行，留着旧的只会让人看到上一行的数字闪一下。
    */
   adminUsage: null,
+  /**
+   * 用量表的行是分页的。⚠️ `adminUsage.total` / `pricing` / `modelCount`
+   * **不跟着翻页变** —— 它们始终是整个时间窗的合计（服务端如此），
+   * 所以翻到第三页时顶上那几个数字仍然是全量的。别在前端拿当前这些行去重算。
+   */
+  adminUsageCursor: '',
+  adminUsageHasMore: false,
+  adminUsageLoadingMore: false,
   adminUsageDays: 30,
   adminUsageGroup: 'user',
   adminUsageLoading: false,

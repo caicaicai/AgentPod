@@ -40,6 +40,7 @@
 import { randomUUID } from 'node:crypto'
 
 import { createSecretBox, maskKey } from '../credentials/secret-box.js'
+import { PAGE_DEFAULT, finishPage } from '../persistence/page.js'
 import { requireStorage } from '../persistence/storage.js'
 
 /** ap_kv 里的集合名。与 accounts / user_groups 并列，都是不按用户分区的全局集合 */
@@ -342,11 +343,41 @@ export function createModelStore({ config = {}, storage, logger = console }) {
     return next
   }
 
+  /** 管理台用：全部记录（含停用的），key 只回掩码 */
+  async function listAll() {
+    const all = await map.all()
+    return all.sort(bySort).map((record) => toPublicModel(record, box))
+  }
+
   return {
-    /** 管理台用：全部记录（含停用的），key 只回掩码 */
-    async list() {
-      const all = await map.all()
-      return all.sort(bySort).map((record) => toPublicModel(record, box))
+    list: listAll,
+
+    /**
+     * 分页版的清单。
+     *
+     * ⚠️ 与分组那边同一句话：**这里的分页收的是响应体和界面，不是数据库。**
+     * 模型记录不小（baseUrl、掩码、三个单价、可用范围数组），一次全下发给浏览器
+     * 是实打实的浪费；但库那一侧仍然是整取，而且**必须**是整取：
+     *
+     *   - 排序键是 `sort` → `createdAt` → `id` 三段，全住在 payload 的 JSON 里，
+     *     SQL 排不了（账号能做真 keyset，是因为它的排序键就是主键 id 本身）；
+     *   - 顺序在这里不是装饰 —— **列表的第一个就是没指定模型时用的那个**
+     *     （见 model-factory.js:pickModel）。按别的键翻页会把"哪个是默认模型"
+     *     变成一件取决于翻页实现的事；
+     *   - `resolveForGroup()` 跑在**每一次对话之前**，它要的就是完整的优先级序列，
+     *     没有"只看一页"的版本。
+     *
+     * 也就是说：模型这一维天然有界（一个部署十几条，文件头那段判据没变），
+     * 真到它长到需要在库里排序分页的那天，该做的是把它拆成一张有 sort 列和索引的
+     * 正经表 —— 那时候接口和前端一行都不用改，因为形状已经是分页的了。
+     */
+    async page({ cursor = '', limit = PAGE_DEFAULT } = {}) {
+      const sorted = await listAll()
+      // 找不到游标指的那条（翻页当中它被删了）就退回第一页，而不是当成翻到底
+      const from = cursor ? sorted.findIndex((model) => model.id === cursor) : -1
+      const rest = from >= 0 ? sorted.slice(from + 1) : sorted
+      const { page, hasMore, nextCursor } = finishPage(rest.slice(0, limit + 1), limit, (model) => model.id)
+      return { items: page, hasMore, nextCursor }
     },
 
     async get(id) {
@@ -491,9 +522,28 @@ export function createModelStore({ config = {}, storage, logger = console }) {
       return out
     },
 
-    /** 库里一条都没有 —— 用来在 /healthz 和管理台上把"还没配"和"配错了"分开 */
+    /**
+     * 库里一条都没有 —— 用来在 /healthz 和管理台上把"还没配"和"配错了"分开。
+     * 走 `COUNT(*)`：这一句只想要一个整数，没必要为它把每条模型配置（含密文 key）
+     * 都读出来再数一遍长度。
+     */
     async count() {
-      return (await map.all()).length
+      return map.count()
+    },
+
+    /**
+     * 表头那两个数：一共几条、其中几条启用着。
+     *
+     * 分页之前它们是前端拿整份清单 `filter().length` 算的 —— 分页之后那会变成
+     * "当前加载的这几条里有几条启用"，而管理员看那一行是为了确认
+     * "这个部署到底有没有可用的模型"。
+     */
+    async stats() {
+      const [total, enabled] = await Promise.all([
+        map.count(),
+        map.countMatching({ enabled: true }),
+      ])
+      return { total, enabled }
     },
   }
 }

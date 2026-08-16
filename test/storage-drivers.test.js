@@ -179,6 +179,102 @@ forEachDriver('通用 map', ({ storage }) => {
     await storage().globalMap('shares').put('s_1', { token: 's_1', username: 'zhangsan' })
     assert.equal((await storage().globalMap('shares').get('s_1')).username, 'zhangsan')
   })
+
+  /* ── 翻页 / 计数 ── */
+
+  const seedIds = async (ids) => {
+    for (const id of ids) await mapOf().put(id, { id })
+  }
+
+  test('page 按 id 升序翻，游标是"上一页最后一个 id"', async () => {
+    await seedIds(['a', 'b', 'c', 'd', 'e'])
+    const first = await mapOf().page({ limit: 2 })
+    assert.deepEqual(first.items.map((item) => item.id), ['a', 'b'])
+    assert.equal(first.hasMore, true)
+    assert.equal(first.nextCursor, 'b', '游标是 id 本身，不是 base64 —— 存储层内部直接拿它当起点')
+
+    const second = await mapOf().page({ cursor: first.nextCursor, limit: 2 })
+    assert.deepEqual(second.items.map((item) => item.id), ['c', 'd'])
+
+    const last = await mapOf().page({ cursor: second.nextCursor, limit: 2 })
+    assert.deepEqual(last.items.map((item) => item.id), ['e'])
+    assert.equal(last.hasMore, false)
+    assert.equal(last.nextCursor, '', '到底了就是空串')
+  })
+
+  /**
+   * 分页里最难查的一类 bug：**边界上漏一条或者重一条**。
+   * 一页正好装满时尤其容易出 —— 所以这里专门用整除的页大小走一遍。
+   */
+  test('翻到底不漏不重，哪怕最后一页正好装满', async () => {
+    const ids = ['i1', 'i2', 'i3', 'i4', 'i5', 'i6']
+    await seedIds(ids)
+    const seen = []
+    let cursor = ''
+    for (;;) {
+      const page = await mapOf().page({ cursor, limit: 3 })
+      seen.push(...page.items.map((item) => item.id))
+      if (!page.hasMore) break
+      cursor = page.nextCursor
+    }
+    assert.deepEqual(seen, ids)
+    assert.equal(new Set(seen).size, seen.length, '一条都不许重复')
+  })
+
+  /**
+   * 搜索里的通配符必须被转义。不转的话，用户在搜索框里打一个 `%`
+   * 就是"匹配全部" —— 一次本该缩小范围的搜索反而把整张表捞了回来。
+   */
+  test('page 的子串筛选：% 和 _ 是普通字符，不是通配符', async () => {
+    await seedIds(['ab', 'a%b', 'axb'])
+    assert.deepEqual((await mapOf().page({ contains: 'a%b' })).items.map((item) => item.id), ['a%b'])
+    assert.deepEqual((await mapOf().page({ contains: 'b' })).items.map((item) => item.id).sort(),
+      ['a%b', 'ab', 'axb'])
+  })
+
+  test('many 一次取一批；不存在的悄悄跳过，不占位也不抛', async () => {
+    await seedIds(['m1', 'm2', 'm3'])
+    assert.deepEqual((await mapOf().many(['m3', 'm1', 'ghost'])).map((item) => item.id), ['m1', 'm3'])
+    assert.deepEqual(await mapOf().many([]), [], '空清单回空，不是回全部')
+  })
+
+  test('count 数的是条数，可带同样的子串筛选', async () => {
+    await seedIds(['c1', 'c2', 'x1'])
+    assert.equal(await mapOf().count(), 3)
+    assert.equal(await mapOf().count({ contains: 'c' }), 2)
+  })
+
+  test('countByField 按 payload 里的字段分组计数；字段缺席归到空串那一档', async () => {
+    await mapOf().put('u1', { id: 'u1', groupId: 'g1' })
+    await mapOf().put('u2', { id: 'u2', groupId: 'g1' })
+    await mapOf().put('u3', { id: 'u3', groupId: '' })
+    await mapOf().put('u4', { id: 'u4' })
+    const counts = await mapOf().countByField('groupId')
+    assert.equal(counts.get('g1'), 2)
+    assert.equal(counts.get(''), 2, '空串与"根本没这个字段"归同一档')
+  })
+
+  /**
+   * `notEquals` 上**字段缺席要算"不等于"**。
+   *
+   * 这不是细节：老账号记录里可能压根没有 `disabled` 字段，而 SQL 的三值逻辑
+   * 会让 `<> 'true'` 对 NULL 既不成立也不否定 —— 那些行会从两边的计数里同时消失，
+   * 现象是界面认定"这是最后一个管理员"，把几个本该能点的按钮全禁掉。
+   */
+  test('countMatching 多字段与一起数；缺字段算作"不等于"', async () => {
+    await mapOf().put('a1', { id: 'a1', role: 'admin', disabled: false })
+    await mapOf().put('a2', { id: 'a2', role: 'admin', disabled: true })
+    await mapOf().put('a3', { id: 'a3', role: 'admin' })
+    await mapOf().put('u1', { id: 'u1', role: 'user', disabled: false })
+    assert.equal(await mapOf().countMatching({ role: 'admin' }), 3)
+    assert.equal(await mapOf().countMatching({ role: 'admin' }, { disabled: true }), 2,
+      '缺 disabled 的那条要算进来 —— 它在业务上就是"没被禁"')
+  })
+
+  test('字段名不合法当场抛 —— 它要拼进 JSON path，不是能参数化的位置', async () => {
+    await assert.rejects(() => mapOf().countByField("groupId') OR 1=1 --"))
+    await assert.rejects(() => mapOf().countMatching({ "a'b": 1 }))
+  })
 })
 
 /* ═══════════════ docs：长期记忆 ═══════════════ */
@@ -436,6 +532,75 @@ forEachDriver('token 用量', ({ storage }) => {
     assert.deepEqual(await ledger().byUserAndModel(), [])
     assert.deepEqual(await ledger().dailyForUser({ username: 'zhangsan' }), [])
     assert.deepEqual(await ledger().dailyForModel({ modelId: 'gpt-4o' }), [])
+    assert.deepEqual(await ledger().byModel(), [])
+    assert.deepEqual(await ledger().topUsers({}), [])
+    assert.equal(await ledger().countActiveUsers(), 0)
+  })
+
+  /* ── 分页要用的那几个聚合 ── */
+
+  /** 一批人，token 数刻意有并列 —— keyset 翻页最容易在并列上漏/重 */
+  const seedLedger = async () => {
+    await ledger().record(row({ username: 'alice', runId: 'a1', modelId: 'gpt-4o', input: 500, output: 0 }))
+    await ledger().record(row({ username: 'alice', runId: 'a2', modelId: 'tiny', input: 100, output: 0 }))
+    await ledger().record(row({ username: 'bob', runId: 'b1', modelId: 'gpt-4o', input: 300, output: 0 }))
+    await ledger().record(row({ username: 'carol', runId: 'c1', modelId: 'gpt-4o', input: 300, output: 0 }))
+    await ledger().record(row({ username: 'dave', runId: 'd1', modelId: 'tiny', input: 50, output: 0 }))
+  }
+
+  test('byModel：每个模型一行，带 tokens 这一列，按 token 降序', async () => {
+    await seedLedger()
+    const rows = await ledger().byModel()
+    assert.deepEqual(rows.map((item) => [item.modelId, item.tokens]), [['gpt-4o', 1100], ['tiny', 150]])
+    assert.equal(typeof rows[0].tokens, 'number', 'SUM 回的是字符串，必须收口')
+    assert.equal(rows[0].runs, 3)
+  })
+
+  /**
+   * 用户维的 keyset 翻页。这一条钉的是**并列不出事**：
+   * bob 和 carol 都是 300，单靠 token 数当游标，边界上要么漏一个要么重一个 ——
+   * 所以判据里补了用户名当决胜键。
+   */
+  test('topUsers：token 降序 + 用户名决胜，翻到底不漏不重', async () => {
+    await seedLedger()
+    const seen = []
+    let cursor = null
+    for (let guard = 0; guard < 10; guard += 1) {
+      const rows = await ledger().topUsers({ cursor, limit: 2 })
+      const page = rows.slice(0, 2)
+      seen.push(...page.map((item) => item.username))
+      if (rows.length <= 2) break
+      cursor = { tokens: page[page.length - 1].tokens, username: page[page.length - 1].username }
+    }
+    assert.deepEqual(seen, ['alice', 'bob', 'carol', 'dave'], '600 / 300 / 300 / 50，并列的按名字')
+    assert.equal(new Set(seen).size, seen.length, '一个都不许重复')
+  })
+
+  test('topUsers 多取一条 —— 上层靠它判断"还有没有下一页"', async () => {
+    await seedLedger()
+    assert.equal((await ledger().topUsers({ limit: 2 })).length, 3, '要 2 条，回 3 条')
+    assert.equal((await ledger().topUsers({ limit: 99 })).length, 4, '不够就回实有的，不补')
+  })
+
+  test('byUserAndModel 可以只要指定的这几个人；传空数组回空，不是回全部', async () => {
+    await seedLedger()
+    const rows = await ledger().byUserAndModel({ usernames: ['alice'] })
+    assert.deepEqual(rows.map((item) => item.modelId).sort(), ['gpt-4o', 'tiny'])
+    assert.deepEqual(await ledger().byUserAndModel({ usernames: [] }), [],
+      '"这一页没有人"和"要所有人"必须分得开，否则翻到底会变成一次全表扫')
+  })
+
+  test('topUsersPerModel：每个模型各取前 N 个人', async () => {
+    await seedLedger()
+    const rows = await ledger().topUsersPerModel({ modelIds: ['gpt-4o'], limit: 2 })
+    assert.deepEqual(rows.map((item) => [item.modelId, item.username, item.tokens]),
+      [['gpt-4o', 'alice', 500], ['gpt-4o', 'bob', 300]], '并列的按名字，carol 被截在外面')
+    assert.deepEqual(await ledger().topUsersPerModel({ modelIds: [] }), [])
+  })
+
+  test('countActiveUsers 数的是窗口里有过用量的人头，不是行数', async () => {
+    await seedLedger()
+    assert.equal(await ledger().countActiveUsers(), 4, 'alice 有两行，只算一个人')
   })
 
   test('同一个 runId 记两次只算一次 —— 重放不该把账记两遍', async () => {

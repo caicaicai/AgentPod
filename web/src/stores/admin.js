@@ -20,11 +20,27 @@ import { state } from './state.js'
 
 /* ── 管理员控制台 ── */
 
+/**
+ * 账号清单的第一页。
+ *
+ * 每一个改动之后都会重来一次（见 runAdminAction）—— **回到第一页**是有意的：
+ * 改完之后停在第五页，而那一页的内容可能已经因为这次改动移了位。
+ */
 export async function refreshUsers() {
   if (!state.features.accounts) return
   state.adminLoading = true
   try {
-    state.adminUsers = (await api.adminListUsers()).users || []
+    const page = await api.adminListUsers({ q: state.adminSearch.trim() })
+    state.adminUsers = page.users || []
+    state.adminUsersCursor = page.nextCursor || ''
+    state.adminUsersHasMore = Boolean(page.hasMore)
+    /**
+     * 全局的两个数（总账号数、在岗管理员数）跟着每一页回。
+     *
+     * 尤其是 admins：界面靠它判断"这是不是最后一个管理员"。从 `adminUsers`
+     * 里数的话，翻到第二页就会数出"只剩一个"，然后把几个本该能点的按钮变灰。
+     */
+    state.adminStats = page.stats || { total: 0, admins: 0 }
     state.adminNote = ''
     state.adminNoteWarn = false
   } catch (error) {
@@ -33,6 +49,38 @@ export async function refreshUsers() {
   } finally {
     state.adminLoading = false
   }
+}
+
+/** 再来一页，接在后面。`hasMore` 由服务端说了算，不靠"这一页装满了没"猜 */
+export async function loadMoreUsers() {
+  if (!state.adminUsersHasMore || state.adminUsersLoadingMore) return
+  state.adminUsersLoadingMore = true
+  try {
+    const page = await api.adminListUsers({ cursor: state.adminUsersCursor, q: state.adminSearch.trim() })
+    state.adminUsers = [...state.adminUsers, ...(page.users || [])]
+    state.adminUsersCursor = page.nextCursor || ''
+    state.adminUsersHasMore = Boolean(page.hasMore)
+    if (page.stats) state.adminStats = page.stats
+  } catch (error) {
+    state.adminNote = `加载更多账号失败：${error.message}`
+    state.adminNoteWarn = true
+  } finally {
+    state.adminUsersLoadingMore = false
+  }
+}
+
+/**
+ * 搜索。**打一个字发一次请求是不行的**，所以这里压一下（250ms）。
+ *
+ * 为什么筛选不能留在前端：分页之后前端手里只有已经加载的那几页，
+ * 在那上面 filter 等于"只搜当前这一页" —— 而搜不到的人看起来就像不存在，
+ * 那比搜索慢一点糟糕得多。
+ */
+let searchTimer = 0
+export function setUserSearch(keyword) {
+  state.adminSearch = String(keyword ?? '')
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => { refreshUsers() }, 250)
 }
 
 export async function openAdmin() {
@@ -65,6 +113,8 @@ export async function refreshUsage() {
   state.adminUsageLoading = true
   try {
     state.adminUsage = await api.adminUsage(state.adminUsageDays, state.adminUsageGroup)
+    state.adminUsageCursor = state.adminUsage?.nextCursor || ''
+    state.adminUsageHasMore = Boolean(state.adminUsage?.hasMore)
     state.adminNote = ''
     state.adminNoteWarn = false
   } catch (error) {
@@ -72,6 +122,33 @@ export async function refreshUsage() {
     state.adminNoteWarn = true
   } finally {
     state.adminUsageLoading = false
+  }
+}
+
+/**
+ * 用量表的下一页。
+ *
+ * ⚠️ **只往行数组里追加**，`total` / `pricing` / `modelCount` 一个都不动 ——
+ * 它们是整个时间窗的合计（服务端每一页都回同样的值），不是这些行的合计。
+ * 顺手用新回来的那份覆盖也行，但写成"只动行"能挡住一类以后才会出现的错：
+ * 哪天有人把合计改成按页算，这里就会立刻显出"翻一页总数变一次"。
+ */
+export async function loadMoreUsage() {
+  if (!state.adminUsageHasMore || state.adminUsageLoadingMore) return
+  state.adminUsageLoadingMore = true
+  try {
+    const page = await api.adminUsage(state.adminUsageDays, state.adminUsageGroup, {
+      cursor: state.adminUsageCursor,
+    })
+    const key = state.adminUsageGroup === 'model' ? 'models' : 'users'
+    state.adminUsage = { ...state.adminUsage, [key]: [...(state.adminUsage?.[key] || []), ...(page[key] || [])] }
+    state.adminUsageCursor = page.nextCursor || ''
+    state.adminUsageHasMore = Boolean(page.hasMore)
+  } catch (error) {
+    state.adminNote = `加载更多用量失败：${error.message}`
+    state.adminNoteWarn = true
+  } finally {
+    state.adminUsageLoadingMore = false
   }
 }
 
@@ -132,6 +209,10 @@ export async function refreshModels() {
   try {
     const data = await api.adminListModels()
     state.adminModels = data.models || []
+    state.adminModelsCursor = data.nextCursor || ''
+    state.adminModelsHasMore = Boolean(data.hasMore)
+    // 表头那句"N 个启用 · 共 N 个"要的是全部，不是当前这一页
+    state.adminModelStats = data.stats || { total: 0, enabled: 0 }
     state.adminModelsMeta = {
       effective: Boolean(data.effective),
       llmMode: data.llmMode || '',
@@ -147,6 +228,23 @@ export async function refreshModels() {
     state.adminNoteWarn = true
   } finally {
     state.adminModelsLoading = false
+  }
+}
+
+export async function loadMoreModels() {
+  if (!state.adminModelsHasMore || state.adminModelsLoadingMore) return
+  state.adminModelsLoadingMore = true
+  try {
+    const data = await api.adminListModels({ cursor: state.adminModelsCursor })
+    state.adminModels = [...state.adminModels, ...(data.models || [])]
+    state.adminModelsCursor = data.nextCursor || ''
+    state.adminModelsHasMore = Boolean(data.hasMore)
+    if (data.stats) state.adminModelStats = data.stats
+  } catch (error) {
+    state.adminNote = `加载更多模型失败：${error.message}`
+    state.adminNoteWarn = true
+  } finally {
+    state.adminModelsLoadingMore = false
   }
 }
 
@@ -200,6 +298,9 @@ export async function refreshGroups() {
   try {
     const data = await api.adminListGroups()
     state.adminGroups = data.groups || []
+    state.adminGroupsCursor = data.nextCursor || ''
+    state.adminGroupsHasMore = Boolean(data.hasMore)
+    state.adminGroupTotal = data.total || 0
     state.adminUngrouped = data.ungrouped || 0
     // 每日额度几点归零，由服务端说了算（QUOTA_TIMEZONE），界面不猜
     state.adminQuotaTimezone = data.quotaTimezone || ''
@@ -210,6 +311,22 @@ export async function refreshGroups() {
     state.adminNoteWarn = true
   } finally {
     state.adminGroupsLoading = false
+  }
+}
+
+export async function loadMoreGroups() {
+  if (!state.adminGroupsHasMore || state.adminGroupsLoadingMore) return
+  state.adminGroupsLoadingMore = true
+  try {
+    const data = await api.adminListGroups({ cursor: state.adminGroupsCursor })
+    state.adminGroups = [...state.adminGroups, ...(data.groups || [])]
+    state.adminGroupsCursor = data.nextCursor || ''
+    state.adminGroupsHasMore = Boolean(data.hasMore)
+  } catch (error) {
+    state.adminNote = `加载更多分组失败：${error.message}`
+    state.adminNoteWarn = true
+  } finally {
+    state.adminGroupsLoadingMore = false
   }
 }
 

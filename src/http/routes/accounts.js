@@ -19,6 +19,7 @@
  */
 import { AppError, Errors } from '../../errors.js'
 import { signToken } from '../../identity/password-auth.js'
+import { normalizeLimit } from '../../persistence/page.js'
 import { assertSegment } from '../../persistence/paths.js'
 import { DEFAULT_TIMEZONE } from '../../telemetry/quota.js'
 
@@ -112,8 +113,42 @@ export function createAccountRoutes({ config, identity, users, groups, modelStor
     const me = await users.get(subject.username)
     if (me?.role !== 'admin') throw Errors.forbidden('需要管理员权限')
 
+    /**
+     * 账号清单，**分页**。
+     *
+     *   limit   一页几条（默认 50，上限 200）
+     *   cursor  上一页回的 nextCursor（就是那一页最后一个用户名）
+     *   q       用户名的子串筛选。**服务端做** —— 从前是前端在已加载的清单上
+     *           filter，那在分页之后等于"只搜当前这一页"，而搜不到的人
+     *           看起来就像不存在。
+     *
+     * `stats` 是两个整数，跟着每一页回：
+     *
+     *   total   这个部署一共几个账号。表头那句"N 个账号"用它 ——
+     *           从前是数组长度，分页之后那个数会变成"当前加载了几条"。
+     *   admins  在岗管理员数。界面靠它判断"这是不是最后一个管理员"
+     *           （最后一个不能降级也不能禁用）。**这个必须是全局的**：
+     *           从已加载的那一页去数，翻到第二页就会告诉你只剩一个了，
+     *           而实际上第一页里还有三个 —— 现象是几个本该能点的按钮
+     *           无缘无故变灰。
+     */
     if (req.method === 'GET' && url.pathname === '/v1/admin/users') {
-      return sendJson(res, 200, { users: await users.list() })
+      const [found, stats] = await Promise.all([
+        users.page({
+          cursor: url.searchParams.get('cursor') || '',
+          limit: normalizeLimit(url.searchParams.get('limit')),
+          search: url.searchParams.get('q') || '',
+        }),
+        users.stats(),
+      ])
+      return sendJson(res, 200, {
+        users: found.items,
+        hasMore: found.hasMore,
+        nextCursor: found.nextCursor,
+        stats,
+        /** 带着搜索词回：界面据它判断"这一页是搜出来的还是全部" */
+        query: (url.searchParams.get('q') || '').trim(),
+      })
     }
 
     if (req.method === 'POST' && url.pathname === '/v1/admin/users') {
@@ -157,13 +192,31 @@ export function createAccountRoutes({ config, identity, users, groups, modelStor
      * 台账里没有的账号也会出现在 `group=user` 的清单里（一行 0），否则"没用过"
      * 和"不存在"在界面上长得一样。模型那一维没有这层补零：服务端没有"本部署有
      * 哪些模型"的权威清单（每个用户的可用模型是各自从 llminfo 拿的）。
+     *
+     * **行是分页的**（limit / cursor），但**顶上那几个合计不是** —— 它们始终是
+     * 整个时间窗的数。一张"合计只算了当前这一页"的用量表会让管理员每翻一页
+     * 看到一个不同的总数，而他没有任何办法看出哪个是对的（细节见 usage-store）。
      */
     if (req.method === 'GET' && url.pathname === '/v1/admin/usage') {
-      if (!usage?.enabled) return sendJson(res, 200, { enabled: false, users: [], models: [], total: null })
+      if (!usage?.enabled) {
+        return sendJson(res, 200, { enabled: false, users: [], models: [], total: null, hasMore: false, nextCursor: '' })
+      }
       return sendJson(res, 200, await usage.summary({
-        accounts: await users.list(),
+        /**
+         * 账号那一侧传的是**两个回调**，不是一份取好的清单。
+         *
+         * 从前这里是 `accounts: await users.list()` —— 也就是说，打开一次用量页
+         * 就要先把全部账号取回来。回调让用量那一层按需一页一页地要，
+         * 同时它照旧不需要知道账号存在哪张表里。
+         */
+        accounts: {
+          page: (query) => users.page(query),
+          many: (names) => users.getMany(names),
+        },
         days: url.searchParams.get('days'),
         group: url.searchParams.get('group') || 'user',
+        cursor: url.searchParams.get('cursor') || '',
+        limit: normalizeLimit(url.searchParams.get('limit')),
         ...(await pricingArgs()),
       }))
     }
@@ -242,8 +295,16 @@ export function createAccountRoutes({ config, identity, users, groups, modelStor
         : ''
 
       if (req.method === 'GET' && !modelId) {
+        const found = await modelStore.page({
+          cursor: url.searchParams.get('cursor') || '',
+          limit: normalizeLimit(url.searchParams.get('limit')),
+        })
         return sendJson(res, 200, {
-          models: await modelStore.list(),
+          models: found.items,
+          hasMore: found.hasMore,
+          nextCursor: found.nextCursor,
+          // 表头那句"N 个启用 · 共 N 个"要的是全部，不是当前这一页
+          stats: await modelStore.stats(),
           // 现在这份清单起不起作用。界面据此在顶部写一条提示，而不是让管理员
           // 配完之后才发现 LLM_MODE 还指着别处
           effective: config.llm.mode === 'db',
@@ -307,7 +368,10 @@ export function createAccountRoutes({ config, identity, users, groups, modelStor
         : ''
 
       if (req.method === 'GET' && !groupId) {
-        const list = await groups.list()
+        const found = await groups.page({
+          cursor: url.searchParams.get('cursor') || '',
+          limit: normalizeLimit(url.searchParams.get('limit')),
+        })
         /**
          * 顺带回每个分组**有多少人、能用几个模型**。
          *
@@ -315,19 +379,35 @@ export function createAccountRoutes({ config, identity, users, groups, modelStor
          * "这个分组的人有模型可用吗"），而它们各自要遍历另外两个集合 ——
          * 让界面自己去算的话，那两份清单得在前端各拉一次再对齐，
          * 而分组页本来不需要知道模型和账号长什么样。
+         *
+         * ── 人数这一个数原先是怎么算的 ──────────────────────────────────
+         *
+         * `await users.list()` 然后在 JS 里 filter：**打开一次分组页 = 把全部账号
+         * 记录（含 scrypt 派生结果和盐）搬进 Node**，只为了在页面上显示每组一个整数。
+         * 现在走 `users.countByGroup()`，一句 GROUP BY，回来的是每组一行。
+         *
+         * 模型那一维仍然是整取 + JS filter，而且这是**有依据的**：模型天然有界
+         * （一个部署十几条），而判据是"启用 且（可用范围为空 或 含这个分组）"——
+         * 一个跨 JSON 数组的包含判断，写进 SQL 换不来任何东西。
          */
-        const accounts = users ? await users.list() : []
-        const models = modelStore ? await modelStore.list() : []
+        const [byGroup, models] = await Promise.all([
+          users ? users.countByGroup() : Promise.resolve(new Map()),
+          modelStore ? modelStore.list() : Promise.resolve([]),
+        ])
         return sendJson(res, 200, {
-          groups: list.map((group) => ({
+          groups: found.items.map((group) => ({
             ...group,
-            userCount: accounts.filter((account) => account.groupId === group.id).length,
+            userCount: byGroup.get(group.id) || 0,
             modelCount: models.filter(
               (model) => model.enabled && (!model.groups.length || model.groups.includes(group.id)),
             ).length,
           })),
+          hasMore: found.hasMore,
+          nextCursor: found.nextCursor,
+          // 表头那句"N 个分组"要的是全部，不是当前这一页
+          total: await groups.count(),
           // 无分组的人也要有个地方看得见 —— 否则"人数加起来对不上"没法解释
-          ungrouped: accounts.filter((account) => !account.groupId).length,
+          ungrouped: byGroup.get('') || 0,
           /**
            * 每日额度在哪个时区归零（QUOTA_TIMEZONE）。
            *

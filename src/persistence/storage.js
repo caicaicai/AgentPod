@@ -44,7 +44,7 @@ import { assertSegment } from './paths.js'
  */
 function toBucket(row) {
   const out = { ...row }
-  for (const key of ['runs', 'input', 'output', 'cacheRead']) {
+  for (const key of ['runs', 'input', 'output', 'cacheRead', 'tokens']) {
     if (key in out) out[key] = Number(out[key]) || 0
   }
   if ('lastAt' in out) out.lastAt = out.lastAt ? new Date(out.lastAt).toISOString() : null
@@ -269,13 +269,133 @@ export async function createStorage({ config, logger = console, pool: sharedPool
        * 行数是**真的产生过用量的**组合数（不是账号数 × 模型数），
        * 按人/按模型的转置在 telemetry/usage-store.js 里做，都是纯加法。
        */
-      async byUserAndModel({ since = null } = {}) {
+      async byUserAndModel({ since = null, usernames = null } = {}) {
+        /**
+         * `usernames` 是**给一页的行补明细**用的（"这 50 个人各自用了哪些模型"）。
+         *
+         * 不传就是整张交叉表 —— 那条路只剩契约用例和 `?days=0` 的小部署在走，
+         * 管理台的正常路径一律带着一页的人名进来。传空数组回空，不是回全部：
+         * "这一页没有人"和"要所有人"必须分得开，否则一次翻到底会突然变成全表扫。
+         */
+        if (usernames && !usernames.length) return []
+        const where = ['(? IS NULL OR created_at >= ?)']
+        const params = [since, since]
+        if (usernames) {
+          where.push(`username IN (${usernames.map(() => '?').join(',')})`)
+          params.push(...usernames)
+        }
         const [rows] = await pool.query(
           'SELECT username, model_id AS modelId, COUNT(*) AS runs, SUM(input_tokens) AS input,'
           + ' SUM(output_tokens) AS output, SUM(cache_read_tokens) AS cacheRead, MAX(created_at) AS lastAt'
-          + ' FROM ap_usage WHERE (? IS NULL OR created_at >= ?) GROUP BY username, model_id'
+          + ` FROM ap_usage WHERE ${where.join(' AND ')} GROUP BY username, model_id`
           + ' ORDER BY (SUM(input_tokens) + SUM(output_tokens)) DESC',
+          params,
+        )
+        return rows.map(toBucket)
+      },
+
+      /**
+       * 每个模型一行的汇总。**行数天然有界** —— 一个部署里的模型是十几条量级，
+       * 而不是账号那种会跟着注册涨的东西。
+       *
+       * 所以它一次全取，并且同时承担三件事：按模型看的那一页、全局合计
+       * （每一行用量都带 model_id，按模型加完就是全部）、以及计价所需的
+       * 「每个模型各自多少 token」。三件事一个查询，也就不可能互相对不上。
+       */
+      async byModel({ since = null } = {}) {
+        const [rows] = await pool.query(
+          'SELECT model_id AS modelId, COUNT(*) AS runs, SUM(input_tokens) AS input,'
+          + ' SUM(output_tokens) AS output, SUM(cache_read_tokens) AS cacheRead, MAX(created_at) AS lastAt,'
+          + ' SUM(input_tokens) + SUM(output_tokens) AS tokens'
+          + ' FROM ap_usage WHERE (? IS NULL OR created_at >= ?) GROUP BY model_id'
+          + ' ORDER BY tokens DESC, model_id ASC',
           [since, since],
+        )
+        return rows.map(toBucket)
+      },
+
+      /**
+       * 这个窗口里**有几个人产生过用量**。
+       *
+       * 一个整数，但它必须来自数据库：管理台表头那句"N 人在用"从前是数
+       * `users.filter(tokens > 0).length` —— 分页之后那会变成"当前加载了几行"，
+       * 于是每点一次"加载更多"，表头上那个数就跟着涨一截。
+       */
+      async countActiveUsers({ since = null } = {}) {
+        const [rows] = await pool.query(
+          'SELECT COUNT(DISTINCT username) AS n FROM ap_usage WHERE (? IS NULL OR created_at >= ?)',
+          [since, since],
+        )
+        return Number(rows[0]?.n) || 0
+      },
+
+      /**
+       * 用户维的**一页**：按 token 降序、同数按用户名升序。
+       *
+       * ── 为什么这一维必须在 SQL 里翻页 ───────────────────────────────────
+       *
+       * 从前是 `byUserAndModel()` 整张交叉表捞回 Node，再在 JS 里 pivot、排序、
+       * 与账号清单左连接。行数是"窗口里产生过用量的 (人 × 模型) 组合数" ——
+       * 它跟着人数涨，而管理员点开用量页的那一刻要等的就是这个。
+       *
+       * ⚠️ 说清楚这一句挡住了什么、没挡住什么：分组求和仍然要扫过窗口内的全部
+       * 台账行（`GROUP BY` + 聚合上的 `ORDER BY` 用不上索引，这是聚合分页固有的）。
+       * 省掉的是**把结果搬进 Node**那一段 —— 回来的是一页 50 行，
+       * 不是几十万行 JS 对象。真到聚合本身也慢的那天，该加的是一张按天预汇总的
+       * 物化表，而不是把这里的口径改成"只看最近几天"。
+       *
+       * @param {{tokens: number, username: string}|null} cursor 上一页最后一行
+       */
+      async topUsers({ since = null, cursor = null, limit = 50 } = {}) {
+        const at = cursor ? Number(cursor.tokens) || 0 : null
+        const from = cursor ? String(cursor.username) : ''
+        const [rows] = await pool.query(
+          'SELECT username, COUNT(*) AS runs, SUM(input_tokens) AS input, SUM(output_tokens) AS output,'
+          + ' SUM(cache_read_tokens) AS cacheRead, MAX(created_at) AS lastAt,'
+          + ' SUM(input_tokens) + SUM(output_tokens) AS tokens'
+          + ' FROM ap_usage WHERE (? IS NULL OR created_at >= ?) GROUP BY username'
+          /**
+           * 游标条件放 HAVING 不是 WHERE：它比的是聚合结果（这个人一共多少 token），
+           * 而 WHERE 在分组之前跑，那时候还没有"一共多少"这个数。
+           *
+           * 展开成 `tokens < ? OR (tokens = ? AND username > ?)`，与 sessions/cursor.js
+           * 里那段同一个道理：单靠 token 数不唯一，同数的两个人会在页边界上
+           * 要么漏、要么重，所以补一个用户名当决胜键。
+           */
+          + ' HAVING (? IS NULL OR tokens < ? OR (tokens = ? AND username > ?))'
+          + ' ORDER BY tokens DESC, username ASC LIMIT ?',
+          [since, since, at, at, at, from, limit + 1],
+        )
+        return rows.map(toBucket)
+      },
+
+      /**
+       * 这几个模型各自**用得最多的前 N 个人**。
+       *
+       * ── 为什么不能用 byUserAndModel 顶替 ────────────────────────────────
+       *
+       * 按模型看那一页，每一行下面挂的是"用了这个模型的人"。行数有界（模型就那么
+       * 几个），但**每行的 children 没有上限** —— 一个所有人都在用的模型，
+       * 它那一行自己就能把整张用户表拖回来。把行分页并不能收住它。
+       *
+       * `ROW_NUMBER() OVER (PARTITION BY …)` 让"每组取前 N"在一个查询里完成
+       * （MySQL 8 的窗口函数，本项目的最低版本就是 8.0）。换成在 Node 里取回全部
+       * 再各自截断，省下的只有网络那一段之外的东西 —— 而那一段正是问题所在。
+       */
+      async topUsersPerModel({ since = null, modelIds = [], limit = 20 } = {}) {
+        if (!modelIds.length) return []
+        const [rows] = await pool.query(
+          'SELECT modelId, username, runs, input, output, cacheRead, lastAt, tokens FROM ('
+          + '  SELECT model_id AS modelId, username, COUNT(*) AS runs, SUM(input_tokens) AS input,'
+          + '   SUM(output_tokens) AS output, SUM(cache_read_tokens) AS cacheRead, MAX(created_at) AS lastAt,'
+          + '   SUM(input_tokens) + SUM(output_tokens) AS tokens,'
+          + '   ROW_NUMBER() OVER ('
+          + '     PARTITION BY model_id ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC, username ASC'
+          + '   ) AS rn'
+          + `   FROM ap_usage WHERE (? IS NULL OR created_at >= ?) AND model_id IN (${modelIds.map(() => '?').join(',')})`
+          + '   GROUP BY model_id, username'
+          + ' ) ranked WHERE rn <= ? ORDER BY modelId ASC, tokens DESC, username ASC',
+          [since, since, ...modelIds, limit],
         )
         return rows.map(toBucket)
       },

@@ -298,7 +298,17 @@ export const api = {
    * 管理员接口。前端画不画入口由 `/v1/auth/me` 回的 `account.role` 决定，
    * 但**真正的判定在服务端** —— 这里少判一次只是界面难看，服务端少判一次是越权。
    */
-  adminListUsers: () => request('/v1/admin/users'),
+  /**
+   * 账号清单，**分页**（与会话列表同一套：回 `{ items, hasMore, nextCursor }`
+   * 形状的东西，界面画「加载更多」）。
+   *
+   * `q` 的筛选**在服务端做**。从前是前端在已加载的清单上 filter —— 分页之后
+   * 那等于"只搜当前这一页"，而搜不到的人看起来就像不存在。
+   */
+  adminListUsers: ({ cursor = '', limit = 0, q: keyword = '' } = {}) =>
+    // 空值传 undefined 而不是空串：`q()` 会如实写出空串（那对别的接口是有意义的取值），
+    // 而这里一串 `?cursor=&limit=0&q=` 只会让日志和地址栏难读
+    request(`/v1/admin/users${q({ cursor: cursor || undefined, limit: limit || undefined, q: keyword || undefined })}`),
   adminCreateUser: (body) => request('/v1/admin/users', { method: 'POST', body }),
   adminPatchUser: (username, body) =>
     request(`/v1/admin/users/${encodeURIComponent(username)}`, { method: 'PATCH', body }),
@@ -319,18 +329,25 @@ export const api = {
    * 因为界面上那个输入框平时本来就是空的，空串当清空的话每次改个上下文长度
    * 都会顺手把 key 抹掉。
    */
-  adminListModels: () => request('/v1/admin/models'),
+  adminListModels: ({ cursor = '', limit = 0 } = {}) =>
+    request(`/v1/admin/models${q({ cursor: cursor || undefined, limit: limit || undefined })}`),
   adminCreateModel: (body) => request('/v1/admin/models', { method: 'POST', body }),
   adminPatchModel: (id, body) => request(`/v1/admin/models/${encodeURIComponent(id)}`, { method: 'PATCH', body }),
   adminDeleteModel: (id) => request(`/v1/admin/models/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   /** 用户分组。它只决定"能用哪些模型"，与角色（能不能管别人）是两回事 */
-  adminListGroups: () => request('/v1/admin/groups'),
+  adminListGroups: ({ cursor = '', limit = 0 } = {}) =>
+    request(`/v1/admin/groups${q({ cursor: cursor || undefined, limit: limit || undefined })}`),
   adminCreateGroup: (body) => request('/v1/admin/groups', { method: 'POST', body }),
   adminPatchGroup: (id, body) => request(`/v1/admin/groups/${encodeURIComponent(id)}`, { method: 'PATCH', body }),
   adminDeleteGroup: (id) => request(`/v1/admin/groups/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
-  adminUsage: (days, group) => request(`/v1/admin/usage${q({ days, group })}`),
+  /**
+   * 用量总表。**行是分页的，顶上那几个合计不是** —— 合计始终是整个时间窗的数。
+   * 一张"合计只算了当前这一页"的表会让人每翻一页看到一个不同的总数。
+   */
+  adminUsage: (days, group, { cursor = '', limit = 0 } = {}) =>
+    request(`/v1/admin/usage${q({ days, group, cursor: cursor || undefined, limit: limit || undefined })}`),
   adminUserTrend: (username, days, modelId) =>
     request(`/v1/admin/usage/user/${encodeURIComponent(username)}${q({ days, modelId })}`),
   adminModelTrend: (modelId, days) =>

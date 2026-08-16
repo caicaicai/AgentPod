@@ -15,8 +15,9 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createUsageStore, pivot, resolveSince, sumBuckets } from '../src/telemetry/usage-store.js'
+import { createUsageStore, groupChildren, resolveSince, sumBuckets } from '../src/telemetry/usage-store.js'
 import { formatSince, formatTokens } from '../web/src/lib/format.js'
+import { fakeAccounts } from './helpers/fake-accounts.js'
 import { createMemoryStorage } from './helpers/memory-storage.js'
 
 const silentLogger = { info() {}, warn() {}, error() {}, debug() {} }
@@ -76,7 +77,7 @@ describe('落库', () => {
     const usage = createUsageStore({ storage: null, logger: silentLogger })
     assert.equal(usage.enabled, false)
     assert.equal(await usage.record({ username: 'zhangsan', runId: 'r1', input: 1 }), false)
-    assert.deepEqual((await usage.summary({ accounts: [{ username: 'zhangsan' }] })).users, [])
+    assert.deepEqual((await usage.summary({ accounts: fakeAccounts([{ username: 'zhangsan' }]) })).users, [])
   })
 
   /**
@@ -112,40 +113,54 @@ describe('落库', () => {
 })
 
 /**
- * ── 转置 ────────────────────────────────────────────────────────────────
+ * ── 归堆 ────────────────────────────────────────────────────────────────
  *
- * 「按用户」和「按模型」是同一份交叉表的两种折叠，共用 pivot()。
- * 这一组钉的就是"折哪一维都不改变总数" —— 两页合计对不上是这个功能最难查的错：
- * 谁也说不清哪一页是对的。
+ * 这里从前测的是 `pivot()`：它归堆 children，**顺带把父行的数也加出来**。
+ * 分页之后父行的数改由 SQL 聚合给（`topUsers` / `byModel`，口径是全窗口），
+ * 而 children 可能被截断过 —— 再从 children 加一遍父行，加出来的会是一个
+ * 偏小、且看起来完全正常的数字。所以那个函数被拆成了只归堆的 `groupChildren`。
+ *
+ * 这一组因此钉两件事：归堆对不对，以及**它确实不再自己求和**。
  */
-describe('按维度转置', () => {
+describe('children 归堆', () => {
   const rows = [
     { username: 'zhangsan', modelId: 'opus', runs: 2, input: 1000, output: 200, cacheRead: 30, lastAt: '2026-08-13T00:00:00.000Z' },
     { username: 'zhangsan', modelId: 'haiku', runs: 5, input: 50, output: 10, cacheRead: 0, lastAt: '2026-08-14T00:00:00.000Z' },
     { username: 'lisi', modelId: 'opus', runs: 1, input: 300, output: 60, cacheRead: 5, lastAt: '2026-08-12T00:00:00.000Z' },
   ]
 
-  test('按用户折：每个人一行，模型进 children', () => {
-    const users = pivot(rows, 'username')
-    assert.deepEqual(users.map((row) => row.username), ['zhangsan', 'lisi'])
-    assert.equal(users[0].tokens, 1260)
-    assert.equal(users[0].runs, 7)
-    assert.deepEqual(users[0].children.map((child) => child.modelId), ['opus', 'haiku'], '大的在前')
-    assert.equal(users[0].lastAt, '2026-08-14T00:00:00.000Z', '取这一维里最近的那一次')
+  test('按用户归堆：每个人一堆模型，大的在前', () => {
+    const byUser = groupChildren(rows, 'username', 'modelId')
+    assert.deepEqual([...byUser.keys()], ['zhangsan', 'lisi'])
+    assert.deepEqual(byUser.get('zhangsan').map((child) => [child.modelId, child.tokens]),
+      [['opus', 1200], ['haiku', 60]])
+    assert.deepEqual(byUser.get('lisi').map((child) => child.modelId), ['opus'])
   })
 
-  test('按模型折：每个模型一行，用户进 children', () => {
-    const models = pivot(rows, 'modelId')
-    assert.deepEqual(models.map((row) => row.modelId), ['opus', 'haiku'])
-    assert.equal(models[0].tokens, 1560)
-    assert.deepEqual(models[0].children.map((child) => child.username), ['zhangsan', 'lisi'])
+  test('按模型归堆：每个模型一堆人，大的在前', () => {
+    const byModel = groupChildren(rows, 'modelId', 'username')
+    assert.deepEqual(byModel.get('opus').map((child) => child.username), ['zhangsan', 'lisi'])
+    assert.deepEqual(byModel.get('haiku').map((child) => child.username), ['zhangsan'])
   })
 
-  test('两个方向的合计相等 —— 折叠不该改变总数', () => {
-    const byUser = sumBuckets(pivot(rows, 'username'))
-    const byModel = sumBuckets(pivot(rows, 'modelId'))
+  /**
+   * 两个方向的 children 加起来相等 —— 它们是同一份明细的两种归法。
+   * 这条替掉了从前那句"折叠不该改变总数"：现在总数不由归堆产生，
+   * 但**归堆本身不许丢行**这件事仍然要钉住。
+   */
+  test('两个方向的 children 加起来相等 —— 归堆不许丢行', () => {
+    const flat = (map) => [...map.values()].flat()
+    const byUser = sumBuckets(flat(groupChildren(rows, 'username', 'modelId')))
+    const byModel = sumBuckets(flat(groupChildren(rows, 'modelId', 'username')))
     assert.deepEqual(byUser, byModel)
     assert.equal(byUser.tokens, 1620)
+  })
+
+  test('归堆不自己求和 —— 父行的数只有 SQL 聚合一个来源', () => {
+    const child = groupChildren(rows, 'username', 'modelId').get('zhangsan')[0]
+    assert.deepEqual(Object.keys(child).sort(),
+      ['cacheRead', 'input', 'lastAt', 'modelId', 'output', 'runs', 'tokens'])
+    assert.equal('username' in child, false, 'child 里不该带回父行那一维')
   })
 })
 
@@ -171,7 +186,7 @@ describe('总表拼装', () => {
   test('没跑过的账号也有一行 0 —— 否则"没用过"和"不存在"长得一样', async () => {
     const { usage } = await build()
     const summary = await usage.summary({
-      accounts: [{ username: 'zhangsan', role: 'admin' }, { username: 'lisi', role: 'user', disabled: true }],
+      accounts: fakeAccounts([{ username: 'zhangsan', role: 'admin' }, { username: 'lisi', role: 'user', disabled: true }]),
       days: 30,
       now: NOW,
     })
@@ -192,7 +207,7 @@ describe('总表拼装', () => {
    */
   test('每个用户行都带着他用过的模型（大的在前）', async () => {
     const { usage } = await build()
-    const summary = await usage.summary({ accounts: [{ username: 'zhangsan' }], days: 30, now: NOW })
+    const summary = await usage.summary({ accounts: fakeAccounts([{ username: 'zhangsan' }]), days: 30, now: NOW })
     const mine = summary.users.find((row) => row.username === 'zhangsan')
     assert.deepEqual(mine.models.map((row) => [row.modelId, row.tokens]), [['opus', 1200], ['haiku', 50]])
     assert.equal(mine.models.reduce((sum, row) => sum + row.tokens, 0), mine.tokens, '拆分必须加得回总数')
@@ -200,7 +215,7 @@ describe('总表拼装', () => {
 
   test('按模型看：每个模型一行，带上用了它的人', async () => {
     const { usage } = await build()
-    const summary = await usage.summary({ accounts: [{ username: 'zhangsan' }], group: 'model', days: 30, now: NOW })
+    const summary = await usage.summary({ accounts: fakeAccounts([{ username: 'zhangsan' }]), group: 'model', days: 30, now: NOW })
     assert.equal(summary.group, 'model')
     assert.deepEqual(summary.models.map((row) => [row.modelId, row.tokens]), [['opus', 1206], ['haiku', 50]])
     assert.deepEqual(summary.models[0].users.map((row) => row.username), ['zhangsan', 'gone'])
@@ -209,7 +224,7 @@ describe('总表拼装', () => {
 
   test('两个维度的合计一模一样 —— 换个维度总数不能变', async () => {
     const { usage } = await build()
-    const accounts = [{ username: 'zhangsan' }]
+    const accounts = fakeAccounts([{ username: 'zhangsan' }])
     const asUser = await usage.summary({ accounts, group: 'user', days: 30, now: NOW })
     const asModel = await usage.summary({ accounts, group: 'model', days: 30, now: NOW })
     assert.deepEqual(asUser.total, asModel.total)
@@ -224,7 +239,7 @@ describe('总表拼装', () => {
   /** 账号删了，它的账还在。藏起来只会让合计对不上 */
   test('台账里有、账号清单里没有的，标成 orphan 留在表里', async () => {
     const { usage } = await build()
-    const summary = await usage.summary({ accounts: [{ username: 'zhangsan' }], days: 30, now: NOW })
+    const summary = await usage.summary({ accounts: fakeAccounts([{ username: 'zhangsan' }]), days: 30, now: NOW })
     const orphan = summary.users.find((row) => row.username === 'gone')
     assert.equal(orphan.orphan, true)
     assert.equal(orphan.tokens, 6)
@@ -234,7 +249,7 @@ describe('总表拼装', () => {
   test('按 token 降序；一样多的按名字排（顺序不能每次刷新都变）', async () => {
     const storage = createMemoryStorage()
     const usage = createUsageStore({ storage, logger: silentLogger })
-    const accounts = [{ username: 'bob' }, { username: 'alice' }, { username: 'carol' }]
+    const accounts = fakeAccounts([{ username: 'bob' }, { username: 'alice' }, { username: 'carol' }])
     await storage.usage.record({ username: 'carol', runId: 'r1', modelId: 'opus', input: 10, output: 0 })
 
     const summary = await usage.summary({ accounts, days: 30, now: NOW })

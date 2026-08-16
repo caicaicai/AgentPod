@@ -26,6 +26,7 @@
 import crypto from 'node:crypto'
 import { promisify } from 'node:util'
 
+import { PAGE_DEFAULT, PAGE_MAX } from '../persistence/page.js'
 import { parseUsers } from './password-auth.js'
 
 const scrypt = promisify(crypto.scrypt)
@@ -182,8 +183,10 @@ export function createUserStore({ config, storage, groups = null, logger = conso
     const seeds = [...parseUsers(config.auth.password.users)]
     if (!seeds.length) return { seeded: 0, skipped: 0 }
     // 库里一个人都没有 = 全新部署，那么 CONSOLE_USERS 的**第一个**就是管理员。
-    // 已经有人了就不再自动给管理员 —— 那属于提权，得由现有管理员显式操作
-    const fresh = (await map.all()).length === 0
+    // 已经有人了就不再自动给管理员 —— 那属于提权，得由现有管理员显式操作。
+    // 用 count() 而不是 `all().length`：这一句只想知道"是不是空的"，
+    // 而它跑在**每次启动**上 —— 没必要为一个布尔把整张账号表读出来
+    const fresh = (await map.count()) === 0
     let seeded = 0
     let skipped = 0
     for (const [index, [username, password]] of seeds.entries()) {
@@ -376,19 +379,28 @@ export function createUserStore({ config, storage, groups = null, logger = conso
   }
 
   /**
-   * 按邮箱找账号。**全表扫**。
+   * 按邮箱找账号。**仍然是全表扫**（邮箱住在 JSON 里，没有索引可走），
+   * 但**一页一页地扫**，而不是先把全部账号读进内存再遍历。
    *
-   * 只在注册和找回这类低频路径上调，而这个部署的账号数量是"一个团队"的量级，
-   * 不是"一个公网产品"的量级。真到了需要索引的规模，该做的是给账号表加一列
-   * 索引，而不是在这里塞一层会和主表漂移的缓存。
+   * 两者的复杂度一样，差别在峰值内存和"找到就停"：绝大多数情况下要找的那个人
+   * 排在前几页，翻到就返回，后面的页根本不会去查。从前那种写法必须先把最后一个
+   * 账号也读出来，才能开始比第一个。
+   *
+   * 只在注册和找回这类低频路径上调。真到了需要索引的规模，该做的是给账号
+   * 拆一张有 email 列和唯一索引的正经表，而不是在这里塞一层会和主表漂移的缓存。
    */
   async function findByEmail(email) {
     const target = String(email || '').trim().toLowerCase()
     if (!target) return null
-    for (const record of await map.all()) {
-      if (String(record.email || '').toLowerCase() === target) return toPublicUser(record)
+    let cursor = ''
+    for (;;) {
+      const { items, hasMore, nextCursor } = await map.page({ cursor, limit: PAGE_MAX })
+      for (const record of items) {
+        if (String(record.email || '').toLowerCase() === target) return toPublicUser(record)
+      }
+      if (!hasMore) return null
+      cursor = nextCursor
     }
-    return null
   }
 
   return {
@@ -501,13 +513,84 @@ export function createUserStore({ config, storage, groups = null, logger = conso
       return toPublicUser(await map.get(String(username)))
     },
 
-    async list() {
-      const all = await map.all()
-      return all.map(toPublicUser).sort((a, b) => a.username.localeCompare(b.username))
+    /**
+     * 账号清单，**一页一页取**。
+     *
+     * ── 为什么这里必须是真的分页 ────────────────────────────────────────
+     *
+     * 从前是 `map.all()` 整取再在 JS 里排序。账号是这个部署里**唯一一个跟着使用量
+     * 无上限增长**的全局集合（模型十几条、分组几条，那两个整取是有依据的），
+     * 所以那句话的实际含义是：管理员每打开一次账号页，就把每个人的完整记录
+     * —— 包括 scrypt 派生结果和盐 —— 从库里搬进 Node，再排一遍序，然后丢掉
+     * 其中除了这一屏之外的全部。
+     *
+     * 现在走存储层的 `page()`：`ap_kv` 的主键是 `(collection, owner, id)`，
+     * 而**账号的 id 就是用户名**，也就是排序键本身 —— 于是"按用户名升序翻页"
+     * 正好是主键上的一次范围扫描，翻到第几页都一样快。
+     *
+     * ⚠️ 排序从 `localeCompare` 换成了 SQL 的排序（utf8mb4 的默认校对）。
+     * 中文用户名的相对次序可能与从前不同，这是把排序交给数据库的必然代价 ——
+     * 而它是唯一能与翻页自洽的选择：在 Node 里重排一页，只会让第二页的第一条
+     * 排到第一页的中间去。
+     *
+     * @param {string} [params.search] 用户名的子串筛选。**服务端做** ——
+     *   从前是前端在已加载的清单上 filter，分页之后那等于"只搜当前这一页"，
+     *   而搜不到的人看起来就像不存在。
+     * @returns {Promise<{items, hasMore, nextCursor}>}
+     */
+    async page({ cursor = '', limit = PAGE_DEFAULT, search = '' } = {}) {
+      const found = await map.page({ cursor, limit, contains: String(search || '').trim() })
+      return { ...found, items: found.items.map(toPublicUser) }
     },
 
-    async count() {
-      return (await map.all()).length
+    /** 取一批账号（一页的量）。给用量页那些行补 role / disabled 用 */
+    async getMany(usernames) {
+      const names = (usernames || []).map((name) => String(name || '')).filter((name) => USERNAME_RE.test(name))
+      return (await map.many(names)).map(toPublicUser)
+    },
+
+    /** 符合这个搜索词的账号有多少个。表头那句"共 N 个账号"用它，不再靠数组长度 */
+    async count({ search = '' } = {}) {
+      return map.count({ contains: String(search || '').trim() })
+    },
+
+    /**
+     * 每个分组各有多少人（外加 `''` 那一档 = 无分组）。
+     *
+     * 存在的理由是分组页上那两个数。从前它们是把**全部账号**取回来在 JS 里
+     * filter 出来的，也就是说打开一次分组页 = 一次全表搬运，
+     * 而页面上真正要显示的只有每组一个整数。
+     */
+    async countByGroup() {
+      return map.countByField('groupId')
+    },
+
+    /**
+     * 账号总数 + **在岗管理员数**。
+     *
+     * 后面这个数是有具体用处的，不是装饰：界面靠它判断"这是不是最后一个管理员"
+     * （最后一个不能降级也不能禁用，降完就没人能再改回来）。从前它是
+     * `adminUsers.filter(...)` 从**已加载的那一页**算的 —— 分页之后那个算法会
+     * 在第二页上告诉你"管理员只剩一个了"，而实际上第一页里还有三个。
+     *
+     * ⚠️ 这一句仍然是全表扫（role 住在 JSON 里，见 mysql-map.countByField 的说明）。
+     * 它只在管理台打开时走一次，回来的是两个整数。
+     */
+    async stats() {
+      /**
+       * 被禁用的管理员不算数：他登不进来，也就救不了场。所以判据是
+       * **role = admin 且 disabled ≠ true**，两个条件一句 SQL 里数完。
+       *
+       * 写成"不等于 true"而不是"等于 false"，是为了老记录：`disabled` 这个字段
+       * 不是从第一天就有的，缺了它的行在业务上是"没被禁"（toPublicUser 里
+       * `Boolean(record.disabled)` 就是这么读的），而 `= 'false'` 会把它们漏掉 ——
+       * 现象是界面认定"这是最后一个管理员"，把几个本来能操作的按钮全禁掉。
+       */
+      const [total, admins] = await Promise.all([
+        map.count(),
+        map.countMatching({ role: 'admin' }, { disabled: true }),
+      ])
+      return { total, admins }
     },
 
     /**
@@ -607,12 +690,24 @@ export function createUserStore({ config, storage, groups = null, logger = conso
       const target = String(groupId || '')
       if (!target) return 0
       let touched = 0
-      for (const record of await map.all()) {
-        if (record.groupId !== target) continue
-        await map.merge(record.username, { groupId: '', updatedAt: Date.now() })
-        touched += 1
+      /**
+       * 一页一页地翻着改，不把全部账号读进内存。
+       *
+       * 按 id（= 用户名）翻页在这里是**安全的**：这个循环只改 `groupId`，
+       * 不改也不删 id，所以序列不会在翻页途中重排 —— 而那正是 keyset 翻页
+       * 唯一怕的事。
+       */
+      let cursor = ''
+      for (;;) {
+        const { items, hasMore, nextCursor } = await map.page({ cursor, limit: PAGE_MAX })
+        for (const record of items) {
+          if (record.groupId !== target) continue
+          await map.merge(record.username, { groupId: '', updatedAt: Date.now() })
+          touched += 1
+        }
+        if (!hasMore) return touched
+        cursor = nextCursor
       }
-      return touched
     },
   }
 }

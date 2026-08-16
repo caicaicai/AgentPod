@@ -20,6 +20,7 @@
  * 加方法时**两边一起加**，否则契约用例会先告诉你少了什么。
  */
 
+import { PAGE_DEFAULT, finishPage } from '../../src/persistence/page.js'
 import { assertSegment } from '../../src/persistence/paths.js'
 // 形状从真后端那边 import，不在这里再拼一遍 —— 少一处能漂移的地方
 import { toTotals } from '../../src/persistence/storage.js'
@@ -48,6 +49,32 @@ function applyPatch(value, patch) {
 function rowsSince(usage, since) {
   const from = since ? new Date(since) : null
   return [...usage.values()].filter((row) => !from || row.createdAt >= from)
+}
+
+/**
+ * 按某一维分组求和，对应真后端的 `GROUP BY <维度>`。
+ *
+ * 带 `tokens`（= input + output，**不含 cacheRead**）—— 与真后端 SELECT 里那一列
+ * 同一个口径，也与 telemetry/usage-store.js 的 sumBuckets 一致。
+ */
+function foldUsage(rows, dimension) {
+  const groups = new Map()
+  for (const row of rows) {
+    const key = row[dimension]
+    const current = groups.get(key)
+      || { [dimension]: key, runs: 0, input: 0, output: 0, cacheRead: 0, lastAt: null }
+    current.runs += 1
+    current.input += row.input
+    current.output += row.output
+    current.cacheRead += row.cacheRead
+    if (!current.lastAt || row.createdAt > current.lastAt) current.lastAt = row.createdAt
+    groups.set(key, current)
+  }
+  return [...groups.values()].map((row) => ({
+    ...row,
+    tokens: row.input + row.output,
+    lastAt: row.lastAt ? row.lastAt.toISOString() : null,
+  }))
 }
 
 /** 按天汇总，旧到新。与真后端的 DATE_FORMAT 一致：分的是 **UTC** 的天（连接上 timezone='Z'） */
@@ -92,6 +119,93 @@ function createMap(store, collection, owner) {
     },
     async entries() {
       return ownEntries().map(([id, value]) => [id, clone(value)])
+    },
+
+    /**
+     * 与真后端的 `ORDER BY id ASC LIMIT ?` 对应。
+     *
+     * ⚠️ `contains` 这里用的是 `includes`，而真后端是 `LIKE '%…%' ESCAPE '\\'` ——
+     * 两者只有在**通配符被转义之后**才等价，所以真后端那边少一句 escapeLike
+     * 就会在契约用例里现形（那条用例专门搜一个带 `%` 的名字）。
+     */
+    async page({ cursor = '', limit = PAGE_DEFAULT, contains = '' } = {}) {
+      const keyword = String(contains || '')
+      const rows = ownEntries()
+        .filter(([id]) => (!cursor || id > String(cursor)) && (!keyword || id.includes(keyword)))
+      const { page, hasMore, nextCursor } = finishPage(rows.slice(0, limit + 1), limit, ([id]) => id)
+      return { items: page.map(([, value]) => clone(value)), hasMore, nextCursor }
+    },
+
+    /** 与真后端的 `id IN (…)` 对应：回的顺序按 id 升序，不按传进来的顺序 */
+    async many(ids) {
+      const want = new Set([...new Set((ids || []).map((id) => String(id)))].filter(Boolean))
+      if (!want.size) return []
+      return ownEntries().filter(([id]) => want.has(id)).map(([, value]) => clone(value))
+    },
+
+    async count({ contains = '' } = {}) {
+      const keyword = String(contains || '')
+      return ownEntries().filter(([id]) => !keyword || id.includes(keyword)).length
+    },
+
+    /**
+     * 与真后端的 `GROUP BY JSON_EXTRACT(payload, '$.<field>')` 对应。
+     *
+     * 字段名的合法性判据也要一样：真后端那边它要拼进 JSON path（拼不得随便什么
+     * 字符串），替身这边技术上无所谓 —— 但两边不一致的话，一个非法字段名
+     * 在用例里静静地通过，到了生产才抛。
+     */
+    async countByField(field) {
+      const name = String(field || '')
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`字段名不合法：${field}`)
+      const out = new Map()
+      for (const [, value] of ownEntries()) {
+        /**
+         * 字段缺席时真后端回 SQL NULL，一并归到空串那一档。
+         *
+         * 其余一律 `String()`：JSON_UNQUOTE 回的**永远是字符串**（`false` 出来是
+         * `'false'`），不转的话替身会拿布尔当 Map 的键，于是同一份数据在两个后端上
+         * 分出不同的档。这个方法只保证**字符串字段**的语义（目前只有 groupId），
+         * 拿它去数布尔字段是可以的，但要知道键是 `'true'` / `'false'`。
+         */
+        const raw = value?.[name]
+        const key = raw === undefined || raw === null ? '' : String(raw)
+        out.set(key, (out.get(key) || 0) + 1)
+      }
+      return out
+    },
+
+    /**
+     * 与真后端的多字段计数对应。⚠️ `notEquals` 上**字段缺席算"不等于"** ——
+     * 真后端那边靠一句 `IS NULL OR <> ?` 保证（不写的话 SQL 三值逻辑会让缺字段的
+     * 行从两边计数里一起消失），这边靠 `raw === undefined` 这一支。
+     */
+    async countMatching(equals = {}, notEquals = {}) {
+      const assertField = (field) => {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(field || ''))) throw new Error(`字段名不合法：${field}`)
+      }
+      /**
+       * ⚠️ 字段名要**在遍历之前**全部校验一遍。
+       *
+       * 真后端那边是拼 SQL 时校验的，也就是说**一条记录都没有它照样抛**。
+       * 只在 filter 回调里校验的话，空集合上这个方法会安静地回 0 ——
+       * 而那正是契约用例最容易漏掉的形态（用例里的库常常是空的）。
+       */
+      for (const field of [...Object.keys(equals), ...Object.keys(notEquals)]) assertField(field)
+      const read = (value, field) => {
+        const raw = value?.[field]
+        return raw === undefined || raw === null ? null : String(raw)
+      }
+      return ownEntries().filter(([, value]) => {
+        for (const [field, want] of Object.entries(equals)) {
+          if (read(value, field) !== String(want)) return false
+        }
+        for (const [field, want] of Object.entries(notEquals)) {
+          const actual = read(value, field)
+          if (actual !== null && actual === String(want)) return false
+        }
+        return true
+      }).length
     },
     async get(id) {
       return clone(store.kv.get(keyOf(id))) ?? null
@@ -256,9 +370,13 @@ export function createMemoryStorage() {
         })
       },
 
-      async byUserAndModel({ since = null } = {}) {
+      /** `usernames` 与真后端一致：不传 = 全部，传空数组 = 空（不是全部） */
+      async byUserAndModel({ since = null, usernames = null } = {}) {
+        if (usernames && !usernames.length) return []
+        const want = usernames ? new Set(usernames.map(String)) : null
         const groups = new Map()
         for (const row of rowsSince(store.usage, since)) {
+          if (want && !want.has(row.username)) continue
           const key = `${row.username}${SEP}${row.modelId}`
           const current = groups.get(key)
             || { username: row.username, modelId: row.modelId, runs: 0, input: 0, output: 0, cacheRead: 0, lastAt: null }
@@ -272,6 +390,49 @@ export function createMemoryStorage() {
         return [...groups.values()]
           .map((row) => ({ ...row, lastAt: row.lastAt ? row.lastAt.toISOString() : null }))
           .sort((a, b) => (b.input + b.output) - (a.input + a.output))
+      },
+
+      /** 与真后端的 `COUNT(DISTINCT username)` 对应 */
+      async countActiveUsers({ since = null } = {}) {
+        return new Set(rowsSince(store.usage, since).map((row) => row.username)).size
+      },
+
+      /** 与真后端的 `GROUP BY model_id` 对应，含 `tokens` 这一列（= input + output） */
+      async byModel({ since = null } = {}) {
+        return foldUsage(rowsSince(store.usage, since), 'modelId')
+          .sort((a, b) => b.tokens - a.tokens || (a.modelId < b.modelId ? -1 : a.modelId > b.modelId ? 1 : 0))
+      },
+
+      /**
+       * 与真后端的 keyset 聚合分页对应：token 降序、同数按用户名升序，多取一条。
+       *
+       * ⚠️ 排序与游标判据必须与那边**逐字一致**，否则"翻页漏一条"这种错会只在
+       * 真库上出现 —— 而那是最难查的一类 bug，专门有一条契约用例钉它。
+       */
+      async topUsers({ since = null, cursor = null, limit = 50 } = {}) {
+        const at = cursor ? Number(cursor.tokens) || 0 : null
+        const from = cursor ? String(cursor.username) : ''
+        return foldUsage(rowsSince(store.usage, since), 'username')
+          .filter((row) => at === null || row.tokens < at || (row.tokens === at && row.username > from))
+          .sort((a, b) => b.tokens - a.tokens || (a.username < b.username ? -1 : a.username > b.username ? 1 : 0))
+          .slice(0, limit + 1)
+      },
+
+      /**
+       * 与真后端那句 ROW_NUMBER() 对应：每个模型取前 limit 个人。
+       * 结果按 (modelId 升序, tokens 降序, username 升序) 排 —— 与那边逐字一致。
+       */
+      async topUsersPerModel({ since = null, modelIds = [], limit = 20 } = {}) {
+        if (!modelIds.length) return []
+        const want = new Set(modelIds.map(String))
+        const out = []
+        for (const modelId of [...want].sort()) {
+          const rows = foldUsage(rowsSince(store.usage, since).filter((row) => row.modelId === modelId), 'username')
+            .sort((a, b) => b.tokens - a.tokens || (a.username < b.username ? -1 : a.username > b.username ? 1 : 0))
+            .slice(0, limit)
+          out.push(...rows.map((row) => ({ ...row, modelId })))
+        }
+        return out
       },
 
       /** 与真后端一致：`modelId` 空串 = 不筛模型（不是"筛模型为空串的那些行"） */
