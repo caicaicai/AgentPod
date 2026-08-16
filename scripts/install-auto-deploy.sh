@@ -61,7 +61,11 @@ Requires=docker.service
 Type=oneshot
 User=${RUN_USER}
 WorkingDirectory=${REPO_DIR}
-ExecStart=${REPO_DIR}/scripts/deploy.sh
+# 走 bash 而不是直接 exec 脚本本身：仓库放在 /home 下时，文件的 SELinux 类型是
+# user_home_t，systemd 直接 exec 它会被拒，报的是 `203/EXEC Permission denied`
+# —— 而 `ls -l` 上执行位明明是有的，光看权限位查不出来。让 bash（bin_t）去读它
+# 就没有这个问题：被限制的是"以它为入口起一个进程"，不是读它。
+ExecStart=/bin/bash ${REPO_DIR}/scripts/deploy.sh
 # 首次构建（要装 Chromium）可能跑很久，给足时间，不然会被半路杀掉
 # 留下一堆构建到一半的层
 TimeoutStartSec=3600
