@@ -136,6 +136,9 @@ export async function refreshModels() {
       effective: Boolean(data.effective),
       llmMode: data.llmMode || '',
       encrypted: Boolean(data.encrypted),
+      // 单价输入框上标的币种（USAGE_CURRENCY）。让界面写死一个符号的话，
+      // 换了部署就是"单位错了、数字全对"的一张账单
+      currency: data.currency || '',
     }
     state.adminNote = ''
     state.adminNoteWarn = false

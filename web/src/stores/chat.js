@@ -148,6 +148,16 @@ async function driveRun({ start, runId = '' }) {
     reconnecting: null,
     retry: null,
     retriedCount: 0,
+    /**
+     * 正在压缩上下文时的 `{ reason }`，压完清空。
+     *
+     * 与 `retry` 是同一类东西：一段**没有任何输出的等待**。压缩要另外调一次模型
+     * 写摘要，几秒到十几秒，期间一个字都不出 —— 不说出来的话，用户看到的是
+     * "卡住了"，多半会去点停止。
+     */
+    compacting: null,
+    /** 这一轮压缩过几次。压完 `compacting` 就清了，但这件事值得留在气泡上 */
+    compactedCount: 0,
     timestamp: Date.now(),
     controller,
   })
@@ -230,6 +240,26 @@ async function driveRun({ start, runId = '' }) {
               live.retriedCount += 1
             } else {
               live.retry = null
+            }
+            break
+          /**
+           * 上下文压缩。自动压缩默认开着，所以这一帧在长会话里是常态，不是异常。
+           *
+           * 失败且**还会重试**时不清 `compacting` —— 清了的话界面会闪一下
+           * "压缩结束"，紧接着又是"正在压缩"，看起来像卡在循环里。
+           */
+          case 'compaction':
+            if (data.state === 'start') {
+              live.compacting = { reason: data.reason }
+              live.compactedCount += 1
+            } else if (!data.willRetry) {
+              live.compacting = null
+              /**
+               * 压缩失败了要说出来，但**不算这一轮失败**：pi 压不动时照样把这一轮
+               * 跑完（除非是 overflow 那种压缩本来就是在救场的）。所以走 warning
+               * 而不是 error —— 用 error 的话，一条正常答完的回复会顶着一条红字。
+               */
+              if (data.errorMessage) live.warning = `上下文压缩失败：${data.errorMessage}`
             }
             break
           case 'tool_call':

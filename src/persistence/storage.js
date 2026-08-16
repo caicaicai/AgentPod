@@ -327,6 +327,34 @@ export async function createStorage({ config, logger = console, pool: sharedPool
         return toTotals(rows[0])
       },
 
+      /**
+       * 一个用户的按天明细，**再按模型拆一层**。
+       *
+       * ── 为什么不能拿 dailyForUser 顶替 ──────────────────────────────────
+       *
+       * 上面那个不带 modelId 时是 `GROUP BY day` —— 一天一行，模型这一维在 SQL 里
+       * 就加没了。折算成本要的最小单元是「一天 × 一个模型」（各模型单价差一个数量级，
+       * 见 byUserAndModel 的注释），从一天的合计 token 里再也拆不回来。
+       *
+       * 于是"这个人每天花多少钱"这条曲线只有两种画法：要么在这里多带一维，
+       * 要么按人一天一个价去猜。后者不是精度问题，是**编数字**。
+       *
+       * 单独一个方法而不是给 dailyForUser 加参数：那个方法有明确的返回形状
+       * （一天一行），带模型维的行多一个字段，两种形状挤在一个返回值里，
+       * 调用方就得先判断"这次是哪种"——而判断错的表现是把同一天加了好几遍。
+       */
+      async dailyForUserByModel({ username, since = null }) {
+        assertSegment(username, 'username')
+        const [rows] = await pool.query(
+          'SELECT DATE_FORMAT(created_at, \'%Y-%m-%d\') AS day, model_id AS modelId, COUNT(*) AS runs,'
+          + ' SUM(input_tokens) AS input, SUM(output_tokens) AS output, SUM(cache_read_tokens) AS cacheRead'
+          + ' FROM ap_usage WHERE username = ? AND (? IS NULL OR created_at >= ?)'
+          + ' GROUP BY day, model_id ORDER BY day ASC',
+          [username, since, since],
+        )
+        return rows.map(toBucket)
+      },
+
       /** 一个模型的按天明细（全体用户合起来）。看的是"这个模型的量在往哪走" */
       async dailyForModel({ modelId, since = null }) {
         const [rows] = await pool.query(

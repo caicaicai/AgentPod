@@ -54,6 +54,47 @@ const KEY_MAX = 512
 /** pi 认得的两种输入模态。别的字符串传进去只会让上游报一句看不懂的话 */
 const INPUT_KINDS = ['text', 'image']
 
+/**
+ * 单价的三个字段，**单位统一为「每百万 token」**。
+ *
+ * ── 为什么单价住在模型记录上 ────────────────────────────────────────────
+ *
+ * `ap_usage` 每行都带 username + model_id + 三种 token（见 telemetry/usage-store.js
+ * 的文件头），唯一缺的就是单价。而单价天然属于"这条模型接的是哪个上游、按什么价"，
+ * 与 baseUrl / key 是同一件事的三个面 —— 放在别处（一份独立的价目配置）就会出现
+ * "模型改了上游、价没跟着改"这种只在月底对账时才发现的错位。
+ *
+ * ── 为什么是"每百万"而不是"每 token" ────────────────────────────────────
+ *
+ * 上游的价目表全是按百万报的（$3.00 / 1M input）。让管理员把它换算成
+ * 0.000003 再填，等于把一次每人都要做、做错了还看不出来的乘法塞进配置流程 ——
+ * 而填错一个数量级的表现是账单差 1000 倍，且界面上完全看不出异常。
+ *
+ * ── null 与 0 是两回事，必须分开 ────────────────────────────────────────
+ *
+ * `null` = **没填**（这条模型没定价，算不出钱）；`0` = **填了，就是免费**
+ * （自建模型、包月的私有部署）。合成一个值的话，没定价的模型会在账单上显示
+ * ¥0.00 —— 那不是"不要钱"，那是"我们不知道"，而这两句话在一张账单上
+ * 差别极大。所以未定价一路以 null 传到界面，由界面写"未定价"。
+ */
+const PRICE_FIELDS = ['priceInput', 'priceOutput', 'priceCacheRead']
+
+/**
+ * 单价的上限，纯粹是个手滑闸门。
+ *
+ * 挡的是把"每 token 的价格"当成"每百万"填反了的那一类（或者多按了几个 0）：
+ * 真实单价没有超过每百万一千块的，而一个填成 3000000 的数字会让某一天的账单
+ * 变成一串没人看得懂的数字，然后被当成统计代码的 bug 去查。
+ */
+const PRICE_MAX = 1000
+
+/** 报错文案里那个字段叫什么。回一句"priceCacheRead 不能是负数"等于没说 */
+const PRICE_LABELS = {
+  priceInput: '输入单价',
+  priceOutput: '输出单价',
+  priceCacheRead: '缓存读入单价',
+}
+
 function trimmed(value, max, field) {
   const text = String(value ?? '').trim()
   if (text.length > max) throw new Error(`${field}不能超过 ${max} 个字符`)
@@ -64,6 +105,27 @@ function positiveInt(value, fallback) {
   const number = Number(value)
   if (!Number.isFinite(number) || number <= 0) return fallback
   return Math.round(number)
+}
+
+/**
+ * 单价的收口：`null` = 没填，数字 = 填了（含 0）。
+ *
+ * 空串、null、undefined 全部归到 null —— 表单里那个没动过的输入框回来的是空串，
+ * 而它的含义就是"这一项我没填"。**只有真的写了一个数字才叫定价**。
+ *
+ * 非法输入（负数、NaN、超过 PRICE_MAX）**抛错而不是兜底成 null**：
+ * 其余字段兜底是因为它们兜错了顶多行为不对，而单价兜错了会安静地把一条模型
+ * 从"定价 3 元"变成"未定价"，账单上少一块钱谁也不会去查配置。
+ */
+function priceOrNull(value, field) {
+  if (value === null || value === undefined) return null
+  const text = String(value).trim()
+  if (!text) return null
+  const number = Number(text)
+  if (!Number.isFinite(number)) throw new Error(`${field}必须是数字`)
+  if (number < 0) throw new Error(`${field}不能是负数`)
+  if (number > PRICE_MAX) throw new Error(`${field}超过 ${PRICE_MAX}（单位是每百万 token，别填成每 token 的价）`)
+  return number
 }
 
 /**
@@ -98,6 +160,31 @@ function normalizeInput(value) {
 }
 
 /**
+ * 从一条记录里读出三个单价，外加两个**算好的判据**。
+ *
+ * 判据算在这里而不是留给界面各算一遍：
+ *   `priced`         能不能算钱（input 或 output 至少填了一个）
+ *   `priceComplete`  三项都填了。缺项在计价时按 0 计，界面据此写一句提示 ——
+ *                    只填了 input/output 的部署，缓存读入那部分成本会被算成 0，
+ *                    那是**低估**，而低估的账单没人会去质疑。
+ *
+ * ⚠️ 老记录（这个字段上线之前建的）里三项都不存在，读出来是 null，
+ * 于是它们表现为"未定价" —— 那正是事实，不必迁移。
+ */
+function readPrices(record) {
+  const prices = {}
+  for (const field of PRICE_FIELDS) {
+    const value = record?.[field]
+    prices[field] = typeof value === 'number' && Number.isFinite(value) ? value : null
+  }
+  return {
+    ...prices,
+    priced: prices.priceInput !== null || prices.priceOutput !== null,
+    priceComplete: PRICE_FIELDS.every((field) => prices[field] !== null),
+  }
+}
+
+/**
  * 一条记录 → 给浏览器看的形状。
  *
  * **key 只回掩码**，且带一个 `hasKey` 让界面能区分"没配"和"配了但你看不全"。
@@ -127,6 +214,7 @@ function toPublicModel(record, box) {
     reasoning: Boolean(record.reasoning),
     maxTokensField: record.maxTokensField || '',
     sort: Number(record.sort) || 0,
+    ...readPrices(record),
     hasKey: Boolean(record.key),
     keyMask,
     keyBroken,
@@ -232,6 +320,18 @@ export function createModelStore({ config = {}, storage, logger = console }) {
         throw new Error('上限字段名只能是 max_tokens 或 max_completion_tokens')
       }
       next.maxTokensField = field
+    }
+    /**
+     * 三个单价各自独立判断"传了没有"。
+     *
+     * 不能像别的字段那样在 `!partial` 时统一给默认值：新建时没填单价的含义是
+     * "先不定价"，而那正好就是 null —— priceOrNull 对 undefined 回的也是 null，
+     * 两条路殊途同归。改的时候没传则整个字段不动（PATCH 的常规语义）。
+     */
+    for (const field of PRICE_FIELDS) {
+      if (!partial || body[field] !== undefined) {
+        next[field] = priceOrNull(body[field], PRICE_LABELS[field])
+      }
     }
     if (!partial || body.groups !== undefined) {
       // 去重 + 去空，空数组的含义是"所有分组可用"（见 visibleTo）
@@ -360,6 +460,32 @@ export function createModelStore({ config = {}, storage, logger = console }) {
           maxTokensField: record.maxTokensField || '',
           // 给日志和界面用的人类名字，不参与任何匹配
           label: record.name,
+        })
+      }
+      return out
+    },
+
+    /**
+     * 给用量台账用的价目表：`model_id → { input, output, cacheRead }`。
+     *
+     * **键是 `record.model`（发给上游的那个名字），不是 `record.id`** —— 台账里
+     * `ap_usage.model_id` 存的就是它（run-service 记的是 `model.id`，而 model-factory
+     * 把 `record.model` 放进了 `id`）。用错一个键的表现是所有模型都"未定价"，
+     * 而那看起来像是"管理员还没填"，不像是接错了。
+     *
+     * **停用的模型也要回。** 一条模型停用了，它过去的用量还在账上，账单还要对得起来；
+     * 漏掉它只会让那部分成本无声地变成"未定价"。删掉的那些则确实回不来了 ——
+     * 记录都没了，价从哪儿来 —— 它们在用量页上如实显示为未定价。
+     */
+    async prices() {
+      const out = new Map()
+      for (const record of await map.all()) {
+        const { priceInput, priceOutput, priceCacheRead, priced } = readPrices(record)
+        if (!priced) continue
+        out.set(record.model, {
+          input: priceInput ?? 0,
+          output: priceOutput ?? 0,
+          cacheRead: priceCacheRead ?? 0,
         })
       }
       return out

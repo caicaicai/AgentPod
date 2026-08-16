@@ -59,6 +59,26 @@ export function parseTranscript(jsonl = '') {
       sessionId = entry.id || sessionId
       continue
     }
+    /**
+     * 压缩点。**历史本身没有被删掉** —— JSONL 是 append-only，上面那些消息一条不少 ——
+     * 被换掉的只是**下一轮发给模型的那份上下文**：这个点之前的对话，模型看到的
+     * 是一段摘要。
+     *
+     * 所以这条分隔线是历史里唯一说得清那件事的东西。没有它，用户看着满屏
+     * 完整的对话，却发现模型"忘了"上面聊过的细节 —— 而屏幕上的一切都在说
+     * 它不该忘。归因只能落到"这个模型不行"。
+     *
+     * `tokensBefore` 一起带上：它是"压缩之前上下文有多大"，也就是这条会话
+     * 长到了什么程度，比一句干巴巴的"这里压缩过"有用。
+     */
+    if (entry.type === 'compaction') {
+      messages.push({
+        role: 'compaction',
+        tokensBefore: Number(entry.tokensBefore) || 0,
+        timestamp: toMillis(entry.timestamp),
+      })
+      continue
+    }
     // thinking_level_change / model_change / label / custom 等都不进对话流
     if (entry.type !== 'message') continue
 

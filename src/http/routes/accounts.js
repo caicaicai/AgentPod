@@ -28,6 +28,23 @@ import { DEFAULT_TIMEZONE } from '../../telemetry/quota.js'
  *   以及 server.js 里那两个响应辅助函数
  */
 export function createAccountRoutes({ config, identity, users, groups, modelStore, usage }) {
+  /**
+   * 用量接口要用的价目表 + 币种，查一次拼成参数。
+   *
+   * **一条都没定价时整个不传** —— usage-store 收不到 `prices` 就完全按从前的形状回，
+   * 界面据此一列金额都不画。这比回一堆 `cost: null` 好：那样界面得先扫一遍
+   * 才知道"到底是没定价，还是这些人真没花钱"。
+   *
+   * 没有 modelStore（LLM_MODE 不是 db、或者部署压根没启用它）时同理 ——
+   * 那种部署的价住在平台侧，我们这边无从得知，就不该在页面上留一列空着的金额。
+   */
+  async function pricingArgs() {
+    if (!modelStore?.prices) return {}
+    const prices = await modelStore.prices()
+    if (!prices.size) return {}
+    return { prices, currency: config.limits?.usageCurrency || 'USD' }
+  }
+
   return async function handleAccountRoutes({ req, res, url, reqLogger, subject, sendJson, readJsonBody }) {
   /* ─────────────── 账号（改密 / 管理）─────────────── */
 
@@ -147,6 +164,7 @@ export function createAccountRoutes({ config, identity, users, groups, modelStor
         accounts: await users.list(),
         days: url.searchParams.get('days'),
         group: url.searchParams.get('group') || 'user',
+        ...(await pricingArgs()),
       }))
     }
 
@@ -180,6 +198,7 @@ export function createAccountRoutes({ config, identity, users, groups, modelStor
         // 带上模型就只看他在这个模型上的曲线（换模型前后的对比）
         modelId: url.searchParams.get('modelId') || '',
         days: url.searchParams.get('days'),
+        ...(await pricingArgs()),
       })
       /**
        * 名字既不是一个账号、台账里也一行都没有 → 404。
@@ -201,7 +220,7 @@ export function createAccountRoutes({ config, identity, users, groups, modelStor
       const modelId = decodeURIComponent(url.pathname.slice('/v1/admin/usage/model/'.length) || '')
       if (!modelId || modelId.length > 128) throw Errors.badRequest('模型 id 不合法')
       if (!usage?.enabled) return sendJson(res, 200, { enabled: false, modelId, daily: [] })
-      const trend = await usage.trend({ modelId, days: url.searchParams.get('days') })
+      const trend = await usage.trend({ modelId, days: url.searchParams.get('days'), ...(await pricingArgs()) })
       // 模型没有"账号表"可以对照，所以判据只有一条：台账里有没有它
       if (!trend.total.runs) throw Errors.notFound('这个模型在该时间窗内没有用量')
       return sendJson(res, 200, trend)
@@ -231,6 +250,13 @@ export function createAccountRoutes({ config, identity, users, groups, modelStor
           llmMode: config.llm.mode,
           // key 是不是加密入库的。没加密时界面上要说一句，别让人以为它天然安全
           encrypted: Boolean(config.llm.configSecret),
+          /**
+           * 单价那三个输入框上标的币种（USAGE_CURRENCY）。
+           *
+           * 回给界面而不是让它写死：填价的人唯一会犹豫的就是"这个数是什么币"，
+           * 而猜错的表现是一张单位错了、数字全对的账单。
+           */
+          currency: config.limits?.usageCurrency || 'USD',
         })
       }
 

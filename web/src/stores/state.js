@@ -66,6 +66,14 @@ export const state = reactive({
   /** 新会话在发出第一条消息之前只存在于前端，列表里也就没有它 */
   pendingNew: true,
   loadingSession: false,
+  /**
+   * 正在手动压缩上下文。
+   *
+   * 单独一个标志而不是复用 `loadingSession`：那个是"历史正在加载"，
+   * 压缩要**调一次模型**，十几秒起 —— 借用它的话，界面上会显示成
+   * "正在加载对话"，而用户会以为是网络卡了。
+   */
+  compacting: false,
 
   search: '',
   /** 搜索结果（走后端全文），为 null 表示当前不在搜索态 */
@@ -203,7 +211,7 @@ export const state = reactive({
    * 唯一能防住"配完了以为好了"的东西。
    */
   adminModels: [],
-  adminModelsMeta: { effective: false, llmMode: '', encrypted: false },
+  adminModelsMeta: { effective: false, llmMode: '', encrypted: false, currency: '' },
   adminModelsLoading: false,
   /** 正在编辑的那条的 id；'new' 表示在新建 */
   adminModelEditing: '',

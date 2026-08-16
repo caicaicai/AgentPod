@@ -186,6 +186,16 @@ const emptyModel = () => ({
   image: false,
   reasoning: false,
   maxTokensField: '',
+  /**
+   * 三个单价一律**留空**，而不是给 0。
+   *
+   * 空 = 没定价（服务端存 null，用量页写"未定价"）；0 = 免费。给了 0 的话，
+   * 每一条新建的模型都会被当成"免费"，账单上不多不少地少掉它那一份 ——
+   * 而少掉的那部分和"这个模型真的不要钱"在页面上长得一模一样。
+   */
+  priceInput: '',
+  priceOutput: '',
+  priceCacheRead: '',
   groups: [],
   enabled: true,
   sort: 0,
@@ -214,6 +224,16 @@ function startEditModel(model) {
      * 写回去** —— 那时候库里存的就是一串 `sk-••••1234`，而模型开始报 401。
      */
     key: '',
+    /**
+     * `null`（没定价）要变回空串，不能原样塞进 input。
+     *
+     * `v-model` 到一个 number 输入框上的 null 会显示成空 —— 看着没问题 ——
+     * 但它回来时还是 null，而 `emptyModel()` 里那三项是空串。两种"空"混在一起，
+     * 判"用户动过没有"的地方就会分叉。统一成空串，只留一种空。
+     */
+    priceInput: model.priceInput ?? '',
+    priceOutput: model.priceOutput ?? '',
+    priceCacheRead: model.priceCacheRead ?? '',
     groups: [...(model.groups || [])],
   }
 }
@@ -230,6 +250,16 @@ function modelBody() {
     input: form.image ? ['text', 'image'] : ['text'],
     reasoning: Boolean(form.reasoning),
     maxTokensField: form.maxTokensField || '',
+    /**
+     * 单价**原样传字符串**，不做 `Number(x) || 0`。
+     *
+     * 那个写法会把空串变成 0，也就是把"没填"悄悄变成"免费"；而服务端那边
+     * 空串与 null 都归到"没定价"，数字（含 0）才叫定价。这里少做一次转换，
+     * 那条区分才活得下来。
+     */
+    priceInput: form.priceInput,
+    priceOutput: form.priceOutput,
+    priceCacheRead: form.priceCacheRead,
     groups: [...form.groups],
     enabled: Boolean(form.enabled),
     sort: Number(form.sort) || 0,
@@ -423,6 +453,61 @@ const barWidth = (value, max) => `${Math.max(value > 0 ? 2 : 0, Math.round((valu
 const usageMax = computed(() => barMax(usageRows.value))
 const trend = computed(() => state.adminUsageTrend)
 const trendMax = computed(() => barMax(trend.value?.daily || []))
+
+/* ═══════════════ 金额 ═══════════════ */
+
+/** 模型页那三个单价框上标的币种。服务端没回就不标，别编一个 */
+const modelCurrency = computed(() => state.adminModelsMeta?.currency || '')
+
+/**
+ * 模型列表里那一格单价，写成 `3 / 15 / 0.3` 的紧凑形式。
+ *
+ * 顺序固定是 输入 / 输出 / 缓存读入，与表单里三个框的顺序一致 —— 换了顺序，
+ * 一眼扫过去就会把输出价当成输入价（两者常常差五倍）。没填的那一档写 `—`
+ * 而不是 0：它按 0 计，但那是我们的兜底，不是管理员填的数。
+ */
+function priceText(model) {
+  const one = (value) => (typeof value === 'number' ? String(value) : '—')
+  return `${one(model.priceInput)} / ${one(model.priceOutput)} / ${one(model.priceCacheRead)}`
+}
+
+/**
+ * 用量页的计价总开关：**一条模型都没定价时整页不画金额**。
+ *
+ * 服务端在那种情况下压根不回 `pricing`（见 http/routes/accounts.js:pricingArgs）。
+ * 画一列全是"—"只会让人以为是数据没加载出来，然后去刷新。
+ */
+const pricing = computed(() => state.adminUsage?.pricing || null)
+const priced = computed(() => Boolean(pricing.value?.enabled))
+const currency = computed(() => pricing.value?.currency || '')
+
+/**
+ * 金额 → 一串给人看的字。
+ *
+ * `null` 是**未定价**，写成「未定价」而不是 0 —— 这两句话在一张账单上差别极大
+ * （见 src/telemetry/pricing.js 的文件头第 2 条）。
+ *
+ * 小数位随大小变：几十块的行看两位就够，而一次几百 token 的对话是 0.0009，
+ * 保留两位它就成了 0.00 —— 一整列 0.00 说明不了任何问题。
+ */
+function formatMoney(amount) {
+  if (typeof amount !== 'number') return '未定价'
+  if (amount === 0) return '0'
+  const digits = amount >= 1 ? 2 : amount >= 0.01 ? 4 : 6
+  return amount.toFixed(digits)
+}
+
+/**
+ * "这个数是偏小的"该怎么说。
+ *
+ * 用量里混着没定价的模型时，金额只是**已定价那部分**的合计。不写出来的话，
+ * 它看起来就是一个完整的数字 —— 而偏小的账单是最不容易被质疑的那种错。
+ */
+function partialNote(row) {
+  const missing = row?.unpricedModels || []
+  if (!missing.length) return ''
+  return `不含未定价的模型：${missing.map(label).join('、')}`
+}
 </script>
 
 <template>
@@ -764,6 +849,24 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
               <input v-model="modelForm.sort" type="number" />
             </label>
           </div>
+          <div class="create-row">
+            <label class="narrow">
+              <span>输入单价</span>
+              <input v-model="modelForm.priceInput" type="number" min="0" step="any" placeholder="留空 = 不定价" />
+            </label>
+            <label class="narrow">
+              <span>输出单价</span>
+              <input v-model="modelForm.priceOutput" type="number" min="0" step="any" placeholder="留空 = 不定价" />
+            </label>
+            <label class="narrow">
+              <span>缓存读入单价</span>
+              <input v-model="modelForm.priceCacheRead" type="number" min="0" step="any" placeholder="留空 = 按 0 计" />
+            </label>
+            <p class="hint price-hint">
+              单价单位是<b>每百万 token</b>（{{ modelCurrency }}）—— 上游价目表怎么报的就怎么填，不要换算成每 token。
+              三项<b>全部留空 = 这条模型不定价</b>，它的用量在用量页上显示为「未定价」，不会被当 0 算进金额。
+            </p>
+          </div>
           <div class="create-row switches">
             <label class="switch"><input v-model="modelForm.image" type="checkbox" /><span>支持读图</span></label>
             <label class="switch"><input v-model="modelForm.reasoning" type="checkbox" /><span>思维链模型</span></label>
@@ -810,6 +913,7 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
               <th>模型 ID</th>
               <th>接口地址</th>
               <th>Key</th>
+              <th>单价</th>
               <th>可用分组</th>
               <th>状态</th>
               <th class="acts-col">操作</th>
@@ -837,6 +941,18 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
                   <span v-else-if="model.hasKey" class="mono muted">{{ model.keyMask }}</span>
                   <span v-else class="muted">—</span>
                 </td>
+                <!--
+                  单价一列。没定价的写「未定价」而不是留空 —— 留空看起来像
+                  "这一列还没做"，而这恰恰是管理员需要去补的那个动作。
+                  只填了一部分（缺缓存读入价）时标出来：那一档会按 0 计，成本偏小。
+                -->
+                <td class="mono price-cell">
+                  <template v-if="model.priced">
+                    {{ priceText(model) }}
+                    <span v-if="!model.priceComplete" class="tag off-tag" title="没填的那一档按 0 计，算出来的成本偏小">缺一档</span>
+                  </template>
+                  <span v-else class="muted">未定价</span>
+                </td>
                 <td class="muted">{{ modelScope(model) }}</td>
                 <td>
                   <span v-if="model.enabled" class="muted">已启用</span>
@@ -863,7 +979,7 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
 
               <!-- 就地展开编辑：上一行就是它的名字，不会出现"弹框弹出来忘了点的是谁" -->
               <tr v-if="state.adminModelEditing === model.id" class="reset-row">
-                <td colspan="7">
+                <td colspan="8">
                   <form class="create" @submit.prevent="onSubmitModel">
                     <div class="create-row">
                       <label><span>名称</span><input v-model="modelForm.name" autocomplete="off" /></label>
@@ -893,6 +1009,23 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
                         </select>
                       </label>
                       <label class="narrow"><span>排序</span><input v-model="modelForm.sort" type="number" /></label>
+                    </div>
+                    <div class="create-row">
+                      <label class="narrow">
+                        <span>输入单价</span>
+                        <input v-model="modelForm.priceInput" type="number" min="0" step="any" placeholder="留空 = 不定价" />
+                      </label>
+                      <label class="narrow">
+                        <span>输出单价</span>
+                        <input v-model="modelForm.priceOutput" type="number" min="0" step="any" placeholder="留空 = 不定价" />
+                      </label>
+                      <label class="narrow">
+                        <span>缓存读入单价</span>
+                        <input v-model="modelForm.priceCacheRead" type="number" min="0" step="any" placeholder="留空 = 按 0 计" />
+                      </label>
+                      <p class="hint price-hint">
+                        每百万 token（{{ modelCurrency }}）。三项全空 = 不定价，用量页显示「未定价」而不是 0。
+                      </p>
                     </div>
                     <div class="create-row switches">
                       <label class="switch"><input v-model="modelForm.image" type="checkbox" /><span>支持读图</span></label>
@@ -1135,7 +1268,25 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
             <div class="tile"><dt>run 次数</dt><dd>{{ formatTokens(state.adminUsage.total.runs) }}</dd></div>
             <!-- 用到了几个模型：多模型切换开起来之后，这个数本身就是一条信息 -->
             <div v-if="modelCount" class="tile"><dt>模型</dt><dd>{{ modelCount }}</dd></div>
+            <!--
+              金额只在真有模型定了价时才出现（见 pricing 那个 computed）。
+              `partial` 时标一个"≥"：那个数是**已定价部分**的合计，比真实花费小。
+            -->
+            <div v-if="priced" class="tile money" :class="{ partial: pricing.partial }">
+              <dt>{{ currency }} 成本{{ pricing.partial ? '（不完整）' : '' }}</dt>
+              <dd>{{ pricing.partial ? '≥ ' : '' }}{{ formatMoney(pricing.cost) }}</dd>
+            </div>
           </dl>
+
+          <!--
+            未定价的模型必须点名，不能只标一个"不完整"。
+            管理员要做的动作是"去模型页给这几条填上价"，而那需要知道是哪几条。
+          -->
+          <p v-if="priced && pricing.partial" class="hint warn-note">
+            有模型还没定价，上面的金额只算了已定价的那部分（<b>偏小</b>）：
+            {{ pricing.unpricedModels.map(label).join('、') }}。
+            到「模型」页把单价填上，或者确认它们确实免费 —— 填 0 与留空是两回事。
+          </p>
 
           <p class="hint range-note">
             {{ state.adminUsage.since ? `统计自 ${formatDateTime(state.adminUsage.since)}` : '统计全部历史' }}
@@ -1149,6 +1300,7 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
                 <th>{{ byModel ? '模型' : '用户名' }}</th>
                 <th class="dim-col">{{ byModel ? '使用者' : '模型' }}</th>
                 <th class="num">合计</th>
+                <th v-if="priced" class="num">成本（{{ currency }}）</th>
                 <th class="num">输入</th>
                 <th class="num">输出</th>
                 <th class="num">缓存读入</th>
@@ -1202,6 +1354,14 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
                       <span class="bar-fill" :style="{ width: barWidth(row.tokens, usageMax) }" />
                     </span>
                   </td>
+                  <!--
+                    未定价的行写「未定价」而不是 0（formatMoney 负责），偏小的行标一个
+                    "≥" 并把缺哪几个模型放进 title —— 一列数字里，一个静悄悄偏小的
+                    数字是最不容易被质疑的。
+                  -->
+                  <td v-if="priced" class="num money-cell" :class="{ unpriced: typeof row.cost !== 'number' }">
+                    <span :title="partialNote(row)">{{ row.costPartial ? '≥ ' : '' }}{{ formatMoney(row.cost) }}</span>
+                  </td>
                   <td class="num muted">{{ formatTokens(row.input) }}</td>
                   <td class="num muted">{{ formatTokens(row.output) }}</td>
                   <td class="num muted">{{ formatTokens(row.cacheRead) }}</td>
@@ -1209,8 +1369,9 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
                   <td class="muted time">{{ formatSince(row.lastAt) }}</td>
                 </tr>
 
+                <!-- colspan 跟着金额列走：写死 8 的话，开了计价之后展开区会少一格 -->
                 <tr v-if="state.adminUsageOpen === rowKey(row)" class="detail-row">
-                  <td colspan="8">
+                  <td :colspan="priced ? 9 : 8">
                     <div v-if="!row.runs" class="empty small">这段时间没有用量。</div>
                     <div v-else class="detail">
                       <!--
@@ -1228,6 +1389,9 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
                               <span class="bar-fill" :style="{ width: barWidth(child.tokens, barMax(rowChildren(row))) }" />
                             </span>
                             <span class="bar-value">{{ formatTokens(child.tokens) }}</span>
+                            <span v-if="priced" class="bar-money" :class="{ unpriced: typeof child.cost !== 'number' }">
+                              {{ formatMoney(child.cost) }}
+                            </span>
                             <span class="bar-runs">{{ child.runs }} run</span>
                           </li>
                         </ul>
@@ -1245,6 +1409,13 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
                               <span class="bar-fill" :style="{ width: barWidth(day.tokens, trendMax) }" />
                             </span>
                             <span class="bar-value">{{ formatTokens(day.tokens) }}</span>
+                            <!--
+                              这一天里混着没定价的模型时标 "≥"：那天的金额是偏小的，
+                              而在一条曲线上，偏小的点看起来只是"那天用得少"。
+                            -->
+                            <span v-if="priced" class="bar-money" :class="{ unpriced: typeof day.cost !== 'number' }">
+                              {{ day.costPartial ? '≥ ' : '' }}{{ formatMoney(day.cost) }}
+                            </span>
                             <span class="bar-runs">{{ day.runs }} run</span>
                           </li>
                         </ul>
@@ -1740,6 +1911,50 @@ const trendMax = computed(() => barMax(trend.value?.daily || []))
 }
 .range-note {
   margin: -4px 0 0;
+}
+
+/* ── 金额 ── */
+
+/**
+ * 成本那一格。不做成 `lead` 那种强调色：它和总 token 是并列的两个答案，
+ * 抢过去反而会让人以为这一页是账单（它不是，见 pricing.js 文件头）。
+ */
+.tile.money dd {
+  font-size: 17px;
+}
+/* 只算了一部分 —— 用警示色，因为这个数**偏小**，而偏小的数没人会质疑 */
+.tile.money.partial {
+  border-color: color-mix(in srgb, var(--warning, #d97706) 40%, var(--border));
+}
+.tile.money.partial dd {
+  color: var(--warning, #d97706);
+}
+.warn-note {
+  margin: -4px 0 0;
+  color: var(--warning, #d97706);
+}
+.money-cell {
+  font-variant-numeric: tabular-nums;
+}
+/* "未定价"是一句话不是一个数，别让它跟着数字列去等宽右对齐后显得像个金额 */
+.money-cell.unpriced,
+.bar-money.unpriced {
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+}
+.bar-money {
+  min-width: 62px;
+  color: var(--muted-foreground);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.price-cell {
+  white-space: nowrap;
+  font-size: 12px;
+}
+.price-hint {
+  flex-basis: 100%;
+  margin: 2px 0 0;
 }
 
 /* 数字列右对齐 + 等宽数字：位数对齐之后，长短本身就是"谁多谁少" */

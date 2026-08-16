@@ -1186,6 +1186,39 @@ export function createServer({
       return
     }
 
+    /**
+     * 手动压缩一条会话的上下文。
+     *
+     * ── 为什么是 `/v1/compact` 而不是 `/v1/sessions/:key/compact` ──────────
+     *
+     * 上面那个 `/v1/sessions/` 前缀把剩下的**整段**都当 sessionKey 解析（同一个
+     * 理由让会话搜索去了 `/v1/search`）。加一条子路径就得在那里先拆一次后缀，
+     * 而那样谁把会话命名成 `compact` 就会撞车。sessionKey 走 body ——
+     * 与 `/v1/chat/stream` 一致，那条也是这么收的。
+     *
+     * ── 为什么是普通 POST 而不是 SSE ──────────────────────────────────────
+     *
+     * 它只有一个结果（压缩成没成、压之前多大），中间没有任何可流式的东西 ——
+     * 模型在写摘要，一个字都不往外吐。为一个"等十几秒然后给个结果"的操作
+     * 开一条 SSE，只是让调用方多写一套解析。慢由界面上的转圈负责表达。
+     */
+    if (req.method === 'POST' && url.pathname === '/v1/compact') {
+      const body = await readJsonBody(req, config.limits.bodyLimitBytes)
+      const sessionKey = assertSessionKey(body.sessionKey || 'main')
+      const result = await runService.compact({
+        subject,
+        sessionKey,
+        modelId: body.model || '',
+        /**
+         * 给摘要的额外侧重（"重点保留接口约定"）。收口长度是因为它会原样
+         * 拼进摘要提示词 —— 不收的话，这就是一条把任意长文本塞进模型调用的路。
+         */
+        instructions: String(body.instructions || '').slice(0, 500),
+      })
+      reqLogger.info('会话上下文已手动压缩', { sessionKey, tokensBefore: result.tokensBefore })
+      return sendJson(res, 200, { ok: true, ...result })
+    }
+
     /* ─────────────── 断线重连 ─────────────── */
 
     /**

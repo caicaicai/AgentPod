@@ -51,16 +51,23 @@ function rowsSince(usage, since) {
 }
 
 /** 按天汇总，旧到新。与真后端的 DATE_FORMAT 一致：分的是 **UTC** 的天（连接上 timezone='Z'） */
-function daily(rows) {
+/**
+ * 按天折。`subField` 不传就是一天一行（对应 `GROUP BY day`）；传了就再按这个字段
+ * 拆一层（对应 `GROUP BY day, model_id`），字段本身原样写进结果行里。
+ */
+function daily(rows, subField = '') {
   const groups = new Map()
   for (const row of rows) {
     const day = row.createdAt.toISOString().slice(0, 10)
-    const current = groups.get(day) || { day, runs: 0, input: 0, output: 0, cacheRead: 0 }
+    const sub = subField ? row[subField] : ''
+    const key = `${day}${SEP}${sub}`
+    const current = groups.get(key)
+      || { day, ...(subField ? { [subField]: sub } : {}), runs: 0, input: 0, output: 0, cacheRead: 0 }
     current.runs += 1
     current.input += row.input
     current.output += row.output
     current.cacheRead += row.cacheRead
-    groups.set(day, current)
+    groups.set(key, current)
   }
   return [...groups.values()].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0))
 }
@@ -273,6 +280,12 @@ export function createMemoryStorage() {
         return daily(rowsSince(store.usage, since).filter(
           (row) => row.username === username && (!modelId || row.modelId === modelId),
         ))
+      },
+
+      /** 与真后端的 `GROUP BY day, model_id` 对应：一天里用过几个模型就有几行 */
+      async dailyForUserByModel({ username, since = null }) {
+        assertSegment(username, 'username')
+        return daily(rowsSince(store.usage, since).filter((row) => row.username === username), 'modelId')
       },
 
       async dailyForModel({ modelId, since = null }) {

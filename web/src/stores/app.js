@@ -54,7 +54,7 @@ export function closePanel() {
 export {
   toTurns, saveDraft, currentSession, findSession, threadTitle, refreshSessions, loadMoreSessions,
   openSession, startNewSession, clearActiveSession, deleteSession, renameSession, patchSession,
-  scheduleSearch,
+  scheduleSearch, compactCurrentSession,
 } from './sessions.js'
 import { refreshSessions, openSession, startNewSession, loadDraft } from './sessions.js'
 

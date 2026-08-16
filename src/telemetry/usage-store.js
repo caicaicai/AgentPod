@@ -28,11 +28,23 @@
  * 成本 = Σ(每个模型的 input/output/cacheRead × 该模型当期单价)，用的就是
  * `summary({ group: 'model' })` 已经算出来的那几个数，不必再动这里的聚合。
  *
+ * ── 单价现在接上了（`prices` 参数）────────────────────────────────────
+ *
+ * 上面那段话仍然成立，而且是照着做的：单价来自**模型配置**（管理员在控制台填，
+ * 见 models/model-store.js），由调用方查好了传进来；折算那一步整个住在
+ * telemetry/pricing.js 里，**这一层的聚合一行没动**。不传 `prices` 时行为与从前
+ * 完全一致（没有 cost 字段），所以 LLM_MODE 不是 db 的部署不受影响。
+ *
+ * 折算本身的三条边界（没有价格历史 / 未定价不等于 0 / 压缩的 token 不在账上）
+ * 写在 pricing.js 的文件头，不在这儿重复。
+ *
  * ⚠️ 另外一句必须写明白：**这不是账单，是可归因的用量。** 计费的真源在模型网关
  * （llm_requests 表）—— 那边记的是它真的向上游发了什么。这张表记的是我们这边
  * 看到的用量，两者在正常情况下相等，但网关重试、上游改价、我们这边进程被 kill
  * 掉的那一瞬间都会让它们差一点。对外收钱要以网关那份为准。
  */
+
+import { costOf, costOfRows, priceRow, round } from './pricing.js'
 
 /** 时间窗的上限：一年。再往前的账翻起来意义不大，而无上限等于允许一次全表扫 */
 const MAX_DAYS = 365
@@ -166,7 +178,7 @@ export function createUsageStore({ storage = null, logger = console } = {}) {
      * （见 credentials/broker.js），服务端没有一份"本部署有哪些模型"的权威清单。
      * 所以这一页只列**真的被用过**的模型 —— 那也正是要算钱的那些。
      */
-    async summary({ accounts = [], days = 30, group = 'user', now = Date.now() } = {}) {
+    async summary({ accounts = [], days = 30, group = 'user', prices = null, currency = '', now = Date.now() } = {}) {
       const since = resolveSince(days, { now })
       const view = group === 'model' ? 'model' : 'user'
       if (!ledger) {
@@ -174,10 +186,32 @@ export function createUsageStore({ storage = null, logger = console } = {}) {
       }
 
       const rows = await ledger.byUserAndModel({ since })
+      /**
+       * 全局的金额与"哪些模型没定价"都从**台账原始行**算，不从拼好的行算。
+       *
+       * 与 `total` 从 rows 算是同一个理由：拼出来的行含补零的账号行，
+       * 加起来一样，但少一次"补零补错了"的可能。未定价清单尤其如此 ——
+       * 从补零行里收，会把"从来没用过任何模型"的人也算成一次未定价。
+       */
+      const money = prices ? costOfRows(rows, prices) : null
       const base = {
         enabled: true,
         group: view,
         since: since ? since.toISOString() : null,
+        /**
+         * 计价这一块整体开不开。关着的时候界面上一列金额都不画 ——
+         * 画一列全是"—"只会让人以为是数据没加载出来。
+         */
+        pricing: money
+          ? {
+            enabled: true,
+            currency,
+            cost: money.cost,
+            /** 有一部分模型没定价：这个金额是**偏小**的，界面必须说出来 */
+            partial: money.partial,
+            unpricedModels: money.unpriced,
+          }
+          : { enabled: false },
         /**
          * 合计只从台账行来，不从拼出来的行来。
          * 后者含补零的行，加起来一样 —— 但少一次"补零补错了"的可能。
@@ -192,11 +226,27 @@ export function createUsageStore({ storage = null, logger = console } = {}) {
       }
 
       if (view === 'model') {
-        return { ...base, models: pivot(rows, 'modelId').map((row) => renameChildren(row, 'users')) }
+        const models = pivot(rows, 'modelId')
+          .map((row) => renameChildren(row, 'users'))
+          .map((row) => (prices ? priceRow(row, prices, 'users') : row))
+        return { ...base, models }
       }
 
-      const users = pivot(rows, 'username').map((row) => renameChildren(row, 'models'))
+      const users = pivot(rows, 'username')
+        .map((row) => renameChildren(row, 'models'))
+        .map((row) => (prices ? priceRow(row, prices, 'models') : row))
       const seen = new Map(users.map((row) => [row.username, row]))
+      /**
+       * 没跑过任何 run 的账号补的那一行零。
+       *
+       * 计价开着时它的 `cost` 是 **0 而不是 null**：这个人确实一分钱没花，
+       * 那是一个已知的事实，不是"不知道多少钱"。反过来写成 null，界面上
+       * 就会给一排从没用过的账号标"未定价"，而那与单价填没填毫无关系。
+       */
+      const blank = {
+        runs: 0, input: 0, output: 0, cacheRead: 0, tokens: 0, lastAt: null, models: [],
+        ...(prices ? { cost: 0, costPartial: false, unpricedModels: [] } : {}),
+      }
       const merged = accounts.map((account) => {
         const row = seen.get(account.username)
         seen.delete(account.username)
@@ -204,7 +254,7 @@ export function createUsageStore({ storage = null, logger = console } = {}) {
           username: account.username,
           role: account.role || 'user',
           disabled: Boolean(account.disabled),
-          ...(row || { runs: 0, input: 0, output: 0, cacheRead: 0, tokens: 0, lastAt: null, models: [] }),
+          ...(row || blank),
         }
       })
       // 剩下的就是账号已经不在、账还留着的
@@ -224,24 +274,96 @@ export function createUsageStore({ storage = null, logger = console } = {}) {
      * 按模型/按人的**汇总**不在这儿 —— 它已经在 summary 的每一行里带下来了，
      * 展开时不必再打一次接口（也就不会出现"表里 450,092、展开后 450,091"这种）。
      */
-    async trend({ username = '', modelId = '', days = 30, now = Date.now() } = {}) {
+    async trend({ username = '', modelId = '', days = 30, prices = null, currency = '', now = Date.now() } = {}) {
       const since = resolveSince(days, { now })
       const scope = { username, modelId, since: null }
       if (!ledger) return { enabled: false, ...scope, daily: [], total: sumBuckets([]) }
 
-      const daily = username
-        ? await ledger.dailyForUser({ username, modelId, since })
-        : await ledger.dailyForModel({ modelId, since })
+      /**
+       * 三种口径里，只有"一个人的全部模型"这一种需要**多查一维**。
+       *
+       * 另外两种（钉死了模型的）一整条曲线共用一个单价，直接乘就行；而这一种
+       * 每天可能混着好几个模型，一天的合计 token 里拆不出各自是谁的
+       * —— 所以计价开着时改走 `dailyForUserByModel`，按天折之前先把钱算完。
+       * 计价关着时仍然走原来那条查询：多带一维只会让行数变多而没有任何用处。
+       */
+      const perModel = Boolean(prices) && Boolean(username) && !modelId
+      const raw = perModel
+        ? await ledger.dailyForUserByModel({ username, since })
+        : username
+          ? await ledger.dailyForUser({ username, modelId, since })
+          : await ledger.dailyForModel({ modelId, since })
+
+      const daily = perModel ? foldByDay(raw, prices) : withTokens(raw)
+      /**
+       * 合计从**日行**加，而不是把全窗口的 token 再乘一次价。
+       *
+       * 两种算法在数学上相等，但只有前者保证"上面那个总数 = 下面这些日子加起来"。
+       * 各算各的话，四舍五入会让它们差几分钱，而一张自己加不起来的表
+       * 会让人怀疑的是整个数据，不是最后一位小数。
+       */
+      const priceOfRow = modelId ? prices?.get?.(modelId) : null
+      const withCost = prices && !perModel
+        ? daily.map((row) => ({ ...row, cost: costOf(row, priceOfRow) }))
+        : daily
       return {
         enabled: true,
         username,
         modelId,
         since: since ? since.toISOString() : null,
         total: sumBuckets(daily),
-        daily: withTokens(daily),
+        ...(prices ? { pricing: rollupDaily(withCost, currency) } : {}),
+        daily: withCost,
       }
     },
   }
+}
+
+/**
+ * 「一天 × 一个模型」的行 → 一天一行，钱在折之前就按各自的单价算完。
+ *
+ * 这是"一个人每天花多少"唯一算得对的顺序：先按模型乘价、再按天加。
+ * 反过来（先把一天的 token 加起来再乘一个价）要么得挑一个模型的价来代表全天，
+ * 要么得编一个平均价 —— 两者都是在造数字。
+ *
+ * 一天里只要有一个模型没定价，这一天就 `costPartial: true`：那天的金额是
+ * **偏小**的，而在一条曲线上，偏小的那几个点看起来只是"那天用得少"。
+ */
+function foldByDay(rows, prices) {
+  const days = new Map()
+  for (const row of rows) {
+    const current = days.get(row.day)
+      || { day: row.day, runs: 0, input: 0, output: 0, cacheRead: 0, cost: null, costPartial: false }
+    current.runs += row.runs || 0
+    current.input += row.input || 0
+    current.output += row.output || 0
+    current.cacheRead += row.cacheRead || 0
+    const amount = costOf(row, prices?.get?.(row.modelId))
+    if (amount === null) {
+      if (row.input || row.output || row.cacheRead) current.costPartial = true
+    } else {
+      current.cost = round((current.cost || 0) + amount)
+    }
+    days.set(row.day, current)
+  }
+  return withTokens([...days.values()]).sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0))
+}
+
+/** 一条曲线的金额合计。口径与 foldByDay 一致：日行加起来，缺一天就是缺一天 */
+function rollupDaily(daily, currency) {
+  let total = 0
+  let known = 0
+  let partial = false
+  for (const row of daily) {
+    if (row.costPartial) partial = true
+    if (typeof row.cost !== 'number') {
+      if (row.input || row.output || row.cacheRead) partial = true
+      continue
+    }
+    total += row.cost
+    known += 1
+  }
+  return { enabled: true, currency, cost: known ? round(total) : null, partial }
 }
 
 /**

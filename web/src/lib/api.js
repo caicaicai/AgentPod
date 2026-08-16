@@ -283,6 +283,18 @@ export const api = {
   runs: (sessionKey = '') => request(`/v1/runs${sessionKey ? q({ sessionKey }) : ''}`),
 
   /**
+   * 手动压缩一条会话的上下文。
+   *
+   * 普通 POST 而不是 SSE：中间没有任何可流式的东西（模型在写摘要，一个字都不吐），
+   * 只有一个结果。但它**要调一次模型，可能十几秒** —— 调用方必须自己转圈。
+   *
+   * 路径是 `/v1/compact` 而不是 `/v1/sessions/:key/compact`：那个前缀把剩下的
+   * 整段都当 sessionKey 解析（同一个理由让会话搜索去了 `/v1/search`）。
+   */
+  compactSession: (sessionKey = 'main', instructions = '') =>
+    request('/v1/compact', { method: 'POST', body: { sessionKey, ...(instructions ? { instructions } : {}) } }),
+
+  /**
    * 管理员接口。前端画不画入口由 `/v1/auth/me` 回的 `account.role` 决定，
    * 但**真正的判定在服务端** —— 这里少判一次只是界面难看，服务端少判一次是越权。
    */

@@ -9,7 +9,7 @@ import { describeStop } from '../stop-reason.js'
 
 export const CLIENT_EVENTS = [
   'run_start', 'model', 'thinking', 'text', 'text_end', 'tool_call', 'tool_result',
-  'retry', 'usage', 'final', 'error',
+  'retry', 'compaction', 'usage', 'final', 'error',
 ]
 
 function assistantParts(message, type, field = 'text') {
@@ -162,6 +162,52 @@ export function toClientFrames(event, emit, chunkers = null) {
       })
     case 'auto_retry_end':
       return emit('retry', { state: 'end', attempt: event.attempt, success: Boolean(event.success) })
+
+    /**
+     * 上下文压缩。
+     *
+     * ── 为什么这两帧必须转出去 ──────────────────────────────────────────
+     *
+     * pi 的自动压缩**默认就是开的**（DEFAULT_COMPACTION_SETTINGS.enabled = true），
+     * 也就是说这件事一直在发生，只是从前没有任何一帧说得出来。用户看到的是：
+     * 一条长会话里，某一轮迟迟不出字（压缩要**另外调一次模型**做摘要，几秒到十几秒），
+     * 然后模型忽然对前面聊过的细节记不清了。两个现象都真实，但都没有解释 ——
+     * 于是它们被归因成"这个模型变笨了"。
+     *
+     * 与 retry 帧是同一个判据：**一段无法解释的沉默，本身就是要修的东西**。
+     *
+     * ── 三个 reason 的区别要带出去 ──────────────────────────────────────
+     *
+     *   threshold  快撞上下文窗口了，例行压缩 —— 这一类占绝大多数
+     *   overflow   已经撞了，压缩是在救这一轮（不压这轮就直接失败）
+     *   manual     用户自己点的
+     *
+     * 界面对三者的说法不该一样：例行的那种一句话带过就行，`overflow` 则意味着
+     * 这条会话已经到了边界，值得提醒用户开一条新的。
+     */
+    case 'compaction_start':
+      return emit('compaction', { state: 'start', reason: event.reason || 'threshold' })
+    case 'compaction_end':
+      return emit('compaction', {
+        state: 'end',
+        reason: event.reason || 'threshold',
+        aborted: Boolean(event.aborted),
+        /**
+         * `willRetry` 是"这次没成，但还会再试一次"。不带出去的话，一次失败的压缩
+         * 之后紧跟着又一次 compaction_start，界面上看起来像是压缩在无限循环。
+         */
+        willRetry: Boolean(event.willRetry),
+        errorMessage: event.errorMessage || '',
+        /**
+         * 压缩前的上下文有多大。**只带这一个数**：
+         *
+         * `result.summary` 是模型写的一整段会话摘要 —— 它是**这个用户自己的对话内容**
+         * （与 text 帧同一性质，不跨用户），但把它推到界面上没有意义：用户要知道的是
+         * "刚才发生了压缩、上下文从 12 万降下来了"，不是去读一份自己对话的复述。
+         * 一段几千字的摘要塞进事件流，只会把真正的回答挤下去。
+         */
+        tokensBefore: Number(event.result?.tokensBefore) || 0,
+      })
 
     case 'tool_execution_start':
       return emit('tool_call', { toolCallId: event.toolCallId, toolName: event.toolName, args: event.args })

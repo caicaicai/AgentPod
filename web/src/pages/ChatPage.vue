@@ -12,6 +12,7 @@ import {
   clearActiveSession, currentSession, hideBanner, setModel, state, threadTitle, togglePanel,
 } from '@/stores/app.js'
 import { askConfirm } from '@/lib/dialog.js'
+import { formatTokens } from '@/lib/format.js'
 
 const scroller = ref(null)
 const previewFile = ref(null)
@@ -211,6 +212,20 @@ function useSample(sample) {
             @preview="state.lightbox = $event"
             @open-file="previewFile = $event"
           />
+          <!--
+            压缩分隔线。上面那些对话**还在**（历史是完整的），换掉的是模型从这里
+            往后看到的东西：更早的部分它只剩一段摘要。这条线是屏幕上唯一说得清
+            "为什么模型对上面聊过的事记不清了"的地方。
+          -->
+          <div v-else-if="turn.role === 'compaction'" class="compaction-mark">
+            <span class="compaction-line" aria-hidden="true" />
+            <span class="compaction-text">
+              <AppIcon name="alert" :size="12" />
+              上下文已在此压缩<template v-if="turn.tokensBefore">（压缩前约 {{ formatTokens(turn.tokensBefore) }} tokens）</template>
+              —— 以上对话模型只保留了摘要
+            </span>
+            <span class="compaction-line" aria-hidden="true" />
+          </div>
           <AssistantMessage v-else :turn="turn" @preview="state.lightbox = $event" />
         </template>
       </div>
@@ -319,6 +334,30 @@ function useSample(sample) {
 .messages-inner {
   width: min(var(--content-w), calc(100% - 32px));
   margin: 0 auto;
+}
+
+/**
+ * 压缩分隔线。刻意做得**安静** —— 它不是错误，是一件正常发生的事；
+ * 但它必须看得见，因为它是"模型为什么忘了上面的事"唯一的解释。
+ */
+.compaction-mark {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0;
+}
+.compaction-line {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.compaction-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  white-space: nowrap;
 }
 
 .loading-hint {

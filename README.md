@@ -211,6 +211,7 @@ See [`.env.example`](.env.example) for the complete annotated reference.
 | `MEMORY_ENABLED` | `1` | Long-term cross-session memory |
 | `PROJECTS_ENABLED` | `1` | Project-based session grouping with instructions |
 | `SESSION_AUTO_TITLE` | `1` | Let the model name each conversation on its first turn (once per session) |
+| `COMPACTION_ENABLED` | `1` | Context compaction — fold earlier turns into a summary when a session approaches the context window. **This has always been happening** (it is pi's default); what is new is that it is now visible and adjustable. See [Context compaction](#context-compaction) |
 | `ARTIFACTS_ENABLED` | `1` | Versioned artifacts kept outside the transcript |
 | `ARTIFACT_ALLOWED_ORIGINS` | empty | External origins the artifact preview may load (comma-separated). **Fully offline by default** (Vue / mermaid runtimes ship with the app) |
 | `ARTIFACT_MAX_FILES` | `40` | Maximum files per artifact |
@@ -303,6 +304,30 @@ Changes take effect **immediately, no restart**:
 | Image input / reasoning | Getting image input wrong makes pi **silently drop** screenshots from tool results — the model only sees "Screenshot captured: N bytes" |
 | Allowed groups | None checked = available to everyone; otherwise only members of those groups see it |
 | Sort | Ascending. **The first enabled model is the default** — the one used when the user picks nothing |
+| Unit prices | Input / output / cache-read, **per million tokens** — copy the numbers straight off the upstream price list, don't convert to per-token. Leave all three blank and the model is *unpriced*; see [Cost accounting](#cost-accounting) |
+
+#### Cost accounting
+
+Fill in the three unit-price fields and the admin Usage page grows a money column: per account,
+per model, per day, plus a deployment total. The currency symbol is deployment-wide
+(`USAGE_CURRENCY`, default `USD`) — it is a **label only**, there is no FX conversion and no
+per-model currency.
+
+Three things you have to know before trusting the numbers:
+
+- **There is no price history.** Conversion always uses *today's* price, including rows from three
+  months ago. Change a price and historical figures move with it. What this answers is "at today's
+  prices, what is this usage worth" — not "what was charged at the time".
+- **Unpriced ≠ free.** A model with no price yields `null`, rendered as *unpriced*, and is never
+  folded into a total as zero. Rows mixing priced and unpriced models show `≥` and name the missing
+  models — a silently-too-small bill is the kind of error nobody questions. Note that a price of
+  **`0` is a real answer** ("this model is free"); blank is "we don't know".
+- **Compaction tokens are not on the ledger.** Context compaction makes a *separate* model call to
+  write the summary, and that call doesn't go through the session event stream, so it never reaches
+  `ap_usage`. Costs shown here are therefore **lower than the real upstream bill** by whatever
+  compaction consumed.
+
+As always: this is attributable cost, **not a bill**. Bill from your gateway's records.
 
 **User groups** are maintained on the Groups page. A group decides which models a person can use and how many
 tokens they get — it is not a role (that is `role`) and not an isolation boundary (sessions, artifacts and
@@ -348,6 +373,39 @@ stored in plaintext (guarded only by database access control, with a startup war
 secret and the affected rows are flagged "cannot decrypt" in the console and skipped — rather than taking
 everyone's conversations down with them.
 
+### Context compaction
+
+When a session approaches the model's context window, earlier turns are folded into a summary so
+the conversation can keep going. **This is not new behaviour** — pi has done it by default all
+along. What was missing was any way to see it or tune it, and the absence cost two things users
+definitely notice but nothing explained:
+
+1. a long session stalls for ten-odd seconds mid-turn (compaction makes a **separate** model call
+   to write the summary);
+2. the model gets fuzzy about details discussed earlier (everything before the cut is now a
+   summary).
+
+Both are real; neither was explained — so both got attributed to "the model got dumber".
+
+Now: a `compaction` SSE frame reports it live, the transcript keeps a divider at the cut point
+(**history itself is intact** — pi's session log is append-only; what changed is only what the
+*model* sees), and users can trigger one themselves at a moment that suits them.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `COMPACTION_ENABLED` | `1` | Automatic compaction. ⚠️ Turning it off means long sessions **hit the context limit and fail**, not merely slow down |
+| `COMPACTION_RESERVE_TOKENS` | `0` | Token budget for the summary itself. `0` = pi's default (16384). Smaller means a shorter, coarser summary — and what gets lost is exactly "what the model still remembers" |
+| `COMPACTION_KEEP_RECENT_TOKENS` | `0` | How much recent conversation is kept unfolded. `0` = pi's default (20000). Larger is safer but leaves less to fold, so compaction fires more often — and each one is another model call |
+
+`POST /v1/compact` compacts on demand (`/压缩` in the composer). It is worth having because
+automatic compaction always fires while someone is waiting for an answer; doing it at a natural
+break means the next turn isn't interrupted. It goes through the same **quota and concurrency**
+gates as a normal turn — it calls a model, so it costs the same kind of resource.
+
+⚠️ **Compaction's own token use never reaches `ap_usage`** — pi's summarization call
+(`completeSimple`) bypasses the session event stream. This is why the admin Usage page understates
+real spend; see [Cost accounting](#cost-accounting).
+
 ### Direct LLM Mode
 
 For local development with real models (without a platform backend):
@@ -376,6 +434,7 @@ For local development with real models (without a platform backend):
 | `MAX_RUNS_PER_USER` | `2` | Per-user concurrent run limit |
 | `RUN_TIMEOUT_MS` | `600000` | Maximum run duration (10 min) |
 | `QUOTA_TIMEZONE` | `Asia/Shanghai` | Timezone whose midnight resets the per-group **daily** token quota. The quotas themselves live on the group (see [Token quotas](#token-quotas)); this only sets the day boundary |
+| `USAGE_CURRENCY` | `USD` | Currency symbol on the admin Usage page. **Display only** — no FX conversion, one currency per deployment. Unit prices live on each model (see [Cost accounting](#cost-accounting)) |
 
 ## API Reference
 
@@ -421,15 +480,26 @@ separate column for the same reason: it is priced differently from fresh input, 
 folded into the headline total. All three endpoints return aggregates only — **no conversation
 content passes through them**.
 
+Once models carry unit prices, all three also return `cost` per row and a `pricing` block
+(`{ currency, cost, partial, unpricedModels }`). If not a single model is priced the block is
+simply `{ enabled: false }` and clients draw no money column — rendering a column of dashes only
+makes people think the data failed to load. See [Cost accounting](#cost-accounting) for what the
+numbers do and don't mean.
+
 ### Chat
 
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/v1/chat/stream` | Start a conversation turn (SSE streaming response) |
 | POST | `/v1/runs/:runId/abort` | Abort a running conversation (own runs only) |
+| POST | `/v1/compact` | Compact a session's context on demand: `{ sessionKey, instructions? }`. Plain POST, not SSE — there is nothing to stream (the model is writing a summary, emitting nothing), just a result — but it **calls a model and can take ten-odd seconds**. Passes the same quota and concurrency gates as a turn. Path is `/v1/compact`, not `/v1/sessions/:key/compact`, because that prefix parses everything after it as the sessionKey (the same reason search lives at `/v1/search`) |
 | GET | `/v1/models` | Available model list |
 
-**SSE Events:** `run_start` · `model` · `thinking` · `text` · `text_end` · `tool_call` · `tool_result` · `usage` · `final` · `error`
+**SSE Events:** `run_start` · `model` · `thinking` · `text` · `text_end` · `tool_call` · `tool_result` · `retry` · `compaction` · `usage` · `final` · `error`
+
+`compaction` carries `{ state: 'start'|'end', reason: 'manual'|'threshold'|'overflow', … }`. The
+summary text is **never** sent — clients need to know that compaction happened and how large the
+context was, not to read a retelling of their own conversation.
 
 ### Sessions
 

@@ -327,6 +327,38 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
           ? csvExact(env.LLM_RETRY_EXTRA_PATTERNS)
           : ['Already borrowed'],
       },
+
+      /**
+       * 上下文压缩：会话快撑满上下文窗口时，把更早的对话折成一段摘要。
+       *
+       * ⚠️ **这件事一直在发生**，只是从前没有开关也没有任何提示 —— pi 的
+       * `DEFAULT_COMPACTION_SETTINGS.enabled` 就是 true。所以这里的默认值
+       * 跟着它，改的不是行为，是"这个行为终于可以被看见和被调整了"。
+       *
+       * 用户那边看得见的两处：压缩进行中会有一帧 `compaction`（正在压缩，
+       * 要另外调一次模型，十几秒不出字），压缩点在历史里留一条分隔线
+       * （更早的对话模型只剩摘要 —— 不写出来的话，"模型忘了上面聊过的事"
+       * 会被归因成"这个模型不行"）。
+       *
+       * 关掉它的代价要想清楚：长会话会**直接撞上下文上限然后报错**，
+       * 而不是慢一点。只有在"宁可报错也不要模型忘事"的场景下才该关
+       * （比如每条会话都短、且摘要的有损性不可接受）。
+       */
+      compaction: {
+        enabled: bool(env.COMPACTION_ENABLED, true),
+        /**
+         * 给摘要本身留多少 token 预算（pi 默认 16384）。
+         * 调小会让摘要更短更糙 —— 丢的正是"模型还记得什么"。
+         */
+        reserveTokens: num(env.COMPACTION_RESERVE_TOKENS, 0),
+        /**
+         * 压缩时保留多少最近的对话不折（pi 默认 20000）。
+         *
+         * 这个数直接决定"模型对刚才说的话记得多清楚"。调大更安全，
+         * 但留得越多、能折的就越少，于是压缩会来得更频繁。
+         */
+        keepRecentTokens: num(env.COMPACTION_KEEP_RECENT_TOKENS, 0),
+      },
       /**
        * LLM_MODE=direct 用：直连一个 OpenAI 兼容端点。
        * **仅限本地做真模型联调**，生产拒绝启动 —— 这里的 key 是所有人共用的一把，
@@ -642,6 +674,18 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
        * 也没人猜得到。写错的时区名不会让服务起不来，会退回这个默认值并告警。
        */
       quotaTimezone: String(env.QUOTA_TIMEZONE || 'Asia/Shanghai').trim() || 'Asia/Shanghai',
+      /**
+       * 用量页上那个金额的**币种符号**，纯展示。
+       *
+       * 单价是管理员一个数一个数填进模型配置的（见 models/model-store.js），
+       * 这里既不做汇率换算、也不做多币种 —— **一个部署一种币**。
+       * 混币种的部署真要支持的话，要动的是"每条模型带自己的币种"加上一张汇率表，
+       * 而那张表和价格历史一样，是另一件事。
+       *
+       * 默认 USD：上游的价目表几乎都按美元每百万 token 报，管理员照抄的就是那个数。
+       * 接的是国内网关就改成 CNY —— 它只换掉界面上那个符号，不动任何一个数。
+       */
+      usageCurrency: String(env.USAGE_CURRENCY || 'USD').trim().slice(0, 8) || 'USD',
     },
 
     /**

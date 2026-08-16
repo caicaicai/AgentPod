@@ -17,7 +17,7 @@
  * 完全指不到"import 成环"这件事上。
  */
 import { api } from '../lib/api.js'
-import { formatTurnStats } from '../lib/format.js'
+import { formatTokens, formatTurnStats } from '../lib/format.js'
 import { parseInlinedAttachments } from '../modules/chat/attachments.js'
 import { parsePickedElement } from '../modules/artifacts/artifact-view.js'
 import { state, DRAFT_PREFIX, newSessionKey } from './state.js'
@@ -62,6 +62,16 @@ export function toTurns(messages = []) {
         element: picked.element,
         timestamp: message.timestamp || 0,
       })
+      continue
+    }
+    /**
+     * 压缩点自成一"轮"（其实是一条分隔线）。
+     *
+     * **必须打断合并**：它落在两条助手消息中间时，如果只是被忽略，
+     * 上下两段就会被合成一个气泡 —— 而那两段之间恰恰隔着一次"模型的记忆被换掉了"。
+     */
+    if (message.role === 'compaction') {
+      turns.push({ role: 'compaction', tokensBefore: message.tokensBefore || 0, timestamp: message.timestamp || 0 })
       continue
     }
     let turn = turns[turns.length - 1]
@@ -250,6 +260,54 @@ export async function openSession(key) {
     return false
   } finally {
     if (state.activeKey === key) state.loadingSession = false
+  }
+}
+
+/**
+ * 手动压缩当前会话的上下文。
+ *
+ * ── 用户为什么会需要这个 ────────────────────────────────────────────────
+ *
+ * 自动压缩是在**快撑满**的时候才触发的，也就是说它总是发生在一轮对话中间 ——
+ * 用户正等着回答，却先要等十几秒的摘要。手动这条路让人可以挑一个自己不着急的
+ * 时刻先压掉（比如刚聊完一个话题、准备换下一个），下一轮就不会被打断。
+ *
+ * ── 三件事必须做对 ──────────────────────────────────────────────────────
+ *
+ * 1. **正在跑的时候不许压。** 服务端那边 compact() 会先 abort 掉当前操作，
+ *    也就是把用户正在等的那一轮打断 —— 而他按的是"压缩"，不是"停止"。
+ * 2. **压完要重新加载历史。** 压缩往会话里追加了一条 compaction 条目，
+ *    不重载的话那条分隔线要等下次刷新才出现，用户会以为没生效。
+ * 3. **失败要说人话。** "会话太短"和"刚压过"都不是错误，是"没什么可做的"，
+ *    服务端已经翻译好了（见 agent/compact-turn.js），这里原样转达即可。
+ */
+export async function compactCurrentSession() {
+  if (state.live) {
+    showBanner('这一轮还在跑，等它结束再压缩 —— 现在压会把正在等的回答打断')
+    return false
+  }
+  if (state.pendingNew) {
+    showBanner('这是一条新对话，还没有内容可以压缩')
+    return false
+  }
+  const key = state.activeKey
+  state.compacting = true
+  try {
+    const result = await api.compactSession(key)
+    // 请求飞行途中用户切走了：这份结果已经不属于当前会话，别去动它的历史
+    if (state.activeKey !== key) return true
+    await openSession(key)
+    showBanner(
+      result.tokensBefore
+        ? `上下文已压缩（压缩前约 ${formatTokens(result.tokensBefore)} tokens）—— 更早的对话模型只保留了摘要`
+        : '上下文已压缩 —— 更早的对话模型只保留了摘要',
+    )
+    return true
+  } catch (error) {
+    showBanner(`压缩失败：${error.message}`)
+    return false
+  } finally {
+    state.compacting = false
   }
 }
 

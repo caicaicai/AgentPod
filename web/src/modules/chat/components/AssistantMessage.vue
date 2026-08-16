@@ -89,6 +89,24 @@ async function copy() {
         模型调用失败，{{ Math.round(props.turn.retry.delayMs / 1000) }} 秒后重试（第
         {{ props.turn.retry.attempt }}/{{ props.turn.retry.maxAttempts }} 次）…
       </div>
+      <!--
+        正在压缩上下文。排在"正在思考"之前，因为这段等待有具体的原因，
+        而"正在思考…"会让十几秒的沉默看起来像是卡住了。
+
+        overflow 与另外两种分开说：那意味着这条会话已经顶到上下文上限了，
+        用户该知道的不只是"稍等"，而是"这条会话该收尾了"。
+      -->
+      <div v-else-if="!props.turn.done && props.turn.compacting" class="waiting">
+        <span class="spinner" />
+        <template v-if="props.turn.compacting.reason === 'overflow'">
+          上下文已经满了，正在压缩后重试…
+          <span class="hint">这条会话很长了，开一条新的会更快</span>
+        </template>
+        <template v-else>
+          正在压缩上下文（把前面的对话折成摘要）…
+          <span class="hint">要另外调一次模型，可能要十几秒</span>
+        </template>
+      </div>
       <div v-else-if="!props.turn.done && !props.turn.blocks.length" class="waiting">
         <span class="spinner" />正在思考…
       </div>
@@ -98,6 +116,14 @@ async function copy() {
 
       <div v-if="props.turn.retriedCount" class="retry-note">
         本轮重试过 {{ props.turn.retriedCount }} 次（模型服务不稳定）
+      </div>
+      <!--
+        压缩发生过就留一句。这不是提示"出了问题"，是在解释两件用户一定会注意到的事：
+        这一轮为什么慢，以及**为什么模型对前面聊过的细节记不清了** —— 摘要是有损的。
+        不写出来的话，后者会被归因成"这个模型变笨了"。
+      -->
+      <div v-if="props.turn.compactedCount" class="retry-note">
+        本轮压缩过 {{ props.turn.compactedCount }} 次上下文 —— 更早的对话已折成摘要，细节可能丢失
       </div>
       <div v-if="props.turn.warning" class="notice warn">
         <AppIcon name="alert" :size="14" /><span>{{ props.turn.warning }}</span>

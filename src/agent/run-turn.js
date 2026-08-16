@@ -200,6 +200,12 @@ export async function runTurn({
   onStart = () => {},
   // 默认值与 config.js 的 llm.retry 保持一致，这样测试里不传也是同一套行为
   retry = { enabled: true, maxRetries: 3, baseDelayMs: 2000, extraPatterns: [] },
+  /**
+   * 上下文压缩（config.llm.compaction）。默认值刻意与 pi 的一致 ——
+   * 不传时的行为必须和接这个开关之前**一模一样**，否则测试里的每一轮
+   * 都在一套没人配过的设置下跑。
+   */
+  compaction = { enabled: true, reserveTokens: 0, keepRecentTokens: 0 },
   timeoutMs = 10 * 60 * 1000,
   logger = console,
 }) {
@@ -261,6 +267,22 @@ export async function runTurn({
         enabled: retry.enabled,
         maxRetries: retry.maxRetries,
         baseDelayMs: retry.baseDelayMs,
+      },
+      /**
+       * 上下文压缩。
+       *
+       * ⚠️ **不传这一段的时候它也是开着的** —— pi 的 DEFAULT_COMPACTION_SETTINGS
+       * 就是 `enabled: true`。也就是说这不是"新增了压缩"，是把一件本来就在发生、
+       * 却既看不见也调不了的事接了出来。压缩过程会发 compaction_start/end
+       * 事件（转成对外的 `compaction` 帧，见 events.js）。
+       *
+       * 两个尺寸留 0 表示"不覆盖，用 pi 的默认值"：编一个我们自己的数字，
+       * 等于在没有依据的情况下改掉"模型能记多久"。
+       */
+      compaction: {
+        enabled: compaction.enabled !== false,
+        ...(compaction.reserveTokens ? { reserveTokens: compaction.reserveTokens } : {}),
+        ...(compaction.keepRecentTokens ? { keepRecentTokens: compaction.keepRecentTokens } : {}),
       },
     })
 

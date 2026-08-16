@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto'
 import { Errors } from '../errors.js'
 import { isAbnormalStop } from '../stop-reason.js'
 import { runTurn } from './run-turn.js'
+import { compactSession } from './compact-turn.js'
 import { buildSandboxCredentialEnv } from './sandbox-credentials.js'
 import { loadSkills, describeSkills, selectSkills } from './skills.js'
 import { buildModel, pickModel } from '../models/model-factory.js'
@@ -390,6 +391,7 @@ export function createRunService({
           // `?.` 不是防御性冗余：测试里的 config 是手搭的局部对象，没有 llm 段。
           // 缺了就走 runTurn 签名上的默认值（与 config.js 的默认值一致）。
           retry: config.llm?.retry,
+          compaction: config.llm?.compaction,
           logger: runLogger,
           // 截断这类问题在服务端也要留痕：等用户来报"助手变笨了"太晚了，
           // 而且他们没法把 stopReason 描述出来。只记原因，不记任何正文。
@@ -534,6 +536,52 @@ export function createRunService({
          * 最容易断线的时刻恰恰是这一轮刚跑完。
          */
         runRegistry?.close(runId)
+      }
+    },
+
+    /**
+     * 手动压缩一条会话的上下文。
+     *
+     * ── 它和 execute 共享哪些闸门，为什么 ──────────────────────────────
+     *
+     * 压缩要**调一次模型**（写摘要），所以它和一轮对话在资源上是同一类东西：
+     *
+     *   额度   照常先问。记不进台账不等于可以不管 —— 一个额度烧光的账号
+     *          不该还能靠压缩接着花钱（这笔消耗记不进 `ap_usage`，
+     *          原因见 agent/compact-turn.js 的文件头）。
+     *   并发   照常占一个槽位。它跟一轮对话一样会占住一个模型调用几十秒，
+     *          不占的话，"压缩"就成了一条绕过 MAX_RUNS_PER_USER 的路。
+     *
+     * 不共享的是沙盒、工具、技能、工作区 —— 压缩一个都不需要，见那边的文件头。
+     */
+    async compact({ subject, sessionKey = 'main', modelId = '', instructions = '' }) {
+      const { username } = subject
+      const compactLogger = logger.child({ username, sessionKey, op: 'compact' })
+
+      if (quota?.enabled) await quota.assert(username)
+      acquire(username)
+      const holdId = `compact_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`
+      active.set(holdId, { username, abort: () => {}, startedAt: Date.now(), source: 'compact' })
+      try {
+        const access = await broker.getLlmAccess(subject)
+        const llm = pickModel(access.models, modelId)
+        if (!llm) throw Errors.badRequest('没有可用的模型，压缩需要调用模型来写摘要')
+        const model = buildModel(llm, {
+          imageCapableModels: config.llm?.imageCapableModels || [],
+          maxTokensField: llm.maxTokensField || config.llm?.maxTokensField || '',
+        })
+        return await compactSession({
+          username,
+          sessionKey,
+          model,
+          apiKey: llm.key || access.apiKey,
+          store,
+          instructions,
+          compaction: config.llm?.compaction || {},
+          logger: compactLogger,
+        })
+      } finally {
+        release(username, holdId)
       }
     },
 

@@ -5,7 +5,7 @@ import AppIcon from '@/components/AppIcon.vue'
 import ElementChip from './ElementChip.vue'
 import FileChips from './FileChips.vue'
 import { LARGE_PASTE_CHARS, MAX_FILES, readAll, textToAttachment } from '../attachments.js'
-import { currentProject, saveDraft, send, state, stop } from '@/stores/app.js'
+import { compactCurrentSession, currentProject, saveDraft, send, state, stop } from '@/stores/app.js'
 
 const emit = defineEmits(['preview', 'open-file'])
 
@@ -67,6 +67,13 @@ const SLASH_COMMANDS = [
   { key: '/定时', hint: '建一个定时任务', text: '以后每天 9:00 帮我：' },
   { key: '/任务', hint: '看看我有哪些定时任务', text: '看看我现在有哪些定时任务，下次什么时候跑？' },
   { key: '/技能', hint: '打开技能面板', panel: 'skills' },
+  /**
+   * 唯一一条**立即执行**的命令（其余的要么插一句话、要么开个面板）。
+   *
+   * 它值得在这里占一格，因为自动压缩总是发生在用户正等回答的时候 ——
+   * 挑一个自己不着急的时刻先压掉，下一轮就不会被那十几秒打断。
+   */
+  { key: '/压缩', hint: '压缩上下文（会话太长时腾出空间）', action: compactCurrentSession },
 ]
 
 const slashItems = computed(() => {
@@ -85,6 +92,15 @@ function applySlash(command) {
   if (command.panel) {
     state.draft = ''
     state.panel = command.panel
+    return
+  }
+  /**
+   * 立即执行型。**不 await** —— 压缩要十几秒，await 会把这个函数（以及键盘事件
+   * 那条路）挂住那么久。进度和结果由 `state.compacting` 与横幅负责说。
+   */
+  if (command.action) {
+    state.draft = ''
+    command.action()
     return
   }
   state.draft = command.text
@@ -283,7 +299,14 @@ function onInput() {
         </div>
 
         <div class="composer-right">
-          <span v-if="running" class="composer-note">正在执行，可随时停止（Esc）</span>
+          <!--
+            压缩要另外调一次模型，十几秒不出字。不说的话，用户点完 /压缩 之后
+            界面上一动不动 —— 那和"没生效"长得一模一样，多半会再点一次。
+          -->
+          <span v-if="state.compacting" class="composer-note">
+            <span class="spinner" />正在压缩上下文…
+          </span>
+          <span v-else-if="running" class="composer-note">正在执行，可随时停止（Esc）</span>
           <button v-if="running" type="button" class="stop-btn" title="停止" @click="stop">
             <AppIcon name="stop" :size="14" filled />
           </button>
