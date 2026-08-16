@@ -13,6 +13,7 @@ import { watch } from 'vue'
 
 import {
   api, getDevUsername, setDevUsername, getAuthToken, setAuthToken,
+  getCachedAuthMode, setCachedAuthMode,
   isRedirectingToLogin, clearSsoRetryMarker, onNeedLogin,
 } from '../lib/api.js'
 import { ADMIN_TABS, parsePath, pathFor } from '../lib/route.js'
@@ -635,6 +636,67 @@ async function applyRoute(route) {
   }
 }
 
+/**
+ * 冷启动：**在挂载之前**（见 main.js）把地址栏读进状态。
+ *
+ * ── 为什么必须同步、必须在 mount 之前 ──────────────────────────────────
+ *
+ * 从前地址是在 boot() 的**末尾**才被读的（bootAfterLogin → applyRoute），而 boot 要等
+ * healthz、模型、技能、会话列表…一串请求。这中间界面已经画出来了，画的是
+ * `state.view` 的初值 —— 也就是聊天页。于是刷新 /admin/models 的观感是
+ * "先开聊天页，再跳过去"，跟"地址是假的"没有区别。
+ *
+ * 这个函数把那件事提前到第一帧：地址说哪一页，第一帧就是哪一页。**它只搬状态、
+ * 不发请求** —— 数据仍然由 boot 去取，各页自己画"正在加载"。
+ *
+ * 拿不准的那些（这个人是不是管理员、作品库有没有开）**这里一律不判**：
+ * 判定要等 healthz 和 /me，而那是 applyRoute 的活。乐观地先画上，boot 之后
+ * 发现去不了再落回对话 —— 反过来（先画对话，确认能去再切）就是现在这个 bug。
+ *
+ * needLogin 同理：本地记着上次的登录方式且手里没令牌，就先把登录框摆上，
+ * 不再让人先看半屏聊天界面（见 lib/api.js:getCachedAuthMode）。
+ */
+export function initRoute() {
+  const route = parsePath()
+
+  // 分享页和访客市场页由 App.vue 直接按地址接管，不经过这份状态
+  if (route.name === 'share') return
+
+  if (route.name === 'admin') {
+    state.view = 'admin'
+    state.adminTab = ADMIN_TABS.includes(route.tab) ? route.tab : ADMIN_TABS[0]
+  } else if (route.name === 'artifacts') {
+    state.view = 'artifacts'
+  } else if (route.name === 'market') {
+    state.view = 'market'
+  } else {
+    /**
+     * 对话页。`loadingSession` 一开始就是 true —— 不论 `/c/<key>` 还是 `/`，
+     * boot 都会去开一条会话，这中间该显示"正在加载"，而不是新对话那屏引导语
+     * （那屏一闪而过之后被历史消息顶掉，看起来同样像是画错了页）。
+     * 真的没有会话可开时由 bootAfterLogin 关掉它。
+     */
+    state.loadingSession = true
+    if (route.sessionKey) {
+      state.activeKey = route.sessionKey
+      // 地址里点名了某条会话，就不是"还没发出第一条消息的新对话"
+      state.pendingNew = false
+    }
+  }
+
+  if (getCachedAuthMode() === 'password' && !getAuthToken()) state.needLogin = true
+}
+
+/**
+ * 首屏还答不上"要不要先登录"：既没有本地身份，也没记着这个部署的登录方式，
+ * 而 healthz 还没回来。这时候画应用外壳等于赌它不用登录，赌输了就是那一闪。
+ *
+ * 只有**第一次访问**会落进这里，之后 getCachedAuthMode 就有答案了。
+ */
+export function authUnknown() {
+  return !state.authReady && !hasStoredIdentity() && !getCachedAuthMode()
+}
+
 /** 浏览器的前进/后退。地址已经变好了，这里只负责把状态搬过去 */
 async function onPopState() {
   await applyRoute(parsePath())
@@ -679,17 +741,24 @@ async function bootAfterLogin(route = parsePath()) {
    *
    * 顺序不能反：作品库、市场、管理台都不是"另一个应用"，从它们退回来（Esc、关闭按钮）
    * 落到的是对话 —— 那时候后面得有东西，不能是一片空白。
+   * （也不能反过来先 applyRoute：`/artifacts/<id>` 已经摊开的那一份会被
+   * openSession 的"切会话就收起详情"清掉。）
+   *
+   * `keepView` 是这个顺序能成立的前提：目标不是对话时，这一步只是**在背后备一份**，
+   * 不许把 initRoute 已经立好的那一页掰回聊天页 —— 那正是"每次都先闪一下对话"的由来。
    */
+  const background = route.name !== 'chat'
   if (route.name === 'chat' && route.sessionKey) {
     if (!await openSession(route.sessionKey)) {
       showBanner('这条对话打不开了 —— 可能已被删除，或者服务重启后它没有留存')
     }
   } else {
     const last = state.sessions[0]
-    if (last) await openSession(last.sessionKey)
-    else loadDraft()
+    if (last) await openSession(last.sessionKey, { keepView: background })
+    // 一条会话都没有：没人会去关 initRoute 点起来的那盏"正在加载"，这儿得自己关
+    else { loadDraft(); state.loadingSession = false }
   }
-  if (route.name !== 'chat') await applyRoute(route)
+  if (background) await applyRoute(route)
 
   state.booted = true
   /**
@@ -719,6 +788,18 @@ export async function boot() {
   } catch {
     showBanner('服务端连不上，检查 agent 是否在跑')
   }
+
+  /**
+   * 到这里"要不要登录"才算有了答案，`initRoute` 之前那个猜测该以它为准。
+   *
+   * 连不上服务端时**不动缓存也不清 needLogin**：那次猜测仍然是现有的最好答案，
+   * 而把登录框收掉只会换来一屏什么都加载不出来的空应用。
+   */
+  if (state.health?.authMode) {
+    setCachedAuthMode(state.health.authMode)
+    if (state.health.authMode !== 'password') state.needLogin = false
+  }
+  state.authReady = true
 
   // dev 模式下先给个默认身份，否则首屏所有接口都会 401，而改身份的输入框就在下面
   if (state.health?.authMode === 'dev' && !getDevUsername()) setDevUsername('dev')

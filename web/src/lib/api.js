@@ -11,6 +11,7 @@
 
 const DEV_USERNAME_KEY = 'ap.devUsername'
 const AUTH_TOKEN_KEY = 'ap.authToken'
+const AUTH_MODE_KEY = 'ap.authMode'
 
 const SSO_RETRY_PARAM = 'sso_retry'
 
@@ -60,6 +61,7 @@ function handleUnauthorized(status, payload, sentToken) {
   // password 模式：清掉过期 token，通知前端弹登录框
   if (payload?.details?.authMode === 'password') {
     setAuthToken('')
+    setCachedAuthMode('password')
     needLoginCallback?.()
     return '需要登录'
   }
@@ -92,6 +94,32 @@ export function getAuthToken() {
 export function setAuthToken(token) {
   if (token) localStorage.setItem(AUTH_TOKEN_KEY, token)
   else localStorage.removeItem(AUTH_TOKEN_KEY)
+}
+
+/**
+ * 这个部署上一次说的登录方式（`password` / `sso` / `dev` / `none`）。
+ *
+ * ── 它存在的唯一理由：第一帧就知道该不该画登录框 ──────────────────────
+ *
+ * 真正的答案在 `/healthz` 里，而那是一次网络请求。在它回来之前，界面只有两个选择：
+ * 先画应用（猜"已登录"），或者先画登录框（猜"没登录"）—— 猜错的那一下就是用户看到的
+ * "先闪一下聊天页再跳登录"。而**登录方式是部署的属性，不是这个人的状态**：
+ * 一个部署配成 password 就一直是 password，记在本地几乎不会过时。
+ *
+ * 所以配上"本地有没有令牌"（getAuthToken），冷启动那一刻就能答得上来：
+ * 记着是 password 且手里没令牌 → 直接画登录框，一帧都不闪。
+ *
+ * **它不是凭据，也不参与任何判定** —— 服务端该 401 照样 401。猜错的代价只是
+ * 多闪一下（比如部署真的从 password 换成了 sso），boot 拿到 healthz 就会当场纠正。
+ * 退出登录时**不清它**：换个人登录进来，登录方式还是同一个。
+ */
+export function getCachedAuthMode() {
+  return localStorage.getItem(AUTH_MODE_KEY) || ''
+}
+
+export function setCachedAuthMode(mode) {
+  if (mode) localStorage.setItem(AUTH_MODE_KEY, mode)
+  else localStorage.removeItem(AUTH_MODE_KEY)
 }
 
 function headers(extra = {}) {

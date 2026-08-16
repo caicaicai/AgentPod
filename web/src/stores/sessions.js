@@ -210,10 +210,21 @@ export async function loadMoreSessions() {
   }
 }
 
-export async function openSession(key) {
+/**
+ * 打开一条会话。
+ *
+ * @param {string} key
+ * @param {{keepView?: boolean}} [options]
+ *   `keepView` = 只把这条会话装进状态里，**不要把视图拉回对话**。
+ *   只有一个调用方需要它：冷启动落在 /admin、/artifacts、/market 上时，
+ *   要在那一页背后先把对话备好（Esc / 关闭退回来时不能是一片空白）。
+ *   不给这个出口的话，那次"背后的准备"会把视图掰回 chat，于是用户看到的是
+ *   "管理台 → 聊天页闪一下 → 又回管理台" —— 也就是这套路由最初被吐槽的样子。
+ */
+export async function openSession(key, { keepView = false } = {}) {
   if (state.live) return // 正在跑的时候切会话会把流式结果丢在半路
   // 在作品库里点会话列表 = "我要去看那条对话"，得先回到对话视图
-  state.view = 'chat'
+  if (!keepView) state.view = 'chat'
   saveDraft() // 先把当前这条的草稿收好，再换人
   state.activeKey = key
   state.turns = []

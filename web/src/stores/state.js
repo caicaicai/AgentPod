@@ -33,6 +33,14 @@ export const state = reactive({
   /** 服务端开了哪些能力。关掉的那些整块不显示，而不是点了没反应 */
   features: {},
   booted: false,
+  /**
+   * 服务端已经就"要不要登录"表过态了（/healthz 回来了，或者它压根连不上）。
+   *
+   * 在这之前 `needLogin` 只是一个**猜测**（见 lib/api.js:getCachedAuthMode）。
+   * 界面靠这个标志区分"还不知道"和"知道了，不用登录"——
+   * 两者都是 `needLogin === false`，但前者不该拿它当真去画应用外壳。
+   */
+  authReady: false,
   /** password 模式下为 true 时显示登录框 */
   needLogin: false,
   loginError: '',
@@ -117,6 +125,10 @@ export const state = reactive({
    * 作品库是**独立入口**而不是又一个抽屉：抽屉是"边聊边看这一轮的产出"，
    * 而"上周做的那个报表在哪"是另一件事 —— 它跟当前聊到哪儿没有关系，
    * 挤在对话右边那条缝里也翻不动。市场同理，而且它连"我的"都不是。
+   *
+   * ⚠️ 这里写的 `'chat'` **不是首屏的值** —— mount 之前 `initRoute()` 会按地址栏
+   * 把它改成对应的那一页（见 stores/app.js）。写死成 chat 再等 boot 改的话，
+   * 刷新 /admin/models 会先画一帧聊天页，看起来像地址是假的。
    */
   view: 'chat',
   /** 当前会话的作品清单（不含正文） */

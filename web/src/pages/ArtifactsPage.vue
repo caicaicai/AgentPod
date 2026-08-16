@@ -118,7 +118,8 @@ const sessionTitle = (sessionKey) => state.sessions.find((item) => item.sessionK
         </button>
       </div>
 
-      <div v-if="state.libraryLoading && !state.libraryArtifacts.length" class="empty">
+      <!-- boot 还没排到取作品清单：这段空窗不能显示成"你还没有作品" -->
+      <div v-if="(state.libraryLoading || !state.booted) && !state.libraryArtifacts.length" class="empty">
         <span class="spinner" />正在加载…
       </div>
 

@@ -9,7 +9,7 @@
  * 三层外壳，从外到内：
  *   访客（分享页 / 未登录的市场页）→ 登录框 → 管理台（整窗口）→ 侧栏 + 正文 + 抽屉
  */
-import { onMounted, onBeforeUnmount } from 'vue'
+import { computed, onMounted, onBeforeUnmount } from 'vue'
 
 // 页面：与 lib/route.js 里那几条地址一一对应
 import AdminPage from '@/pages/AdminPage.vue'
@@ -30,7 +30,7 @@ import SkillsPanel from '@/modules/panels/components/SkillsPanel.vue'
 import AppDialog from '@/components/AppDialog.vue'
 import ImageLightbox from '@/components/ImageLightbox.vue'
 import {
-  boot, closeAdmin, closeArtifactDetail, closeLibrary, closeMarket, closeWizard,
+  authUnknown, boot, closeAdmin, closeArtifactDetail, closeLibrary, closeMarket, closeWizard,
   hasStoredIdentity, saveDraft, state, stop,
 } from '@/stores/app.js'
 import { dialog } from '@/lib/dialog.js'
@@ -40,8 +40,20 @@ import { parsePath } from '@/lib/route.js'
  * 首屏落在哪条地址上。**只在这里判一次**：之后的来回导航由 store 里那套
  * 地址↔状态的同步接手（见 stores/app.js 的「地址栏」一节），这里要的只是
  * "这一次要不要走应用外壳"。
+ *
+ * 应用外壳里画哪一页则不看这个 `route`，看 `state.view` —— 它在挂载之前就已经
+ * 按同一条地址填好了（见 stores/app.js:initRoute），所以第一帧就是对的那一页。
  */
 const route = parsePath()
+
+/**
+ * 还答不上"要不要先登录"的那一小段（只有第一次访问会遇到，见 authUnknown）。
+ *
+ * 这时候画什么都是在赌：画应用外壳，是赌他已登录；画登录框，是赌他没有。
+ * 赌输的那一下就是用户看到的"先闪一下聊天页再跳登录"。所以干脆什么都不画 ——
+ * 等 healthz 那一个请求回来，通常一帧都不到。
+ */
+const booting = computed(() => authUnknown())
 
 /**
  * 访客外壳：分享页，以及**没有身份痕迹时**的市场页。
@@ -107,6 +119,9 @@ onBeforeUnmount(() => {
   <SharePage v-if="route.name === 'share'" :token="route.token" />
   <MarketPage v-else-if="visitor" standalone />
 
+  <!-- 还不知道该画应用还是画登录框。空一帧，别猜（见上面的 booting） -->
+  <div v-else-if="booting" class="booting" />
+
   <LoginOverlay v-else-if="state.needLogin" />
 
   <!--
@@ -149,6 +164,13 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* 底色而不是转圈：这一段短到画个 spinner 只会闪一下，那比空着更刺眼 */
+.booting {
+  height: 100vh;
+  height: 100dvh;
+  background: var(--background);
+}
+
 .layout {
   display: flex;
   position: relative;

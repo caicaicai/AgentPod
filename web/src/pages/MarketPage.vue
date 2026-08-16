@@ -131,7 +131,11 @@ function pickAll() {
         </button>
       </div>
 
-      <div v-if="state.marketLoading && !state.marketItems.length" class="empty">
+      <!--
+        应用内的 /market 是第一帧就画出来的，取数据要等 boot 排完（理由同作品库）。
+        独立页不看 `booted` —— 访客根本不跑 boot，那个标志永远是 false。
+      -->
+      <div v-if="(state.marketLoading || (!state.booted && !standalone)) && !state.marketItems.length" class="empty">
         <span class="spinner" />正在加载…
       </div>
 

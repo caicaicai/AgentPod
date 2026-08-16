@@ -712,7 +712,12 @@ function partialNote(row) {
           </div>
         </form>
 
-        <div v-if="state.adminLoading && !state.adminUsers.length" class="empty">
+        <!--
+          `!state.booted` 也算加载中：直接刷新 /admin 时，这一页在第一帧就画出来了
+          （见 stores/app.js:initRoute），而请求要等 boot 那一串排完才发得出去。
+          不算的话，中间那段会显示成"一个账号都没有"—— 一个纯粹由时序造成的假象。
+        -->
+        <div v-if="(state.adminLoading || !state.booted) && !state.adminUsers.length" class="empty">
           <span class="spinner" />正在加载…
         </div>
 
@@ -976,7 +981,8 @@ function partialNote(row) {
           </div>
         </form>
 
-        <div v-if="state.adminModelsLoading && !state.adminModels.length" class="empty">
+        <!-- `!state.booted` 的理由同账号页 -->
+        <div v-if="(state.adminModelsLoading || !state.booted) && !state.adminModels.length" class="empty">
           <span class="spinner" />正在加载…
         </div>
 
@@ -1209,7 +1215,7 @@ function partialNote(row) {
           </div>
         </form>
 
-        <div v-if="state.adminGroupsLoading && !state.adminGroups.length" class="empty">
+        <div v-if="(state.adminGroupsLoading || !state.booted) && !state.adminGroups.length" class="empty">
           <span class="spinner" />正在加载…
         </div>
 
@@ -1330,7 +1336,7 @@ function partialNote(row) {
 
       <!-- ══════════ Token 用量 ══════════ -->
       <template v-else>
-        <div v-if="state.adminUsageLoading && !state.adminUsage" class="empty">
+        <div v-if="(state.adminUsageLoading || !state.booted) && !state.adminUsage" class="empty">
           <span class="spinner" />正在统计…
         </div>
 
