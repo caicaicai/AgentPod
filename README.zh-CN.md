@@ -174,6 +174,26 @@ docker build -t agentpod-manager ./sandbox-manager
 sandbox-worker/bin/check-namespace-caps.sh
 ```
 
+### 自动更新（部署机跟着 git 走）
+
+部署机上的仓库当作远端的**镜像**：拉最新提交 → 重建 → 起来 → 验 `/healthz`，不健康就自动滚回上一个提交。服务器上唯一独有的东西是 `.env`（在 `.gitignore` 里，回滚与清理都不碰它）。
+
+```bash
+# 一次性部署（没有新提交时立刻返回，跑一遍很便宜）
+scripts/deploy.sh
+scripts/deploy.sh --force          # 不管有没有新提交，重建一遍
+scripts/deploy.sh --ref v1.2       # 部署到指定分支/标签/提交
+
+# 装成每 5 分钟自动检查一次
+sudo scripts/install-auto-deploy.sh
+sudo scripts/install-auto-deploy.sh --interval 15min
+sudo scripts/install-auto-deploy.sh --uninstall
+```
+
+装完之后：`systemctl list-timers agentpod-deploy.timer` 看下次什么时候跑，`journalctl -u agentpod-deploy` 看上次跑成什么样，仓库根的 `deploy.log` 是逐次部署的流水。
+
+用轮询而不是 webhook，是因为轮询不需要在源站开入站端口、不需要把服务器凭据放到 GitHub 上，断网恢复后自己会追上；代价只是最多晚一个周期。
+
 ### 生产环境检查清单
 
 `NODE_ENV=production` 时，以下条件**在启动时强制校验**（不满足则拒绝启动）：

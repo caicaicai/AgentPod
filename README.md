@@ -176,6 +176,26 @@ The sandbox worker needs privileged capabilities to set up namespace isolation. 
 sandbox-worker/bin/check-namespace-caps.sh
 ```
 
+### Auto-Deploy (keep a host in sync with git)
+
+The checkout on a deploy host is treated as a **mirror** of the remote: pull the latest commit, rebuild, bring it up, verify `/healthz`, and roll back to the previous commit if it doesn't come up healthy. The one thing that is server-specific is `.env` — it's in `.gitignore`, so neither the reset nor the cleanup touches it.
+
+```bash
+# One-shot deploy (returns immediately when there is nothing new, so it's cheap to run often)
+scripts/deploy.sh
+scripts/deploy.sh --force          # rebuild even without new commits
+scripts/deploy.sh --ref v1.2       # deploy a specific branch/tag/commit
+
+# Install as a timer that checks every 5 minutes
+sudo scripts/install-auto-deploy.sh
+sudo scripts/install-auto-deploy.sh --interval 15min
+sudo scripts/install-auto-deploy.sh --uninstall
+```
+
+Afterwards: `systemctl list-timers agentpod-deploy.timer` for the next run, `journalctl -u agentpod-deploy` for the last one, and `deploy.log` in the repo root for the per-deploy trail.
+
+Polling rather than a webhook: it needs no inbound port on the origin, no server credentials stored on GitHub, and it catches up on its own after an outage. The cost is a delay of at most one interval.
+
 ### Production Checklist
 
 When `NODE_ENV=production`, the following are **enforced at startup** (the process refuses to start otherwise):

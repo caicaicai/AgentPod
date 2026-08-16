@@ -9,5 +9,9 @@ dist/
 coverage/
 .vite/
 data/
+# 部署机上的东西（scripts/deploy.sh）。锁文件与 .env 的历史备份都不该进仓库，
+# 列在这里还有一层作用：deploy.sh 里的 `git clean -fd` 不碰被忽略的文件
+.deploy.lock
+.env.bak-*
 
 .cursorrules

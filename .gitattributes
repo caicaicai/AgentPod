@@ -1,0 +1,9 @@
+# shell 脚本必须是 LF。
+#
+# Windows 上 `core.autocrlf=true` 会在检出时把它们换成 CRLF，提交回去时
+# 那个 \r 就跟着进了仓库；Linux 上再检出来执行，报的是
+# `bash: ...\r: No such file or directory` —— 一条完全指不到真正原因的错。
+# scripts/deploy.sh 会在部署机上跑，所以这一条是部署链路的一部分。
+*.sh text eol=lf
+sandbox-worker/bin/* text eol=lf
+bin/* text eol=lf

@@ -25,7 +25,9 @@ services:
     container_name: agentpod-agent
     restart: unless-stopped
     ports:
-      - "${PORT:-8787}:${PORT:-8787}"
+      # 唯一对外的服务。放在 nginx/CDN 后面时改成 AGENT_BIND=127.0.0.1，
+      # 别让人绕过反代直连源站
+      - "${AGENT_BIND:-0.0.0.0}:${PORT:-8787}:${PORT:-8787}"
     env_file:
       - path: .env
         required: false
@@ -39,7 +41,10 @@ services:
       # 而 .env 里那一行明明写着。留空 = 明文入库（启动日志会 warn 一次）。
       - LLM_CONFIG_SECRET=${LLM_CONFIG_SECRET:-}
       - AUTH_MODE=${AUTH_MODE:-dev}
-      - DEV_CONSOLE=1
+      # 开发态默认开着（本地调试要用）。NODE_ENV=production 下它必须是 0，
+      # 否则服务**拒绝启动** —— 所以生产部署要在 .env 里显式写 DEV_CONSOLE=0。
+      # 写死成 1 的话，.env 里那一行会被这里盖掉，现象是"我明明关了却还是起不来"
+      - DEV_CONSOLE=${DEV_CONSOLE:-1}
       # 集群模式：通过 manager 调度 worker
       - SANDBOX_MODE=manager
       - SANDBOX_MANAGER_URL=http://manager:3000
@@ -74,7 +79,9 @@ services:
     restart: unless-stopped
     privileged: true
     ports:
-      - "${WORKER_PORT:-8080}:8080"
+      # 集群内部接口，只被 agent/manager 调用 —— 默认不出本机。
+      # 要跨机部署 worker 再显式改 WORKER_BIND=0.0.0.0
+      - "${WORKER_BIND:-127.0.0.1}:${WORKER_PORT:-8080}:8080"
     environment:
       - NODE_ENV=${NODE_ENV:-development}
       - PORT=8080
@@ -92,6 +99,16 @@ services:
       - SANDBOX_ADVERTISE_BASE=http://worker:8080
       # Docker Desktop 的内嵌 DNS 在 slot 的 netns 里不可达，需指定真实 DNS
       - SANDBOX_DNS_SERVERS=${SANDBOX_DNS_SERVERS:-8.8.8.8,1.1.1.1}
+      # ── 每 slot 资源上限（cgroup v2）──
+      # 不在这里列出来的话，.env 里写了也**没有任何效果**：这个 environment 块
+      # 是白名单，容器里只看得到列出来的变量
+      - SANDBOX_NS_CPU_MAX_CORES=${SANDBOX_NS_CPU_MAX_CORES:-1}
+      - SANDBOX_NS_MEMORY_MAX_MB=${SANDBOX_NS_MEMORY_MAX_MB:-1024}
+      - SANDBOX_NS_PIDS_MAX=${SANDBOX_NS_PIDS_MAX:-256}
+      # 节点侧出站白名单。注意 manager 一旦下发策略就**整体覆盖**这两个值，
+      # 不是合并 —— 集群模式下真正说了算的是 manager 那边的 SANDBOX_EGRESS_MODE
+      - SANDBOX_EGRESS_MODE=${SANDBOX_EGRESS_MODE:-allowlist}
+      - SANDBOX_EGRESS_ALLOW=${SANDBOX_EGRESS_ALLOW:-}
     volumes:
       - worker-data:/var/tmp/ap-sandbox
     depends_on:
@@ -106,7 +123,9 @@ services:
     container_name: agentpod-manager
     restart: unless-stopped
     ports:
-      - "${MANAGER_PORT:-3000}:3000"
+      # 调度接口 + 管理台，默认不出本机。要远程开管理台走 SSH 隧道，
+      # 别直接改成 0.0.0.0 —— 它能改所有 slot 的出站策略
+      - "${MANAGER_BIND:-127.0.0.1}:${MANAGER_PORT:-3000}:3000"
     env_file:
       - path: ./sandbox-manager/.env
         required: false
@@ -118,10 +137,13 @@ services:
       - SANDBOX_TICKET_SECRET=${SANDBOX_TICKET_SECRET:-dev-ticket-secret}
       # API 鉴权码（worker 和 agent 用它访问 manager 的调度接口）
       - API_SECURITY_CODES=${SANDBOX_MANAGER_CODE:-dev-api-code}
-      # 沙盒出站策略：open=自由访问，allowlist=白名单拦截
-      - SANDBOX_EGRESS_MODE=${SANDBOX_EGRESS_MODE:-open}
-      # 管理台登录账号
-      - CONSOLE_USERS=${CONSOLE_USERS:-admin:changeme}
+      # 沙盒出站策略：open=自由访问，allowlist=白名单拦截。
+      # 默认跟代码里的默认值一致（allowlist）—— 从前这里默认 open，而 manager
+      # 下发的策略会整体覆盖节点侧配置，于是 worker 那边设了白名单也不算数
+      - SANDBOX_EGRESS_MODE=${SANDBOX_EGRESS_MODE:-allowlist}
+      # 管理台登录账号。**不要复用 CONSOLE_USERS** —— 那个是 agent 的管理员账号，
+      # 两个服务读同一份 .env，同名的话设一个等于把两处密码设成同一个
+      - CONSOLE_USERS=${MANAGER_CONSOLE_USERS:-admin:changeme}
     depends_on:
       redis:
         condition: service_started
@@ -132,7 +154,9 @@ services:
     container_name: agentpod-redis
     restart: unless-stopped
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      # 无密码 Redis。默认必须只监听回环 —— 公网上的空口令 Redis
+      # 是分钟级就会被打穿的东西
+      - "${REDIS_BIND:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     command: redis-server --appendonly yes
