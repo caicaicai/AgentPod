@@ -731,6 +731,10 @@ Contributions are welcome! Please read the isolation contract documentation befo
 
 **Before submitting**: ensure `npm run check` passes. The static isolation rules and tests are there to prevent multi-tenant data leaks — PRs that break them will not be merged.
 
+## Community
+
+Thanks to the [LinuxDO](https://linux.do/) community for their support.
+
 ## License
 
 [MIT](LICENSE)

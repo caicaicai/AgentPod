@@ -700,6 +700,10 @@ npm run check:isolation
 
 **提交前请确保** `npm run check` 通过。静态隔离规则和测试的存在是为了防止多租户数据泄漏——破坏它们的 PR 不会被合并。
 
+## 社区支持
+
+感谢 [LinuxDO](https://linux.do/) 社区的支持。
+
 ## 许可证
 
 [MIT](LICENSE)
