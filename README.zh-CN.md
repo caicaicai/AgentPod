@@ -79,8 +79,13 @@ npm run dev
 
 `npm test` **不需要数据库**：存储相关的用例跑在内存替身上
 （`test/helpers/memory-storage.js`）。把 `AP_TEST_MYSQL_URL` 指到一个测试库，
-存储契约会**额外**对真 MySQL 再跑一遍 —— CI 上应当这么做，那正是能抓出
-"替身与真后端漂移"的地方。
+存储契约会**额外**对真 MySQL 再跑一遍 —— 那正是能抓出"替身与真后端漂移"的地方，
+所以 **CI 就是这么跑的**（`test` job 挂一个 `mysql:8.0` service 并设上这个变量，
+见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)）：
+
+```bash
+AP_TEST_MYSQL_URL=mysql://aptest:aptest@127.0.0.1:3306/agentpod_test npm test
+```
 
 ### 全栈部署
 
@@ -498,6 +503,8 @@ docker compose up -d      # 自带 mysql 服务，agent 等它健康检查通过
 | POST | `/v1/chat/stream` | 发起对话（SSE 流式响应） |
 | POST | `/v1/runs/:runId/abort` | 中止运行中的对话（仅限自己的） |
 | POST | `/v1/compact` | 手动压缩一条会话的上下文：`{ sessionKey, instructions? }`。普通 POST 而不是 SSE —— 中间没有任何可流式的东西（模型在写摘要，一个字都不吐），只有一个结果；但它**要调模型，可能十几秒**。走和一轮对话同样的额度与并发闸门。路径是 `/v1/compact` 而不是 `/v1/sessions/:key/compact`：那个前缀把剩下的整段都当 sessionKey 解析（同一个理由让会话搜索去了 `/v1/search`） |
+| GET | `/v1/runs?sessionKey=` | 缓冲区里还在的、属于你的 run：`{ runId, sessionKey, startedAt, endedAt, done, lastSeq, truncated }`。刚刷新完页面的客户端靠它发现"还有一轮在跑" |
+| GET | `/v1/runs/:runId/events?from=N` | **接回**一条还在跑的流（SSE）。`from` 是客户端收到的最后一帧序号 |
 | GET | `/v1/models` | 可用模型列表 |
 
 **SSE 事件类型：** `run_start` · `model` · `thinking` · `text` · `text_end` · `tool_call` · `tool_result` · `retry` · `compaction` · `usage` · `final` · `error`
@@ -505,6 +512,27 @@ docker compose up -d      # 自带 mysql 服务，agent 等它健康检查通过
 `compaction` 帧带 `{ state: 'start'|'end', reason: 'manual'|'threshold'|'overflow', … }`。
 摘要正文**从不下发** —— 客户端要知道的是"发生了压缩、上下文有多大"，
 不是去读一份自己对话的复述。
+
+#### 断线接回还在跑的那一轮
+
+从前 `/v1/chat/stream` 断了就没了：服务端的 run 照样跑到结束，但客户端**没有任何入口**
+回到那条流上，而会话正文要等这一轮结束才落库。合上笔记本、切个网络、进一趟电梯，
+这一轮的回答就在界面上永久消失了 —— token 一个不少地烧完。
+
+所以 run 的事件按 run 缓冲（`src/agent/run-registry.js`），每一帧的 SSE `id:` 带序号。
+接回就是 `GET /v1/runs/:runId/events?from=<最后收到的序号>`：先补发 `from` 之后的帧，
+然后继续推实时的。
+
+- 它是 **GET，不是再 POST 一次** `/v1/chat/stream`。拿同一个端点做重连，
+  一次网络抖动就会变成又跑一轮、又烧一份 token。
+- 归属校验在**写下任何字节之前**：runId 不存在或不是你的，一律 **404** ——
+  一旦 `200` 写出去了就再也收不回来。
+- 客户端离开期间缓冲撑爆过的话，服务端只发一帧 **`resync`** 然后关闭，
+  而不是装作流是完整的。少掉的帧里可能有整段文本，一段中间缺了几句、
+  又看不出缺过的回答，比一句"请重新加载"糟糕得多。
+- 缓冲在**进程内**，所以它兜的是"断线"，不是"副本重启"。`/healthz` 用
+  `features.runResume` 宣告这个能力 —— 客户端据此决定要不要去试，
+  而不是盲发一个注定 404 的请求，然后让那次失败盖掉真正该显示的"连接断了"。
 
 ### 会话
 
@@ -677,6 +705,13 @@ npm run check:isolation
 4. **沙盒隔离** — 每个槽位拥有独立的 Linux 命名空间，租户数据绝不共置
 
 运行 `npm run check:isolation` 验证静态规则。此检查在 CI 中运行，合并前必须通过。
+
+九条规则各自防什么、由哪道检查守着，写在
+**[docs/ISOLATION-CONTRACT.md](docs/ISOLATION-CONTRACT.md)** ——
+改动碰到会话、凭据、存储路径、工具装配、沙盒文件接口之前请先读它。
+
+依赖安全告警（`npm audit`）以及每一条的可达性分析，记在
+[docs/SECURITY-NOTES.md](docs/SECURITY-NOTES.md)。
 
 ## 技术栈
 

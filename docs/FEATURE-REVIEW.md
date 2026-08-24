@@ -14,10 +14,22 @@
 
 ---
 
-## P0 · 说了但没做到的（半天以内，纯修复）
+## P0 · 说了但没做到的 —— ✅ 已完成
 
 这几条的共同点：**文档或配置已经承诺了，代码里是空的**。留着比没有更糟 ——
 读的人会按承诺去用。
+
+> **状态：六条全部处理完毕**，另外顺手补掉了执行过程中发现的三个同类问题
+> （见本节末尾「过程中发现的」）。改动清单：
+>
+> | # | 结论 |
+> |---|---|
+> | 1 | 补 `LICENSE`（MIT）+ `package.json` 的 `license` 字段；新增 `test/docs-links.test.js` 守住 |
+> | 2 | `MIGRATION.md` 的三处引用全部消解 —— 进度表**内联**进 ARCHITECTURE.md，不再外包给不存在的文件 |
+> | 3 | `web_search` 死配置整条删除（config.js / run-service.js / .env.example），并在 `src/tools/index.js` 写明为什么不留 |
+> | 4 | ARCHITECTURE.md 的"诚实清单"重写为表格并纠正"断线续接"；两份 README 补上 `/v1/runs` 与 `/v1/runs/:runId/events` |
+> | 5 | CI 挂上 `mysql:8.0` service 并设 `AP_TEST_MYSQL_URL` —— 存储契约的真库那一遍第一次真的会跑。⚠️ **改动在 [`docs/patches/ci-mysql-service.patch`](patches/ci-mysql-service.patch)，需要有权限的人手工应用**（GitHub App 没有 `workflows` 权限，带着这类改动推分支会被服务端拒绝） |
+> | 6 | 4 条依赖告警逐条判可达性，结论写进 `docs/SECURITY-NOTES.md`；并补了一条静态规则把结论的前提**固化** |
 
 ### 1. `LICENSE` 文件不存在
 
@@ -74,13 +86,54 @@ README 明确写着：
 也就是说：唯一能发现 `test/helpers/memory-storage.js` 与真实 MySQL 行为漂移的那道闸，
 一次都没关过。补法很短 —— 给 test job 加一个 `services: mysql` 和一行环境变量。
 
-### 6. 依赖链上有两条 high 级告警
+### 6. 依赖链上的安全告警一直红着，没有结论
 
-`npm audit --omit=dev` 报 `extract-zip` 的软链接路径穿越（GHSA-jmr9-qjv8-65gv），
-来自 `@mariozechner/pi-coding-agent` 的依赖树（大概率经 playwright）。
-`npm audit fix --force` 会把 pi 降到 0.49.3，是破坏性变更，**不能直接跑**。
-需要的是确认这条路径在本项目里是否可达（我们并不解压用户提供的 zip），
-然后决定是等上游、还是加 override。至少要有个结论，而不是一直红着。
+`npm audit --omit=dev` 报 **2 条 high**（外加同一棵树上的 2 条 low，共 4 条 advisory），
+全部来自 `@mariozechner/pi-coding-agent`。`npm audit fix --force` 会把 pi 降到 0.49.3 ——
+破坏性降级，且**修不了**：这几条的影响范围是 `<=0.73.1`，而 0.73.1 就是当前最新版，
+上游还没发出修好的版本。
+
+> 📝 **修正**：我在第一版报告里把这条写成"两条 high，来自 extract-zip，大概率经 playwright"。
+> 逐条查下来两处都不准 —— 实际是 4 条 advisory（2 high + 2 low），
+> 且 `extract-zip` 是 pi 自己用来下载解压 `fd`/`rg` 二进制的，与 playwright 无关。
+
+逐条判完的结论：**四条全部不可达**，依据写进了
+[SECURITY-NOTES.md](SECURITY-NOTES.md)（含复核方法和"什么时候必须回来重看"）。
+两条 high 不可达的共同前提是"pi 的内置工具没被启用" —— 而这个前提在此之前
+**只由代码注释守着**（`noTools: 'builtin'` 旁边写着"不要改"），
+所以顺手补了一条静态规则 `R2-AgentSession 必须保持 noTools: builtin` 把它固化。
+
+值得单独说一句的是**为什么要写这份文件而不是让它继续红着**：
+一个 `npm audit` 长期红着的项目，最后一定没人看它 ——
+于是真出现一条该管的告警时，它和这几条一起被划过去。
+要么修掉，要么写清楚为什么不修，没有第三种状态。
+
+### 过程中发现的（同一类问题，一并修了）
+
+第 1 条那个"README 链接到不存在的 LICENSE"，一开始是靠人眼看出来的。
+既然要修，就顺手写了 `test/docs-links.test.js` 去扫**全仓库所有 markdown 的相对链接**
+—— 结果它当场又抓出两条我没看见的：
+
+- `managed-skills/README.md` → `../skill-libs/README.md`（**不存在**）
+  → 补上了那份 README（说清 `skill-libs/` 与 `managed-skills/` 的分工：
+  一个进 worker 镜像、一个进 agent 镜像，搞混的表现是"模型说有这个技能、进去却找不到脚本"）
+- `sandbox-manager/README.md` → `docs/PROTOCOL.md`（**不存在**，被引用 3 次）
+  → 那份协议文档没有随仓库开源；把三处引用改指到真实存在的
+  `sandbox-worker/PROTOCOL.md` 与代码，并删掉了一整块**描述不存在目录**的目录树
+  （`workers/`、`modules/`、`docs/` —— 照着找的人会以为自己 clone 少了东西）
+
+第三条是修第 6 条时撞见的：`scripts/check-isolation-rules.js` 在检查失败时
+打印"详见 docs/ISOLATION-CONTRACT.md"，`src/agent/run-turn.js` 开头写着
+"改这个文件前先读 docs/ISOLATION-CONTRACT.md"，另有两处引用 ——
+**而这个文件不存在**。这比断个链接严重：它是这个项目全部安全前提的落点，
+四处引用里有一处还是人看到报错时的第一指引。
+
+已按代码实况补齐（`docs/ISOLATION-CONTRACT.md`）：九条规则逐条写明
+*要求 / 为什么 / 在哪 / 谁守着*，并标注了边界之外的东西（内核逃逸、
+额度不是安全边界、agent 侧出站白名单是空的）。
+
+**这三条都不是我一开始列出来的** —— 值得记一笔：断链这种问题人眼扫不干净，
+但一条二十行的测试可以，而且以后不会再犯。
 
 ---
 

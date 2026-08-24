@@ -12,7 +12,8 @@
 所以只保留一个真源：放在 agent 这边，每轮按需铺进沙盒工作区
 （`src/agent/skill-materializer.js`）。worker 镜像与技能更新彻底解耦。
 
-完整推理见 `docs/MIGRATION.md`「技能要跑起来还差什么」。
+这个目录与 `skill-libs/`（进 worker 镜像的客户端库）的分工见
+[`../skill-libs/README.md`](../skill-libs/README.md)。
 
 ## 怎么填
 

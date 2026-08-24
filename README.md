@@ -81,8 +81,13 @@ instead of sending it.
 
 `npm test` does **not** need a database: the store tests run against an in-memory double
 (`test/helpers/memory-storage.js`). Point `AP_TEST_MYSQL_URL` at a scratch database to additionally
-run the storage contract against real MySQL — CI should do that, since it is what catches the double
-drifting from the real backend.
+run the storage contract against real MySQL — that is what catches the double drifting from the
+real backend, so **CI does exactly this** (the `test` job runs a `mysql:8.0` service and sets the
+variable; see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
+
+```bash
+AP_TEST_MYSQL_URL=mysql://aptest:aptest@127.0.0.1:3306/agentpod_test npm test
+```
 
 ### Full Stack Deployment
 
@@ -529,6 +534,8 @@ numbers do and don't mean.
 | POST | `/v1/chat/stream` | Start a conversation turn (SSE streaming response) |
 | POST | `/v1/runs/:runId/abort` | Abort a running conversation (own runs only) |
 | POST | `/v1/compact` | Compact a session's context on demand: `{ sessionKey, instructions? }`. Plain POST, not SSE — there is nothing to stream (the model is writing a summary, emitting nothing), just a result — but it **calls a model and can take ten-odd seconds**. Passes the same quota and concurrency gates as a turn. Path is `/v1/compact`, not `/v1/sessions/:key/compact`, because that prefix parses everything after it as the sessionKey (the same reason search lives at `/v1/search`) |
+| GET | `/v1/runs?sessionKey=` | Runs still in the buffer that belong to you: `{ runId, sessionKey, startedAt, endedAt, done, lastSeq, truncated }`. This is how a client that just reloaded finds out a turn is still going |
+| GET | `/v1/runs/:runId/events?from=N` | **Reattach** to a running turn (SSE). `from` is the last frame id the client received |
 | GET | `/v1/models` | Available model list |
 
 **SSE Events:** `run_start` · `model` · `thinking` · `text` · `text_end` · `tool_call` · `tool_result` · `retry` · `compaction` · `usage` · `final` · `error`
@@ -536,6 +543,28 @@ numbers do and don't mean.
 `compaction` carries `{ state: 'start'|'end', reason: 'manual'|'threshold'|'overflow', … }`. The
 summary text is **never** sent — clients need to know that compaction happened and how large the
 context was, not to read a retelling of their own conversation.
+
+#### Reconnecting to a turn in progress
+
+A dropped `/v1/chat/stream` used to be fatal to the *answer*, not to the run: the server kept
+going, but the client had **no way back onto that stream**, and the transcript is only written
+when the turn ends. Closing a laptop, switching networks, or riding an elevator made that answer
+disappear from the UI permanently — with every token still paid for.
+
+So run events are buffered per run (`src/agent/run-registry.js`) and each SSE frame carries a
+sequence number in its `id:` field. Reattaching is `GET /v1/runs/:runId/events?from=<last id>`:
+frames after `from` are replayed, then the stream continues live.
+
+- It is a **GET, not a re-POST** to `/v1/chat/stream`. Reusing that endpoint would turn one
+  network blip into a second run and a second bill.
+- Ownership is checked before anything is written: an unknown or someone else's `runId` is a
+  plain **404**, because once a `200` is on the wire it cannot be taken back.
+- If the buffer overflowed while the client was away, the server sends a single **`resync`**
+  frame and closes, rather than pretending the stream is intact. Missing frames can contain whole
+  paragraphs; a silently gappy answer is worse than an explicit "reload the session".
+- Buffers are in-process, so this covers *disconnects*, not replica restarts. `/healthz` advertises
+  the capability as `features.runResume` — clients check it instead of blind-firing a request that
+  would 404 and mask the real "connection lost" state.
 
 ### Sessions
 
@@ -708,6 +737,13 @@ Multi-tenant isolation is enforced through multiple layers:
 4. **Sandbox isolation** — each slot has independent Linux namespaces; tenant data is never co-located
 
 Run `npm run check:isolation` to verify the static rules. The check runs in CI and must pass before merge.
+
+The nine rules, what each one guards against and which check enforces it, are written down in
+**[docs/ISOLATION-CONTRACT.md](docs/ISOLATION-CONTRACT.md)** — read it before touching anything
+that handles sessions, credentials, storage paths, tool assembly, or the worker's file API.
+
+Dependency advisories (`npm audit`) and the reachability analysis for each one are tracked in
+[docs/SECURITY-NOTES.md](docs/SECURITY-NOTES.md).
 
 ## Tech Stack
 

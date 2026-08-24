@@ -20,6 +20,15 @@ import { artifactPlugin } from './artifact.js'
 /**
  * 已完成迁移的插件，以及各自的启用条件。
  * `requires` 里的能力有一个不满足就不注册，并在日志里说清楚缺什么。
+ *
+ * ⚠️ **没有 `web_search`，这是有意的。** 仓库里曾经有过 `WEB_SEARCH_HOST` /
+ * `WEB_SEARCH_TENANT_CODE` 两个配置项：config.js 解析它们、run-service 一路传进
+ * 这里的 `config`，**然后没有任何东西读**。部署方照着 `.env.example` 配好搜索网关、
+ * 重启，什么都不会发生，也没有一行日志说不对 —— 比"没这个功能"更难查。
+ *
+ * 所以整条删掉了。真要补这个能力，正确的顺序是**先写工具再加配置**：
+ * 在这里注册一个 `requires: ['webSearch']` 的插件，能力位由 buildApTools 判定，
+ * 后端没配就不注册（模型压根不知道有这回事，不会反复试错拿 501）。
  */
 const PLUGIN_REGISTRY = [
   { plugin: taskPlanPlugin, requires: [] }, // 纯本地，无依赖

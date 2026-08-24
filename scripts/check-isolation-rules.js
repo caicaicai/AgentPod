@@ -36,6 +36,38 @@ const RULES = [
     hint: '这些会在服务进程内执行；请用 createBashToolDefinition + 注入沙盒 operations',
   },
   {
+    /**
+     * R2 的另一半。
+     *
+     * 上面那条拦的是"把 pi 的本地执行工具**造出来**"（createBashTool / createCodingTools）。
+     * 但还有一条更安静的路径能达到同样的效果：**把 `noTools` 改掉**。
+     * `noTools: 'builtin'` 是 pi 内置工具（read/bash/edit/write/find/grep）的总闸 ——
+     * 去掉它、或者写成别的值，pi 就会自己装上一整套在**服务进程内**执行的工具，
+     * 而这个进程是所有租户共用的。
+     *
+     * 这个改动在 diff 里只有一个单词，评审时极易滑过去，事后也没有任何征兆：
+     * 功能照常工作，只是命令不再跑在沙盒里了。
+     *
+     * 顺带它也是两条依赖安全告警的前提（见 docs/SECURITY-NOTES.md）——
+     * pi 内置的 find/grep 会去下载解压 fd/rg 二进制，那条路径上挂着
+     * extract-zip 的软链接穿越（GHSA-jmr9-qjv8-65gv）。今天不可达，
+     * 靠的就是这个总闸。
+     */
+    id: 'R2-AgentSession 必须保持 noTools: builtin',
+    scope: 'src/',
+    /**
+     * 匹配"写了 `noTools:` 但值不是 `'builtin'`"。写对的那两处不会命中。
+     *
+     * 否定环视必须**把空白吃进去**（`:(?!\s*'builtin')`），不能写成
+     * `:\s*(?!'builtin')` —— 后者里的 `\s*` 会回溯：正则引擎退到"一个空格都不吃"
+     * 的位置，此时下一个字符是空格、不是引号，环视于是成立，
+     * **正确的写法反而被判成违规**。这条规则第一版就是这么写的，
+     * 两个写对的地方全红了。
+     */
+    pattern: /noTools\s*:(?!\s*['"]builtin['"])/,
+    hint: "pi 内置工具会在服务进程内执行命令，必须保持 noTools: 'builtin'；执行一律下沉沙盒（隔离契约 #2）",
+  },
+  {
     id: 'R6-禁止模块级凭据缓存',
     pattern: /^(export\s+)?let\s+\w*(token|cookie|credential|profile)\w*\s*=/im,
     hint: '模块级变量跨 run 保留，在共享进程里必然串号（反面教材：jme-auth.ts 的 export let ssoToken）',

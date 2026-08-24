@@ -621,12 +621,6 @@ export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {
       market: bool(env.ARTIFACT_MARKET_ENABLED, true),
     },
 
-    /** 联网搜索（`web_search` 工具）。 */
-    webSearch: {
-      host: str(env.WEB_SEARCH_HOST),
-      tenantCode: str(env.WEB_SEARCH_TENANT_CODE),
-    },
-
     skills: {
       dirs: list(env.SKILL_DIRS),
       // 沙盒内 skill-libs（ap_http.mjs/py/sh）所在目录，注入给技能脚本
