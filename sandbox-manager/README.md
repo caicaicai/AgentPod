@@ -3,7 +3,10 @@
 把沙盒从"agent 的一个内部组件"变成"平台级的标准能力"：节点自注册、集群判活、
 按负载调度、给调用方签发短期票据。
 
-协议契约（三个代码库都要照着改）在 [`docs/PROTOCOL.md`](docs/PROTOCOL.md)。
+节点侧的执行协议契约在 [`../sandbox-worker/PROTOCOL.md`](../sandbox-worker/PROTOCOL.md)
+（agent service ↔ worker 那一段：租约、端点、鉴权）。**管理端自己的那部分契约
+—— 注册 / 心跳 / 调度 / 票据 —— 没有单独的文档，就写在本文件里**，
+以 [四边都已实现](#四边都已实现) 和 [上线顺序](#上线顺序) 两节为准。
 
 ## 快速启动（Docker）
 
@@ -55,59 +58,48 @@ Docker 部署使用 Node.js 实现，管理台认证方式为内置用户名密�
    得改所有接入方。
 
 管理端把这三件事收拢成一个标准接口。**它只在控制面** —— exec 流量永远直连节点，
-不经过 manager（为什么，见 PROTOCOL §0）。
+不经过 manager：租约要状态亲和（第二条命令得落在写了第一条文件的那个实例上），
+所以实例在响应里回报自己的地址，之后调用方直连它。详见
+[`../sandbox-worker/PROTOCOL.md`](../sandbox-worker/PROTOCOL.md)
+「为什么是「租约」而不是「一次 exec 一次请求」」。
 
 ---
 
 ## 目录结构
 
-> **Legacy 说明**：`workers/` 与 `modules/` 为旧版 Lua 实现，按 legacy 平台的 Git 同步约定
-> 与 `src/` 分开。**当前 Docker / Node.js 部署不依赖这些目录。**
-
 ```
 sandbox-manager/
-├── src/                   # Node.js 实现（当前主路径）
-├── docs/
-│   ├── PROTOCOL.md        # 协议契约 —— 改协议先改这里
-│   └── llms.txt           # legacy 平台手册
-├── workers/               # (legacy) → 平台 Workers
-│   ├── api/
-│   │   ├── nodes_register.lua     POST /api/v1/sandbox/nodes/register
-│   │   ├── nodes_heartbeat.lua    POST /api/v1/sandbox/nodes/heartbeat
-│   │   ├── nodes_deregister.lua   POST /api/v1/sandbox/nodes/deregister
-│   │   ├── nodes_list.lua         GET  /api/v1/sandbox/nodes
-│   │   └── schedule.lua           POST /api/v1/sandbox/schedule
-│   ├── ui/                        管理台专用（会话认证，不要安全令牌）
-│   │   ├── whoami.lua             GET  /api/v1/sandbox/ui/whoami
-│   │   ├── nodes.lua              GET  /api/v1/sandbox/ui/nodes
-│   │   ├── config.lua             GET  /api/v1/sandbox/ui/config
-│   │   ├── simulate.lua           POST /api/v1/sandbox/ui/simulate
-│   │   ├── drain.lua              POST /api/v1/sandbox/ui/drain
-│   │   ├── evict.lua              POST /api/v1/sandbox/ui/evict
-│   │   ├── occupancy.lua          GET  /api/v1/sandbox/ui/occupancy
-│   │   ├── kill.lua               POST /api/v1/sandbox/ui/kill
-│   │   ├── sandbox_open.lua       POST /api/v1/sandbox/ui/sandbox/open
-│   │   ├── sandbox_call.lua       POST /api/v1/sandbox/ui/sandbox/call
-│   │   └── sandbox_close.lua      POST /api/v1/sandbox/ui/sandbox/close
+├── src/                   # Node.js + TypeScript 实现
+│   ├── server.ts          # Fastify 装配与启动
+│   ├── index.ts           # 入口
+│   ├── config.ts          # 环境变量解析与校验
+│   ├── routes/
+│   │   ├── api.ts         # 节点面：注册 / 心跳 / 摘除 / 列表 / 调度
+│   │   └── ui.ts          # 管理台面（会话认证，不收安全令牌）
+│   ├── middleware/
+│   │   ├── api-key.ts     # X-API-SecurityCode 校验（节点面）
+│   │   └── sso-auth.ts    # 管理台登录态
+│   ├── lib/
+│   │   ├── registry.ts    # Redis 节点表 + 摘除标记
+│   │   ├── scheduler.ts   # 候选筛选与排序
+│   │   ├── ticket.ts      # 短期票据签发（lease / admin 两种用途）
+│   │   ├── console.ts     # 管理台身份与写权限闸门
+│   │   ├── debugbox.ts    # 调试沙盒：代管租约、转发到节点
+│   │   ├── nodeadmin.ts   # 管理台 → 节点的运维通道：看占用、杀占用
+│   │   ├── egress.ts      # 沙盒出站策略，随心跳下发
+│   │   ├── artifacts.ts   # 对象存储放行清单
+│   │   ├── store.ts       # Redis 客户端（单机开发时退回内存）
+│   │   ├── cache.ts       # 进程内缓存
+│   │   └── http-client.ts # 带超时的出站封装
 │   └── jobs/
-│       └── reconcile.lua          定时任务（on_task）
-├── modules/               # (legacy) → 平台 Modules（名称只能含字母数字下划线，故全部平铺）
-│   ├── util.lua           配置、响应、校验
-│   ├── registry.lua       Redis 节点表 + 摘除标记
-│   ├── ticket.lua         短期票据签发/校验
-│   ├── scheduler.lua      候选筛选与排序
-│   ├── console.lua        管理台的登录用户身份与写权限闸门
-│   ├── debugbox.lua       管理台调试沙盒：代管租约、转发到节点
-│   ├── nodeadmin.lua      管控台 → 节点的运维通道：看占用、杀占用
-│   ├── egress.lua         沙盒出站策略（拦不拦、放行谁），随心跳下发
-│   └── memstore.lua       单机开发模式的存储（ctx.cache 顶替 Redis）
-├── web/                   # 管理台前端（Vue 3 + Vite，独立部署）
-└── test/                  # 本地测试（legacy Lua 用例，不参与 Git 同步）
-    ├── harness.lua        ctx 桩
-    └── run.lua            106 项测试
+│       └── reconcile.ts   # 定时对账：清掉失联节点
+└── web/                   # 管理台前端（Vue 3 + Vite，独立部署）
 ```
 
-Worker 名称由相对路径推出：`workers/api/schedule.lua` → `api.schedule`（legacy）。
+> 早期版本还有一套 Lua 实现（`workers/`、`modules/`）跑在内部 legacy 平台上，
+> **没有随本仓库开源**。当前 Docker / Node.js 部署与它无关，这里不再列出 ——
+> 列一份仓库里不存在的目录，只会让照着找的人以为自己 clone 少了东西。
+
 
 ---
 
@@ -187,8 +179,10 @@ lua test/run.lua
   破坏性，所以走同一道闸门。只读挡在名单后面则会逼着值班的人为了看一眼负载去要写权限。
 
 访问节点用的是 `scope=admin` 的短期票据，**不是节点的 `SANDBOX_TOKEN`** ——
-管理端不该持有任何节点的长期凭据。这种票据在节点侧换不到租约（见 docs/PROTOCOL.md §1），
-所以一个只读入口不会顺带成为"在生产机器上执行代码"的入口。
+管理端不该持有任何节点的长期凭据。这种票据在节点侧**换不到租约**：用途是分开的，
+`lease` 换租约、`admin` 调运维接口，两者互不包含（见
+[`../sandbox-worker/src/manager/ticket.js`](../sandbox-worker/src/manager/ticket.js)
+的 `ticketScope`）。所以一个只读入口不会顺带成为"在生产机器上执行代码"的入口。
 
 ### 沙盒出站策略为什么配在这儿
 
@@ -343,7 +337,7 @@ curl -s -X POST $MGR/api/v1/sandbox/schedule \
 
 ## 上线顺序
 
-按 `docs/PROTOCOL.md` §8 走，三步各自可回滚：
+三步各自可回滚：
 
 1. **节点接上 manager**：节点配 `SANDBOX_MANAGER_URL/CODE/TICKET_SECRET` 重启。
    此时没有任何调用方走新路径，`GET /api/v1/sandbox/nodes` 能看到集群即成功。

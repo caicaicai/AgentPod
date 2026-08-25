@@ -1,0 +1,69 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 38bbf9e..249e949 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -50,6 +50,41 @@ jobs:
+   test:
+     name: 服务端测试
+     runs-on: ubuntu-latest
++
++    # ── 为什么这条流水线要挂一个真数据库 ────────────────────────────────
++    #
++    # 生产只有 MySQL 一种后端，但整套用例不能要求每个人先起一个库，于是
++    # test/helpers/memory-storage.js 提供了内存替身。替身最大的风险不是"它错了"，
++    # 而是**"它自己对了，但跟真的不一样"** —— 几百条用例全绿，生产照样出问题。
++    # 最容易漂的都是边角：记录不存在时一个回 null 一个抛、merge 传 undefined 时
++    # 一个删字段一个存了个 null、删掉一版之后一个连元信息一起没了一个还留着。
++    #
++    # test/storage-drivers.test.js 早就把每条断言**跑两遍**（替身一遍、真库一遍）
++    # 来挡这个，但真库那一遍在没有 AP_TEST_MYSQL_URL 时**整块跳过**。
++    # 在此之前 CI 从没设过它 —— 也就是说，唯一能发现替身漂移的那道闸，
++    # 一次都没关过，而文件头和 README 都写着"CI 上必须跑"。
++    services:
++      mysql:
++        # 与 docker-compose.yml 里的版本对齐：CI 跑的库和部署的库不是一个大版本，
++        # 那这一遍验的就不是同一件事了。
++        image: mysql:8.0
++        env:
++          MYSQL_ROOT_PASSWORD: aptest
++          MYSQL_DATABASE: agentpod_test
++          MYSQL_USER: aptest
++          MYSQL_PASSWORD: aptest
++        ports:
++          - 3306:3306
++        # 没有健康检查的话，下面的步骤会在 mysqld 还在初始化时就去连，
++        # 表现是随机失败的 ECONNREFUSED —— 比没有这个 job 更糟，因为它教会大家
++        # "红了就重跑一次"。
++        options: >-
++          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -paptest"
++          --health-interval=10s
++          --health-timeout=5s
++          --health-retries=10
++          --health-start-period=30s
++
+     steps:
+       - uses: actions/checkout@v5
+       - uses: actions/setup-node@v5
+@@ -78,9 +113,19 @@ jobs:
+       - name: 隔离契约自检
+         run: npm run check:isolation
+ 
+-      # 测试全程不需要 MySQL —— 存储层在用例里由 test/helpers/memory-storage.js
+-      # 顶替。真要连库的那部分属于集成测试，不在这条流水线上。
+-      - name: 单元测试
++      # AP_TEST_MYSQL_URL 一设，storage-drivers.test.js 里那套契约就会**再跑一遍**
++      # 打真库（见上面 services 那段的理由）。其余用例不碰数据库，行为不变。
++      #
++      # 注意 mysql2 在 package.json 里是 optionalDependencies —— `npm ci` 会装它，
++      # 但万一装不上也不该让整条流水线红掉，所以这里先确认一句它在不在，
++      # 免得"真库那一遍其实又跳过了"这件事再一次悄悄发生。
++      - name: 确认真库那一遍不会被跳过
++        run: |
++          node -e "import('mysql2/promise').then(()=>console.log('mysql2 已就绪'),e=>{console.error('mysql2 没装上，真库契约会被静默跳过');process.exit(1)})"
++
++      - name: 单元测试（含 MySQL 存储契约）
++        env:
++          AP_TEST_MYSQL_URL: mysql://aptest:aptest@127.0.0.1:3306/agentpod_test
+         run: npm test
+ 
+   web:

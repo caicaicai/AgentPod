@@ -46,7 +46,9 @@ openclaw 内部就是用 pi 跑 agent 循环的（`createAgentSession()`）。�
 在云端本来就该由控制面承担，不需要它。
 
 代价：失去 openclaw 在 pi 之上那层补丁（compaction safeguard、context pruning、model failover、
-provider 边角修复）。openclaw 是 MIT，计划挑出来做成 `pi-hardening/`，见 MIGRATION.md。
+provider 边角修复）。openclaw 是 MIT，可以挑出来做成 `pi-hardening/`。
+补回来的进度：compaction 已经有了自己的一套（见「上下文压缩」，可见、可调、可手动触发），
+provider 边角修复见 `src/models/retry.js`；**model failover 仍然没有**，列在下面的诚实清单里。
 
 ### 2. 无状态：状态在 store，不在进程
 
@@ -197,8 +199,21 @@ Vue 运行时与 mermaid 都**自托管并按需加载**（主包只 +12KB，其
 
 ## 还没做的（诚实清单）
 
-见 MIGRATION.md 的进度表。当前骨架**没有**：知识库、
-断线续接、真实凭据代持、浏览器的人工接管（VNC）。
+| 缺什么 | 现状 | 影响 |
+|---|---|---|
+| **知识库 / 文档检索** | 完全没有。替代品是附件（`src/agent/attachments.js`），但那是**一次性**的：文本拼进本轮 prompt，下一轮模型就不记得了，且受 10 万字上限顶着 | 用户没法"让它记住这批文档"，每次都得重传 |
+| **真实凭据代持** | `src/credentials/broker.js` 是透传实现，只在"人坐在浏览器前面"时成立。定时任务靠 `CRON_CREDENTIAL_MODE=stored` 把登录态落盘顶着，**默认关闭**，见下面第 4 节 | 这是个带明确退出条件的临时方案，条件是平台支持代持（或本服务自己签发可吊销的服务令牌） |
+| **浏览器的人工接管（VNC）** | 没有。模型看不到页面，只能靠 aria 快照和截图 | 登录验证码、人机验证这类必须人来点一下的场景走不通 |
+| **模型故障转移** | `src/models/retry.js` 只重试**同一个模型**（它解决的是"网关把偶发故障回成 400 中文文案"那个问题） | 某个模型整体挂掉时没有退路，尽管 `LLM_MODE=db` 下的模型表已经有 `sort` 和 `enabled` |
+| **对外的程序化访问** | 唯一身份是浏览器 JWT（24h、改密即失效）。没有 API Key / 服务令牌 | 无法从 CI、脚本或别的服务调用；也是上面那条"凭据代持"迟迟无解的同一个根因 |
+| **审计日志** | 没有。管理台能改角色、改配额、增删模型、改模型 API key，事后查不到"谁在什么时候改了什么" | — |
+| **数据保留策略** | 作品有单版大小/版本数上限、工作空间有配额，但**会话没有任何上限也没有过期清理**，每人的作品总数也不限 | 长期部署下 MySQL 只涨不落 |
+
+已经做完、但曾经列在这张表上的：**断线续接**（`src/agent/run-registry.js` 缓冲事件，
+`GET /v1/runs/:runId/events` 接回，`/healthz` 用 `runResume` 宣告能力，
+见 `test/run-resume.test.js`）。
+
+更完整的功能盘点与优先级建议见 [FEATURE-REVIEW.md](FEATURE-REVIEW.md)。
 
 沙盒的隔离边界要看清楚：靠每个槽位独立的 namespace（PID/mount/network/uts/ipc），
 "前后两个 job 之间"靠的是内核强制的 namespace 销毁重建，不是"杀进程+抹目录"那种代码

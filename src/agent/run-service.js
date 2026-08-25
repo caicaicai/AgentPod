@@ -335,7 +335,6 @@ export function createRunService({
           config: {
             browserCookieDomains: config.sandbox?.browserCookieDomains || ['.xiaocaicai.com'],
             imageCapable: (model.input || []).includes('image'),
-            webSearch: config.webSearch,
             // 预览 iframe 允许的外部源。工具描述要照着它告诉模型"能不能用 CDN"，
             // 说错了模型会产出一个在预览里必然白屏的页面
             artifacts: { allowedOrigins: config.artifacts?.allowedOrigins || [] },
